@@ -513,8 +513,20 @@ export function defaultSessionName(project: Project | undefined, type: SessionTy
         : type === 'container-shell'
           ? 'bash'
           : 'ps-host'
-  const n = (project?.sessions.filter((s) => s.type === type).length ?? 0) + 1
-  return `${base}-${n}`
+  // One past the highest number in use, not one past the *count* — deleting
+  // `chat-2` of three and adding one used to mint a second `chat-3`. Chats hide
+  // it within a message or two now that they name themselves, but agents and
+  // shells never do.
+  //
+  // Read off every session of the type, whatever it is called: a renamed one no
+  // longer matches, which is correct — its number is free again.
+  let highest = 0
+  for (const s of project?.sessions ?? []) {
+    if (s.type !== type) continue
+    const m = new RegExp(`^${base}-(\\d+)$`).exec(s.name.trim())
+    if (m) highest = Math.max(highest, parseInt(m[1], 10))
+  }
+  return `${base}-${highest + 1}`
 }
 
 function parsePort(v: string): number | undefined {

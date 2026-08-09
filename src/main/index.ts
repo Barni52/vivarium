@@ -69,6 +69,26 @@ function createWindow(): void {
 
   registerIpc(mainWindow)
 
+  // **The renderer never navigates, and never opens a window.** Every link in a
+  // chat message goes out through CH.openExternal, which validates the scheme
+  // before handing anything to Windows — and the reason that design is safe at
+  // all is that this window has nowhere to navigate *to*. That was asserted in
+  // CLAUDE.md and enforced nowhere: the only preventDefault in this process was
+  // the quit interceptor.
+  //
+  // The live path is drag-and-drop. ChatView's root handles onDrop, but it only
+  // covers the chat surface — a file dropped on the sidebar, the title bar or the
+  // empty state hit Chromium's default and navigated the renderer to file:///…,
+  // taking the app with it, into a page that still has the preload and
+  // `window.vivarium` attached under `sandbox: false`.
+  const wc = mainWindow.webContents
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+  wc.on('will-navigate', (e, url) => {
+    // Only a navigation *away*. Vite's dev server reloads the same URL on HMR
+    // recovery, and blocking that would break `npm run dev`.
+    if (url !== wc.getURL()) e.preventDefault()
+  })
+
   // The default menu is hidden (frame: false) but its accelerators still fire,
   // and they hijack keys terminals need — Ctrl+W (Close) would kill the window
   // instead of doing a word-delete, Ctrl+R (reload) would clobber shell reverse-

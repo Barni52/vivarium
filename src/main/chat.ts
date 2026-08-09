@@ -439,6 +439,19 @@ interface Live {
   mapper: ChatMapper | null
   /** outstanding can_use_tool requests — *any* of them means `waiting` */
   pending: Map<string, ChatBlockingCard>
+  /**
+   * The `input` object each outstanding can_use_tool arrived with, so the answer
+   * can rebuild `updatedInput` from the original rather than from what the
+   * renderer echoes back.
+   *
+   * On `Live` rather than on the service, so it goes when the session does:
+   * entries are removed in `respond()`, and `close()` tears a session down
+   * *without* answering its outstanding cards — so a service-wide map kept every
+   * such input for the life of the app. Bytes rather than a leak that matters,
+   * but this was also the only piece of per-session state that lived anywhere
+   * else.
+   */
+  inputs: Map<string, Json>
   /** our own control requests, awaiting their response */
   waiters: Map<string, (r: { ok: boolean; response: Json | null; error: string }) => void>
   reqSeq: number
@@ -504,12 +517,6 @@ export class ChatService {
    * already dents twice. A stale entry can only mis-suggest.
    */
   private models: ChatModelOption[] | null = null
-  /**
-   * The `input` object each outstanding can_use_tool arrived with, so the answer
-   * can rebuild `updatedInput` from the original rather than from what the
-   * renderer echoes back.
-   */
-  private inputs = new Map<string, Json>()
 
   constructor(
     private docker: DockerService,
@@ -587,6 +594,7 @@ export class ChatService {
       turn: 0,
       mapper: null,
       pending: new Map(),
+      inputs: new Map(),
       waiters: new Map(),
       reqSeq: 0,
       malformed: 0,
@@ -1550,7 +1558,7 @@ export class ChatService {
       at: Date.now()
     }
     // Remembered so the answer can rebuild `updatedInput` from the original.
-    this.inputs.set(requestId, input)
+    l.inputs.set(requestId, input)
     l.pending.set(requestId, card)
     this.emit({ kind: 'blocking', sessionId: l.session.id, card })
     // `waiting` is *any* pending can_use_tool, not just the two
@@ -1875,7 +1883,7 @@ export class ChatService {
   async answer(sessionId: string, requestId: string, answer: ChatAnswer): Promise<void> {
     const l = this.live.get(sessionId)
     if (!l) return
-    const input = this.inputs.get(requestId) ?? {}
+    const input = l.inputs.get(requestId) ?? {}
 
     if (answer.behavior === 'plan-approve') {
       // A plain allow, and deliberately **no** `updatedPermissions: setMode`. That
@@ -1941,7 +1949,7 @@ export class ChatService {
   private respond(l: Live, requestId: string, result: Json): void {
     if (!l.pending.has(requestId)) return
     l.pending.delete(requestId)
-    this.inputs.delete(requestId)
+    l.inputs.delete(requestId)
     this.write(l, {
       type: 'control_response',
       response: { subtype: 'success', request_id: requestId, response: result }

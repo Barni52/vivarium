@@ -167,7 +167,30 @@ export class UsageService {
       limits: [],
       fetchedAt: Date.now()
     })
-    if (Date.now() < this.blockedUntil) return fail('rate-limited')
+    /**
+     * A *transient* failure is answered with the last good snapshot rather than
+     * an error, when there is one.
+     *
+     * Two reasons, and the second is the one that was actually broken. The
+     * renderer already keeps its last good snapshot across a failed poll
+     * (refreshUsage), so `fail()` here only ever meant "the store keeps the copy
+     * it already had" — while *this* copy is the one `applyStreamLimits` merges
+     * a stream top-up into. Returning `fail()` was therefore what made that merge
+     * unobservable: `this.last` was written by this method and read by nothing
+     * that could reach the renderer, so a topped-up snapshot had no way out of
+     * this service and the next poll overwrote it.
+     *
+     * It carries its own `fetchedAt`, which is deliberately *not* re-stamped —
+     * the TitleBar dims a stale reading off that timestamp, and the whole point
+     * is that this answer is honestly old.
+     *
+     * Credential failures are excluded: they are not transient, and hiding
+     * auth-expired behind a stale-but-plausible reading is how someone spends an
+     * afternoon wondering why the numbers stopped moving.
+     */
+    const stale = (error: string): UsageSnapshot => this.last ?? fail(error)
+
+    if (Date.now() < this.blockedUntil) return stale('rate-limited')
     let creds = await this.token(false)
     if (!creds) return fail('no-credentials')
     let res = await this.request(creds.accessToken)
@@ -179,10 +202,10 @@ export class UsageService {
     }
     if (res.status === 429) {
       this.blockedUntil = Date.now() + (res.retryAfter ?? 300) * 1000
-      return fail('rate-limited')
+      return stale('rate-limited')
     }
-    if (res.status === 0) return fail('network')
-    if (!res.body) return fail(`http-${res.status}`)
+    if (res.status === 0) return stale('network')
+    if (!res.body) return stale(`http-${res.status}`)
     const snap = parseSnapshot(res.body)
     if (snap.limits.length) this.last = snap
     return snap

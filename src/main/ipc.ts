@@ -542,18 +542,15 @@ export function registerIpc(win: BrowserWindow): void {
     (_e, name: string): Promise<VolumeRemoveResult> => docker.removeVolume(name)
   )
 
-  ipcMain.handle(CH.containerStates, async (): Promise<ContainerState[]> => {
-    const cfg = store.get()
-    const out: ContainerState[] = []
-    for (const p of cfg.projects) {
-      out.push({
-        projectId: p.id,
-        running: await docker.isRunning(p),
-        exists: await docker.containerExists(p)
-      })
-    }
-    return out
-  })
+  // One `docker ps -a` for every project, rather than two `docker inspect` each.
+  // The renderer polls this every 3 seconds, and the per-project pair was 2N
+  // process launches per tick — the same burst OPEN_LIMIT exists to meter, since
+  // a loaded daemon answers `docker inspect` non-zero and isRunning() reads that
+  // as "stopped". See DockerService.containerStates.
+  ipcMain.handle(
+    CH.containerStates,
+    (): Promise<ContainerState[]> => docker.containerStates(store.get().projects)
+  )
 
   const sinkFor = (projectId: string) => (data: string): void =>
     emit(CH.containerOutput, { projectId, data })
@@ -618,8 +615,27 @@ export function registerIpc(win: BrowserWindow): void {
     }
   }
 
-  async function scanTree(dir: string, depth: number): Promise<OutputNode[]> {
-    if (depth > 8) return [] // guard against pathological nesting
+  // Bounds for the shared-output walk, matching what `scanMounts` below already
+  // argues for: this feeds a panel, not a file browser.
+  //
+  // It had only a depth guard, and the folder it walks is mounted read-write
+  // into *every* container at /workspace/output — it is where agents have been
+  // told to drop artifacts. The first build, unpack or stray `npm install` that
+  // lands in there made every fs.watch event walk the whole thing, on a 200 ms
+  // debounce, so a process writing continuously re-walked continuously.
+  //
+  // The skip list is deliberately smaller than MOUNT_SKIP: `dist` and `out` are
+  // plausible names for something an agent *meant* to leave here, and hiding a
+  // real artifact is worse than walking it.
+  const OUTPUT_SKIP = new Set(['node_modules', '.git'])
+  const OUTPUT_MAX_DEPTH = 8
+  /** Per directory. Nobody scrolls to the 400th sibling in a side panel. */
+  const OUTPUT_MAX_ENTRIES = 400
+  /** Whole tree, so a wide shallow explosion is bounded as well as a deep one. */
+  const OUTPUT_MAX_NODES = 4000
+
+  async function scanTree(dir: string, depth: number, budget: { left: number }): Promise<OutputNode[]> {
+    if (depth > OUTPUT_MAX_DEPTH || budget.left <= 0) return []
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
@@ -627,14 +643,19 @@ export function registerIpc(win: BrowserWindow): void {
       return []
     }
     const byName = (a: { name: string }, b: { name: string }): number => a.name.localeCompare(b.name)
-    const dirs = entries.filter((e) => e.isDirectory()).sort(byName)
-    const files = entries.filter((e) => e.isFile()).sort(byName)
+    const keep = entries.filter((e) => !OUTPUT_SKIP.has(e.name))
+    const dirs = keep.filter((e) => e.isDirectory()).sort(byName)
+    const files = keep.filter((e) => e.isFile()).sort(byName)
     const out: OutputNode[] = []
-    for (const d of dirs) {
+    // Sliced together rather than per kind, so one directory cannot spend the
+    // cap on folders and leave no room for the files beside them.
+    for (const d of dirs.slice(0, OUTPUT_MAX_ENTRIES)) {
+      if (budget.left-- <= 0) return out
       const p = join(dir, d.name)
-      out.push({ name: d.name, path: p, type: 'dir', children: await scanTree(p, depth + 1) })
+      out.push({ name: d.name, path: p, type: 'dir', children: await scanTree(p, depth + 1, budget) })
     }
-    for (const f of files) {
+    for (const f of files.slice(0, Math.max(0, OUTPUT_MAX_ENTRIES - out.length))) {
+      if (budget.left-- <= 0) return out
       out.push({ name: f.name, path: join(dir, f.name), type: 'file' })
     }
     return out
@@ -662,7 +683,7 @@ export function registerIpc(win: BrowserWindow): void {
 
   ipcMain.handle(CH.outputTree, async (): Promise<OutputNode[]> => {
     const folder = store.get().sharedOutputFolder
-    return folder ? scanTree(folder, 0) : []
+    return folder ? scanTree(folder, 0, { left: OUTPUT_MAX_NODES }) : []
   })
 
   ipcMain.handle(CH.openOutputFile, async (_e, abs: string): Promise<string> => {

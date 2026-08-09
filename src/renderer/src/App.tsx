@@ -63,11 +63,29 @@ export function App(): React.ReactElement {
     // debug handle for automated smoke tests / DevTools inspection
     ;(window as unknown as { __vivStore?: typeof useStore }).__vivStore = useStore
     init()
-    // keep the running/stopped indicators + git branches fresh
-    const poll = setInterval(() => {
+    // Keep the running/stopped indicators + git branches fresh. One `docker ps`
+    // per tick now rather than two `docker inspect` per project (see
+    // DockerService.containerStates), which is what makes a 3s cadence
+    // reasonable at all.
+    //
+    // Skipped while the window is hidden: nothing on screen is reading these,
+    // and a minimized app has no business spawning a docker client every three
+    // seconds for hours. Chromium throttles hidden-window timers to roughly once
+    // a minute on its own, but that is a heuristic about *timers*, not a promise
+    // about this one — and the first tick after a restore refreshes anyway,
+    // because becoming visible fires the listener below.
+    const tick = (): void => {
+      if (document.visibilityState === 'hidden') return
       refreshStates()
       refreshBranches()
-    }, 3000)
+    }
+    const poll = setInterval(tick, 3000)
+    // Coming back into view should not wait out the rest of the interval — the
+    // indicators are the first thing looked at, and they are up to 3s stale.
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     // Plan usage: the endpoint allows ~5 requests per 5 minutes (measured
     // 2026-07-22; tripping it = ~5 min lockout), so poll every 3 minutes —
     // two per window, leaving headroom for this startup fetch and restarts.
@@ -104,6 +122,7 @@ export function App(): React.ReactElement {
     return () => {
       clearInterval(poll)
       clearInterval(usagePoll)
+      document.removeEventListener('visibilitychange', onVisible)
       if (claudeDebounce) clearTimeout(claudeDebounce)
       off()
       offOutput()

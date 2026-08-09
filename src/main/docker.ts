@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'crypto'
 import { app } from 'electron'
 import type {
   ClaudeVersionInfo,
+  ContainerState,
   Project,
   VolumeInfo,
   VolumeRemoveResult,
@@ -300,9 +301,21 @@ export class DockerService {
   }
 
   /** Run a docker command, streaming combined output to a sink line-by-line. */
-  private execStream(args: string[], sink: LineSink, stdin?: string): Promise<number> {
-    return new Promise(async (resolve) => {
-      const bin = await this.docker()
+  private async execStream(args: string[], sink: LineSink, stdin?: string): Promise<number> {
+    // Resolved *before* the promise, not inside it. This used to be an `async`
+    // executor, where `this.docker()` throwing `docker-missing` rejected a
+    // promise nobody held and left the returned one unsettled for good — a
+    // container start whose progress streams into a terminal, spinning forever
+    // with no timeout behind it. Every caller today happens to check `detect()`
+    // first, which is why it was never seen; nothing enforced that.
+    let bin: string
+    try {
+      bin = await this.docker()
+    } catch {
+      sink('\r\n[vivarium] docker not found on PATH. Start Docker/Rancher Desktop.\r\n')
+      return 1
+    }
+    return new Promise((resolve) => {
       const child = spawn(bin, args, { windowsHide: true })
       const forward = (d: Buffer): void => sink(d.toString().replace(/\n/g, '\r\n'))
       child.stdout.on('data', forward)
@@ -617,6 +630,69 @@ export class DockerService {
     ])
     if (r.code !== 0) return false
     return r.stdout.trim() === 'true'
+  }
+
+  /**
+   * Every project's container state, in **one** docker launch.
+   *
+   * The per-project pair (`isRunning` + `containerExists`) is two `docker.exe`
+   * launches each, and the renderer polls this every 3 seconds — so six projects
+   * were twelve process spawns per tick, awaited one after another, on the
+   * platform where spawning is the expensive part. That is also the *same* burst
+   * `OPEN_LIMIT` exists to meter: a loaded daemon answers `docker inspect`
+   * non-zero, which `isRunning` reads as "container stopped", so the poll was
+   * quietly competing with every session open.
+   *
+   * `docker ps -a` answers for all of them at once, and it answers *consistently*
+   * — one snapshot rather than 2N reads taken at different moments, which is what
+   * let a container be reported as existing-but-stopped when it had just started.
+   *
+   * **Matched by name, not by the `vivarium.project` label**, even though the
+   * label exists and reads like the better key. Two reasons. `docker ps` renders
+   * `.Labels` as one flat comma-joined string rather than a map, so pulling one
+   * out means `{{.Label "…"}}` and a template that fails *closed* — a typo would
+   * exit non-zero and report every container stopped, which is a worse failure
+   * than the one being fixed. And name matching is what `isRunning` and
+   * `containerExists` already do, so this stays exactly equivalent to them:
+   * renaming a project changes `containerName`, and its old container should go
+   * on reading as absent here precisely because nothing else can reach it either.
+   *
+   * The `name=vivarium-` filter follows `readSharedCredentials`, which scopes the
+   * same way. A project with no container is simply absent from the output, which
+   * is exactly `{exists: false}`.
+   */
+  async containerStates(projects: Project[]): Promise<ContainerState[]> {
+    const out: ContainerState[] = projects.map((p) => ({
+      projectId: p.id,
+      running: false,
+      exists: false
+    }))
+    if (!(await this.detect())) return out
+    // Capped like every other command that talks to a daemon which may be
+    // starting up: this sits behind a handler the renderer awaits every 3s, and
+    // an uncapped hang would stall the poll rather than report "not running".
+    const r = await this.exec(
+      ['ps', '-a', '--filter', 'name=vivarium-', '--format', '{{.Names}}\t{{.State}}'],
+      10_000
+    )
+    if (r.code !== 0) return out
+
+    const byName = new Map<string, string>()
+    for (const line of r.stdout.split('\n')) {
+      const [name, state] = line.split('\t')
+      if (name && state) byName.set(name.trim(), state.trim())
+    }
+
+    projects.forEach((p, i) => {
+      const state = byName.get(this.containerName(p))
+      if (state === undefined) return
+      out[i].exists = true
+      // 'running' is the only state that counts; 'created', 'exited', 'paused',
+      // 'restarting', 'dead' and 'removing' are all not-running, which matches
+      // isRunning()'s `{{.State.Running}} == true` exactly.
+      out[i].running = state === 'running'
+    })
+    return out
   }
 
   /** Does an existing container have the /vivarium hook-bridge mount? */
@@ -1101,8 +1177,19 @@ export class DockerService {
    * the parent transcript — the parent file already is the collapsed view and
    * this file already is the expansion — so this is only ever read on demand,
    * keyed by the agentId the parent's own tool result reports.
+   *
+   * **`agentId` is the one interpolation here that is not a `randomUUID()`.** It
+   * is parsed out of tool-result content (`chatMapper`'s `task-id` note tag, or
+   * `toolUseResult.agentId`), so it is model-influenced data going into `sh -c`.
+   * The blast radius is small and worth stating rather than implying: the shell
+   * is inside a container where the agent already runs with
+   * `--dangerously-skip-permissions`, so nothing reachable through it was out of
+   * reach anyway. It is validated regardless, because the neighbouring
+   * interpolations (`deleteTranscripts`, `askClaude`) each stop and argue for
+   * their own safety and this one had the same shape with no argument behind it.
    */
   async readSubagentLog(project: Project, uuid: string, agentId: string): Promise<string | null> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(agentId)) return null
     const cmd = `cat /home/node/.claude/projects/*/${uuid}/subagents/agent-${agentId}.jsonl 2>/dev/null`
     const r = await this.execBuf(['exec', this.containerName(project), 'sh', '-c', cmd], 30_000)
     return r.stdout.length > 0 ? r.stdout.toString('utf8') : null
@@ -1175,7 +1262,14 @@ export class DockerService {
    * interpolation wrong is no longer one file.
    */
   async deleteTranscripts(uuids: string[]): Promise<boolean> {
-    const safe = uuids.filter((u) => /^[0-9a-fA-F-]{36}$/.test(u))
+    // The actual uuid shape, not "36 characters of hex and hyphens" — which also
+    // accepted 36 hyphens. Nothing unsafe got through either way (no glob
+    // character, no slash, no separator), but this is the one place in the file
+    // where a comment is doing the safety work, and the test should say the same
+    // thing the comment above does.
+    const safe = uuids.filter((u) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(u)
+    )
     if (safe.length === 0) return true
     if (!(await this.detect())) return false
     // Or `docker run -v` would *create* claude-box-creds on a machine that has

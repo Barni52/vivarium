@@ -4,6 +4,12 @@ dist/
 *.log
 .DS_Store
 
+# tsc's incremental-compile caches. They were tracked, which meant any
+# command that ran a typecheck dirtied the working tree — and they are keyed
+# to absolute paths on one machine, so they conflict on every branch and mean
+# nothing to anyone else.
+*.tsbuildinfo
+
 # Local agent-skill config (mattpocock-skills). Machine-local setup, not project
 # source — and the repo is public, so it stays out of it.
 docs/agents/
