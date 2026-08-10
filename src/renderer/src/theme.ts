@@ -70,6 +70,25 @@ const MIDNIGHT = {
    * code span or a bold run still reads as code or bold.
    */
   find: 'rgba(217,160,106,.30)',
+  /**
+   * How a chat control lifts under the pointer, and how it presses.
+   *
+   * A `filter`, because that is the only thing that can reach a control whose
+   * background is an inline style (see the rule in GLOBAL_CSS) — but a filter
+   * has a *direction*, and the direction is not a constant across themes. This
+   * is the same trap `--on-accent2` documents from the other side, and paper
+   * fell into it: `brightness(1.32)` lifts a dark surface, and on a theme whose
+   * card is `#fff` and whose page is cream it pushes the fill to pure white and
+   * washes the hairline border out with it — a hovered tool card stopped looking
+   * like a card at all.
+   *
+   * So the dark themes brighten and paper darkens, by the amount each needs to
+   * shift a near-`--card` surface visibly against its own page. Saturated fills
+   * are the exception and go the other way on every theme — they are dark
+   * against all three grounds — which is what the `[data-fill]` rule is for.
+   */
+  'hover-lift': 'brightness(1.32)',
+  'press-lift': 'brightness(.9)',
   /** the empty half of a progress bar */
   track: '#2a3042',
   /** the one filled accent: "Add project", the active-item left bar */
@@ -181,6 +200,8 @@ const GRAPHITE: Tokens = {
   muted: '#8c8a83',
   dim: '#6a6862',
   find: 'rgba(201,160,106,.30)',
+  'hover-lift': 'brightness(1.32)',
+  'press-lift': 'brightness(.9)',
   track: '#2f2f2d',
   accent: '#b8792b',
   'accent-fg': '#1a1305',
@@ -245,6 +266,10 @@ const PAPER: Tokens = {
   muted: '#78736a',
   dim: '#9a9488',
   find: 'rgba(154,91,28,.26)',
+  // Down, not up. Everything here is already near white; lifting it has
+  // nowhere to go but pure white, taking the border with it.
+  'hover-lift': 'brightness(.94)',
+  'press-lift': 'brightness(.88)',
   track: '#e2ddd0',
   accent: '#1f5f8b',
   'accent-fg': '#f4fbff',
@@ -730,12 +755,19 @@ export const GLOBAL_CSS = `${APP_CSS}
      a tool card and the thinking row, which are divs because they wrap block
      content a button may not contain. */
   .vchat button:not(:disabled),.vchat [data-click]{transition:filter .12s,background-color .12s,border-color .12s,color .12s}
-  .vchat button:not(:disabled):hover,.vchat [data-click]:hover{filter:brightness(1.32)}
-  .vchat button:not(:disabled):active,.vchat [data-click]:active{filter:brightness(.9)}
-  /* …with one exception. 1.32 is tuned for a transparent chip, where it has to
-     lift a border and a label off the page; on the send button's saturated fill
-     the same number reads as the button changing colour. */
-  .vchat button[data-send]:not(:disabled):hover{filter:brightness(1.1)}
+  .vchat button:not(:disabled):hover,.vchat [data-click]:hover{filter:var(--hover-lift)}
+  .vchat button:not(:disabled):active,.vchat [data-click]:active{filter:var(--press-lift)}
+  /* …with two exceptions, and they are the same exception twice. The lift above
+     is tuned for a *surface* — a transparent chip, a card on the page fill — and
+     a saturated button is not one: the amount reads as the fill changing colour
+     rather than lighting up, and on paper the per-theme direction is wrong for
+     it as well, because an accent fill is dark against all three grounds while
+     everything around it is light. So filled controls lift by a little, on every
+     theme. data-send is the composer's; data-fill is every other one. */
+  .vchat button[data-send]:not(:disabled):hover,
+  .vchat button[data-fill]:not(:disabled):hover{filter:brightness(1.12)}
+  .vchat button[data-send]:not(:disabled):active,
+  .vchat button[data-fill]:not(:disabled):active{filter:brightness(.92)}
   /* A fenced code block's copy button. It is revealed by a hover on the
      *block* rather than on itself, which is the one thing an inline style
      cannot say — the same argument the two rules above make, and the reason

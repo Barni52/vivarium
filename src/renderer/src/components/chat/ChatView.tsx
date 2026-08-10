@@ -223,6 +223,18 @@ export function ChatView({
     return () => ro.disconnect()
   }, [])
 
+  /**
+   * Put the newest row on screen and re-arm the tail pin.
+   *
+   * The one gesture that is not a guess about what the reader wants: you just
+   * sent a message, so you are looking at the bottom.
+   */
+  const stickToBottom = React.useCallback((): void => {
+    pinned.current = true
+    const el = logRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [])
+
   // Becoming visible is not a resize (the view is hidden with `visibility`, so
   // it keeps its layout the whole time), and a chat that was at the bottom when
   // you left it should be at the bottom when you come back.
@@ -362,6 +374,34 @@ export function ChatView({
     if (!entries.some(running)) return entries
     return [...entries.filter((e) => !running(e)), ...entries.filter(running)]
   }, [entries])
+
+  /**
+   * Follow the tail when a **row is added**, synchronously with the commit that
+   * added it.
+   *
+   * The ResizeObserver above is still the general mechanism and still earns its
+   * place — it is the only thing that catches growth which adds no row, which is
+   * every frame of a streaming answer. What it is not is *guaranteed*: it
+   * delivers on its own schedule, after layout, and a send whose row lands in a
+   * frame where the observation does not fire leaves the message you just typed
+   * below the fold. That was reported and I could not reproduce it in a real
+   * engine — the observer fires in every layout I could build, wrapper rows,
+   * zoom and all — so rather than keep guessing at the trigger this stops the
+   * question mattering: a new row is scrolled to as part of the same commit,
+   * with nothing to be delivered late.
+   *
+   * `useLayoutEffect`, not `useEffect`: it runs after the DOM is written and
+   * before paint, so reading `scrollHeight` here forces a fresh layout and the
+   * jump is never one frame behind.
+   *
+   * Guarded by `pinned` exactly as the observer is, so none of this yanks a
+   * reader who has scrolled up.
+   */
+  const lastRowId = rows.length > 0 ? rows[rows.length - 1].id : null
+  React.useLayoutEffect(() => {
+    const el = logRef.current
+    if (el && pinned.current) el.scrollTop = el.scrollHeight
+  }, [lastRowId, rows.length])
 
   /**
    * The messages a revert can be aimed at, newest first.
@@ -624,7 +664,10 @@ export function ChatView({
     setDraft('')
     setChips([])
     setMenu(null)
-    pinned.current = true
+    // Jump now *and* re-arm the pin: the row for this message arrives an IPC
+    // round trip later, so this scrolls the composer's own reflow into place and
+    // the layout effect above catches the row when it lands.
+    stickToBottom()
     void sendChat(session.id, text, ready).then((ok) => {
       // The process was gone — nothing was written and no row will ever appear
       // for it. Clearing the box optimistically is right (the send all but always
@@ -1849,7 +1892,11 @@ function BlockingBar({
             this app makes sure is bypass by launching there and transitioning in
             (main/chat.ts). With two modes there is nothing else approval could
             mean — so the toggle visibly moves to bypass, and this time it takes. */}
-        <button onClick={() => onAnswer({ behavior: 'plan-approve' })} style={primaryButton(false)}>
+        <button
+          data-fill=""
+          onClick={() => onAnswer({ behavior: 'plan-approve' })}
+          style={primaryButton(false)}
+        >
           Approve &amp; run
         </button>
         <button
@@ -1876,7 +1923,11 @@ function BlockingBar({
         {card.title}
       </span>
       <div style={{ flex: 1 }} />
-      <button onClick={() => onAnswer({ behavior: 'allow' })} style={primaryButton(false)}>
+      <button
+        data-fill=""
+        onClick={() => onAnswer({ behavior: 'allow' })}
+        style={primaryButton(false)}
+      >
         Allow
       </button>
       <button onClick={() => onAnswer({ behavior: 'deny' })} style={secondaryButton}>
@@ -2315,7 +2366,12 @@ function QuestionCard({
         {/* The answers map is keyed by question *text*: an `allow` without one
             yields "The user did not answer the questions." with no error
             raised anywhere, which would silently break the card. */}
-        <button disabled={!ready} onClick={() => answer()} style={primaryButton(!ready)}>
+        <button
+          data-fill=""
+          disabled={!ready}
+          onClick={() => answer()}
+          style={primaryButton(!ready)}
+        >
           Answer
         </button>
       </div>
