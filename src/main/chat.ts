@@ -298,6 +298,53 @@ function mergeRanges(ranges: ChatRewindRange[]): ChatRewindRange[] {
  */
 const SILENCE_MS = 60_000
 
+/**
+ * The budget once the CLI has **proved it is working this turn**, or is doing
+ * something known to go quiet for a long time.
+ *
+ * 60s is right for the failure above and wrong for everything slow, and
+ * compaction is the case that exposed it: `/compact` re-reads the whole
+ * conversation and summarises it through a model call, emitting *nothing* on the
+ * stream while it does. On a large conversation that reliably passes a minute —
+ * so the turn was failed under the user, an alert row appeared claiming no
+ * response, the clock was dropped, and then the compaction landed and completed
+ * normally. The turn was never broken; the threshold was.
+ *
+ * Two things get this budget. A turn that has emitted **any** frame has shown
+ * the process is alive and talking, which is exactly what the 60s test is
+ * looking for — after that, silence means "busy", and auto-compaction (which
+ * strikes mid-turn, after output) lands here. And a turn whose message *is* a
+ * slow command starts here, because manual `/compact` produces its long silence
+ * before its first frame and would otherwise never reach the first case.
+ *
+ * Ten minutes rather than something tighter: the point of the number is to catch
+ * a CLI that will never speak again, and nothing is lost by being patient about
+ * it — the turn clock is on screen counting the whole time, so a slow turn is
+ * never mistaken for a stuck app.
+ */
+const SILENCE_BUSY_MS = 600_000
+
+/**
+ * Commands that are silent for a long time *before* their first frame.
+ *
+ * Only `/compact` today, and deliberately not a guess at others: a command that
+ * is wrongly listed here loses a minute of detection, so membership is by
+ * observation. Everything else is covered by the "has it emitted a frame" test,
+ * which needs no list at all.
+ */
+const SLOW_COMMANDS = new Set(['compact'])
+
+/** The `/name` a message leads with, lowercased — `null` when it is not one. */
+function leadingCommand(text: string): string | null {
+  const m = /^\s*\/([A-Za-z0-9_:-]+)/.exec(text)
+  return m ? m[1].toLowerCase() : null
+}
+
+/** How long this turn's silence is allowed to run before it counts as failure. */
+function silenceBudget(l: Live): number {
+  return l.spoke || l.slowTurn ? SILENCE_BUSY_MS : SILENCE_MS
+}
+
 /** How many entries the renderer mounts; the rest come from `chat:earlier`. */
 const MOUNT_WINDOW = 300
 
@@ -477,6 +524,13 @@ interface Live {
    */
   usage: Map<string, ChatTurnTokens>
   turnRunning: boolean
+  /**
+   * This turn has emitted at least one frame, so the CLI is provably alive and
+   * a later silence means "busy" rather than "broken" (see SILENCE_BUSY_MS).
+   */
+  spoke: boolean
+  /** this turn's message was a command known to go quiet for minutes */
+  slowTurn: boolean
   /** set by an interrupt so the turn's `idle` raises no attention flag */
   interrupted: boolean
   /**
@@ -510,13 +564,26 @@ interface Live {
 export class ChatService {
   private live = new Map<string, Live>()
   /**
-   * The `list_models` answer, cached for the app run. In memory, never in
-   * config.json: the list is global to the account and CLI version, so sharding
-   * it per project the way the slash-command cache is sharded would fragment a
-   * global fact — and persisting it would be a third dent in a rule this feature
-   * already dents twice. A stale entry can only mis-suggest.
+   * The `list_models` answer, cached **per project**, for the app run.
+   *
+   * It used to be one list for the whole app, on the reasoning that the models
+   * are a property of the account and the CLI version. The account half is true;
+   * the CLI half is not, and this app is the reason — Claude Code is installed
+   * *inside each container*, the Claude Code dialog updates one container at a
+   * time, and a project created months apart from another is routinely on a
+   * different version. So the first project to answer cached its list for every
+   * other one, and a project whose container knew about a new model showed the
+   * older project's menu: the reported "I can't see Opus 5 in a new project,
+   * but my other sessions are fine".
+   *
+   * Per project is the same shape `Project.slashCommands` already has, for the
+   * same reason (a container-scoped fact), and it keeps the same standing: a
+   * stale entry can only mis-suggest, because the CLI validates `--model`.
+   * In memory rather than in config.json — nothing here needs to survive a
+   * restart, and persisting it would be a third dent in a rule this feature
+   * already dents twice.
    */
-  private models: ChatModelOption[] | null = null
+  private models = new Map<string, ChatModelOption[]>()
 
   constructor(
     private docker: DockerService,
@@ -607,6 +674,8 @@ export class ChatService {
       streamTimer: null,
       usage: new Map(),
       turnRunning: false,
+      spoke: false,
+      slowTurn: false,
       interrupted: false,
       modeSwitch: false,
       titleWanted: false,
@@ -985,13 +1054,15 @@ export class ChatService {
       l.silence = null
       return
     }
-    l.silence = setTimeout(() => this.onSilence(l), SILENCE_MS)
+    l.silence = setTimeout(() => this.onSilence(l), silenceBudget(l))
   }
 
   private onSilence(l: Live): void {
     l.silence = null
     if (!l.turnRunning) return
     l.turnRunning = false
+    const waited = Math.round(silenceBudget(l) / 1000)
+    const said = waited >= 120 ? `${Math.round(waited / 60)}m` : `${waited}s`
     this.appendEntries(l, [
       {
         id: `timeout:${l.turn}`,
@@ -999,7 +1070,7 @@ export class ChatService {
         at: Date.now(),
         turn: l.turn,
         kind: 'stop',
-        text: 'no response for 60s',
+        text: `no response for ${said}`,
         tone: 'alert',
         retry: true
       }
@@ -1013,13 +1084,23 @@ export class ChatService {
       // healthy while the CLI is broken (or the reverse), so it never gates the
       // chat — but when it happens to be set, it is the likeliest cause and the
       // row can point at the remedy the app already has.
-      error: { kind: 'timeout', message: 'the CLI answered nothing for 60s' }
+      error: { kind: 'timeout', message: `the CLI answered nothing for ${said}` }
     })
   }
 
   // ---- frame handling -----------------------------------------------------
   private frame(l: Live, f: Json): void {
     const type = str(f.type)
+
+    // The first frame of a turn is the proof the 60s test is actually looking
+    // for, so the budget widens the moment it lands. Re-armed here rather than
+    // left to the next chunk: `onStdout` arms *before* it frames, so the timer
+    // running right now is the narrow one this frame just disproved — and a
+    // compaction that begins after one frame would fail against it.
+    if (!l.spoke) {
+      l.spoke = true
+      this.armSilence(l)
+    }
 
     // Everything except a token delta settles the picture, so the buffered
     // deltas are shipped first. Ordering within `chat:event` is the guarantee
@@ -1446,6 +1527,19 @@ export class ChatService {
     l.titleWanted = false
   }
 
+  /**
+   * Drop a project's cached model list.
+   *
+   * Called when its container's Claude Code is updated: the list is a property
+   * of that CLI, and the whole point of the update dialog is that the CLI
+   * changes underneath a project. Without this the menu would go on offering the
+   * old version's models until the app restarted — which is the same bug the
+   * per-project cache fixes, arriving by a different route.
+   */
+  forgetModels(projectId: string): void {
+    this.models.delete(projectId)
+  }
+
   /** The context menu's "Retitle": generate one now, whoever named it last. */
   retitle(sessionId: string): void {
     const l = this.live.get(sessionId)
@@ -1637,6 +1731,11 @@ export class ChatService {
     l.malformed = 0
     l.mapper = null
     l.turnRunning = true
+    l.spoke = false
+    // `/compact` is the one message that reliably goes quiet for minutes before
+    // it says anything, so this turn starts on the wide budget instead of
+    // earning it with a first frame that will not come in time.
+    l.slowTurn = SLOW_COMMANDS.has(leadingCommand(text) ?? '')
     l.interrupted = false
     l.streaming = null
     // The reading is per turn, so the messages of the last one are not this one's.
@@ -1994,7 +2093,7 @@ export class ChatService {
     const resolved =
       str(r.response?.model) ||
       str(r.response?.resolvedModel) ||
-      this.models?.find((m) => m.value === model)?.detail ||
+      this.models.get(l.project.id)?.find((m) => m.value === model)?.detail ||
       model
     l.model = resolved
     this.emit({ kind: 'meta', sessionId, model: resolved })
@@ -2018,9 +2117,19 @@ export class ChatService {
    * made the menu read as a list of four generic aliases with no sign of which
    * generation they point at.
    */
-  async listModels(sessionId: string): Promise<ChatModelOption[]> {
-    if (this.models) return this.models
-    const l = this.live.get(sessionId) ?? [...this.live.values()][0]
+  async listModels(sessionId: string, projectId: string | null): Promise<ChatModelOption[]> {
+    const own = this.live.get(sessionId)
+    const key = projectId ?? own?.project.id ?? null
+    if (key) {
+      const cached = this.models.get(key)
+      if (cached) return cached
+    }
+    // A session that is not live yet can still be answered by a sibling chat in
+    // the **same project** — same container, same CLI, same answer. Never by
+    // another project's, which is what `[...this.live.values()][0]` used to do:
+    // opening the picker on a chat whose process had not finished spawning
+    // handed back whatever unrelated container happened to be first in the map.
+    const l = own ?? (key ? [...this.live.values()].find((x) => x.project.id === key) : undefined)
     if (!l) return FALLBACK_MODELS
     const r = await this.request(l, { subtype: 'list_models' })
     const options: ChatModelOption[] = []
@@ -2043,7 +2152,7 @@ export class ChatService {
     }
     // Cached only when the CLI actually answered. The fallback is a guess and
     // must never become the app's idea of what exists — the next open asks again.
-    if (options.length) this.models = options
+    if (options.length) this.models.set(l.project.id, options)
     return options.length ? options : FALLBACK_MODELS
   }
 

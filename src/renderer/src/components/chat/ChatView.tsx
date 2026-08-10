@@ -833,8 +833,20 @@ export function ChatView({
   }, [draft, commandToken])
 
   const openModelMenu = async (): Promise<void> => {
-    setModelMenu((v) => !v)
-    if (models) return
+    const opening = !modelMenu
+    setModelMenu(opening)
+    if (!opening) return
+    // Asked again on every open, rather than once and kept.
+    //
+    // The first answer for a chat whose process has not finished spawning is the
+    // hardcoded fallback list — four bare aliases with no generation on them —
+    // and caching *that* pinned a menu with no Opus 5 in it for the life of the
+    // view, on exactly the sessions most likely to hit it: the ones in a project
+    // you have just created. Main caches the real answer per project, so a
+    // re-ask costs an IPC round trip and no docker call once one has landed.
+    //
+    // The previous list stays on screen while this resolves, so re-opening never
+    // flashes an empty menu.
     setModels(await window.vivarium.chatModels(session.id))
   }
 

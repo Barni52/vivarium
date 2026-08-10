@@ -543,6 +543,46 @@ export class DockerService {
     return out
   }
 
+  /**
+   * A fingerprint of everything about a container that **cannot be changed after
+   * it is created**, written on it as a label and re-checked before every start.
+   *
+   * This is the fix for a bug with a nasty shape: mounts may only be edited while
+   * the container is stopped (the settings dialog locks them otherwise), and
+   * `start()` reuses a stopped container as-is — so the one path the UI allowed
+   * was the one path that never applied the change. You added a folder, the
+   * config recorded it, and `/workspace` never gained it. "Restart" did not help
+   * either, being stop-then-start on the same container; only *recreate* rebuilds
+   * the mount set, and nothing on that path called it.
+   *
+   * A label rather than diffing `docker inspect`'s mount list: this is an exact
+   * equality test on one string, where a diff has to normalise Windows paths,
+   * decide what counts as equal, and be re-audited every time a run argument is
+   * added. It also covers the image variant and the published port, which had
+   * the identical bug through the identical route.
+   *
+   * Shadow volumes are deliberately *not* in here even though they are mounts:
+   * they are derived from whether a `package.json`/`pom.xml` exists on disk, so
+   * including them would silently recreate a container the first time you ran
+   * `npm init` inside a mounted folder.
+   *
+   * A container created before this existed has no label, does not match, and is
+   * recreated once — the same one-time upgrade the hook-bridge check used to do,
+   * and safe for the same reason: everything durable is in the named volumes.
+   */
+  private containerSpec(project: Project): string {
+    return shortHash(
+      JSON.stringify({
+        v: 1,
+        image: this.imageName(project),
+        // Slim never publishes, so a port left in config must not count as a
+        // difference — it changes nothing about the container.
+        port: project.image === 'full' ? (project.publishedPort ?? null) : null,
+        mounts: this.mountTargets(project).map((m) => [m.hostPath, m.target])
+      })
+    )
+  }
+
   // ---- run-args construction (ref 537-795, ported to /workspace) ----------
   private async buildRunArgs(project: Project): Promise<string[]> {
     const name = this.containerName(project)
@@ -565,6 +605,11 @@ export class DockerService {
       `vivarium.project=${project.id}`,
       '--label',
       `vivarium.workspace=${project.basePath}`,
+      // What this container was built to be. Compared before every start; a
+      // mismatch means the project has been edited since and the container has
+      // to be rebuilt rather than restarted (see containerSpec).
+      '--label',
+      `vivarium.spec=${this.containerSpec(project)}`,
       '-e',
       'COLORTERM=truecolor',
       '-e',
@@ -695,18 +740,6 @@ export class DockerService {
     return out
   }
 
-  /** Does an existing container have the /vivarium hook-bridge mount? */
-  private async hasBridgeMount(name: string): Promise<boolean> {
-    const r = await this.exec([
-      'inspect',
-      '-f',
-      '{{range .Mounts}}{{.Destination}}\n{{end}}',
-      name
-    ])
-    if (r.code !== 0) return false
-    return r.stdout.split('\n').some((l) => l.trim() === '/vivarium')
-  }
-
   /**
    * Start (or create) the project container. Builds the image first if needed;
    * all progress streams to `sink`. Returns true on success.
@@ -719,23 +752,42 @@ export class DockerService {
 
     const name = this.containerName(project)
 
-    // Upgrade path: containers created before the hook bridge existed lack the
-    // /vivarium mount, so agent sessions couldn't load /vivarium/hooks.json.
-    // Mounts can't be added to an existing container — recreate it (safe: all
-    // durable state lives in the named home/creds/shadow volumes).
-    if ((await this.containerExists(project)) && !(await this.hasBridgeMount(name))) {
-      sink(`\r\n==> Recreating ${name} to add the agent hook bridge mount\r\n`)
+    // Does it exist, and was it built for the project as it is *now*? One
+    // inspect answers both — a missing container exits non-zero, and a container
+    // whose mounts, image or port no longer match carries a different spec hash
+    // (or none at all, if it predates the label).
+    const want = this.containerSpec(project)
+    const probe = await this.exec([
+      'container',
+      'inspect',
+      '-f',
+      '{{ index .Config.Labels "vivarium.spec" }}',
+      name
+    ])
+    let exists = probe.code === 0
+
+    if (exists && probe.stdout.trim() !== want) {
+      // **The mount fix.** A bind mount cannot be added to an existing
+      // container, so a project whose folders changed has to be rebuilt rather
+      // than started — which is exactly what did not happen before, because
+      // mounts are only editable while stopped and the stopped path reused the
+      // container verbatim. Safe: everything durable lives in the named
+      // home/creds/shadow volumes, so this costs the container and nothing else.
+      sink(
+        `\r\n==> Recreating ${name} — its mounts, image or port no longer match the project\r\n`
+      )
       await this.exec(['rm', '-f', name])
+      exists = false
     }
 
     // Already running? Nothing to do.
-    if (await this.isRunning(project)) return true
+    if (exists && (await this.isRunning(project))) return true
 
     // Refresh hook script/settings + drop stale events before every start.
     await ensureBridgeFiles(project.id)
 
     // Exists but stopped → just start it.
-    if (await this.containerExists(project)) {
+    if (exists) {
       sink(`\r\n==> Starting existing container ${name}\r\n`)
       return (await this.execStream(['start', name], sink)) === 0
     }

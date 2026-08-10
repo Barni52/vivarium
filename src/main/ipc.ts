@@ -154,7 +154,12 @@ export function registerIpc(win: BrowserWindow): void {
   ipcMain.handle(CH.claudeUpdate, async (_e, projectId: string): Promise<ClaudeUpdateResult> => {
     const p = store.getProject(projectId)
     if (!p) return { ok: false, version: null, message: 'project not found' }
-    return claude.update(p)
+    const r = await claude.update(p)
+    // The model list is whatever *that* CLI reported, and it has just been
+    // replaced — so the cache for this project is dropped rather than left to
+    // offer the old version's models until the app restarts.
+    if (r.ok) chat.forgetModels(projectId)
+    return r
   })
 
   // Expose the pty manager for app-quit cleanup.
@@ -884,9 +889,13 @@ export function registerIpc(win: BrowserWindow): void {
     })
   })
 
-  ipcMain.handle(CH.chatModels, (_e, sessionId: string): Promise<ChatModelOption[]> =>
-    chat.listModels(sessionId)
-  )
+  // The owning project is resolved here rather than in ChatService, which has no
+  // view of config: the model list is a property of the *container's* Claude
+  // Code, so it is cached and answered per project (see ChatService.listModels).
+  ipcMain.handle(CH.chatModels, (_e, sessionId: string): Promise<ChatModelOption[]> => {
+    const project = store.get().projects.find((p) => p.sessions.some((s) => s.id === sessionId))
+    return chat.listModels(sessionId, project?.id ?? null)
+  })
 
   ipcMain.on(CH.chatClose, (_e, sessionId: string) => chat.close(sessionId))
 
