@@ -16,9 +16,21 @@ import { modelName, modelOptionLabel } from '@shared/models'
 import { useStore } from '../../state/store'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
-import { Check, Copy, Refresh, Undo, ZoomIn, ZoomOut } from '../Icons'
+import {
+  Check,
+  Chevron,
+  Close,
+  Copy,
+  PanelToggle,
+  Refresh,
+  Search,
+  Undo,
+  ZoomIn,
+  ZoomOut
+} from '../Icons'
 import { LogRow, type LogHandlers } from './ChatLog'
-import { Preview } from './Markdown'
+import { FindContext, matcherFor, searchTextOf, type FindQuery } from './find'
+import { Preview, clock as clockOf } from './Markdown'
 import { chipForNode, flattenTree, routeFile, type PendingChip } from './attach'
 
 // The chat window, built to `docs/redisign/Chat Terminal.html`: a 34px header of
@@ -100,6 +112,7 @@ export function ChatView({
   const loadEarlier = useStore((s) => s.loadEarlier)
   const loadBody = useStore((s) => s.loadBody)
   const loadSubagent = useStore((s) => s.loadSubagent)
+  const takePendingFind = useStore((s) => s.takePendingFind)
 
   // Draft and pending chips live here, not in the store: they are meant to die
   // with the view. A cross-project move remounts this component (TerminalHost
@@ -137,8 +150,19 @@ export function ChatView({
    * remount, and a stale one would offer messages that are no longer on screen.
    */
   const [rewind, setRewind] = React.useState<null | { busy: boolean; error?: string }>(null)
+  /**
+   * The find bar: closed, or open with a term and a position in the hit list.
+   *
+   * Local like the draft and the revert picker — a search is about the reading
+   * you are doing right now, and carrying it across a remount would restore a
+   * highlight over a conversation you have since left.
+   */
+  const [find, setFind] = React.useState<null | (FindQuery & { at: number })>(null)
+  /** The turn outline rail, open or not. */
+  const [outline, setOutline] = React.useState(false)
 
   const inputRef = React.useRef<HTMLTextAreaElement>(null)
+  const findInputRef = React.useRef<HTMLInputElement>(null)
   /** the view root — what the composer's height ceiling is measured against */
   const rootRef = React.useRef<HTMLDivElement>(null)
   const logRef = React.useRef<HTMLDivElement>(null)
@@ -207,6 +231,25 @@ export function ChatView({
     if (visible && el && pinned.current) el.scrollTop = el.scrollHeight
   }, [visible])
 
+  /**
+   * A term handed over by the conversation search, consumed on arrival.
+   *
+   * The dialog answers "which conversation", this answers "where in it" — so
+   * picking a result selects the session and the find bar is already on the term
+   * when it appears, rather than making you type it a second time.
+   *
+   * Gated on `visible` because every chat that has been opened stays mounted
+   * (see TerminalHost): without it the first mounted view would swallow a term
+   * meant for a different session. `takePendingFind` checks the id as well, so
+   * the two guards agree.
+   */
+  React.useEffect(() => {
+    if (!visible) return
+    const term = takePendingFind(session.id)
+    if (term === null) return
+    setFind({ term, caseSensitive: false, at: 0 })
+  }, [visible, session.id, takePendingFind])
+
   // Ctrl + wheel zooms, the terminal's convention. A native listener because it
   // has to be non-passive: React registers wheel at the root as passive, where
   // preventDefault is ignored and the page zooms *and* scrolls.
@@ -249,7 +292,14 @@ export function ChatView({
     return () => window.removeEventListener('resize', fitComposer)
   }, [fitComposer])
 
-  const entries = chat?.entries ?? []
+  /**
+   * Stable while the log is: `?? []` mints a fresh array on every render of a
+   * chat that has not opened yet, and half a dozen `useMemo`s downstream take
+   * this as a dependency — the row order, the revert targets, the outline, the
+   * turn clocks and the find hit list, which walks every row's searchable text.
+   * Unmemoised, all of them recompute on every keystroke in the composer.
+   */
+  const entries = React.useMemo(() => chat?.entries ?? [], [chat?.entries])
   const blocking = chat?.blocking ?? null
   const todos = chat?.todos ?? []
   const mode: ChatMode = chat?.mode ?? session.mode ?? 'bypassPermissions'
@@ -339,6 +389,126 @@ export function ChatView({
     }
     return out.reverse()
   }, [entries])
+
+  /**
+   * The conversation's turns, oldest first — what the outline rail lists.
+   *
+   * Built off the same two filters `revertTargets` argues for (settled rows
+   * only, deduped by transcript uuid, because one send can write several text
+   * blocks) but *not* derived from it: an outline is a reading aid and wants
+   * every turn including the one still running, where a revert target has to be
+   * something the CLI can actually be aimed at. The optimistic `you:<turn>` row
+   * of a live turn belongs in the first list and not the second.
+   */
+  const outlineTurns = React.useMemo(() => {
+    const seen = new Set<string>()
+    const out: { id: string; at: number; text: string; turn: number }[] = []
+    for (const e of entries) {
+      if (e.role !== 'you' || e.kind !== 'text') continue
+      const key = e.id.includes('#') ? e.id.slice(0, e.id.indexOf('#')) : e.id
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ id: e.id, at: e.at, text: e.md, turn: e.turn })
+    }
+    return out
+  }, [entries])
+
+  /** What each turn's clock settled on, so the rail can report it. */
+  const turnClocks = React.useMemo(() => {
+    const byTurn = new Map<number, { durationMs?: number; tokens?: number }>()
+    for (const e of entries) {
+      if (e.kind !== 'turn') continue
+      byTurn.set(e.turn, { durationMs: e.durationMs, tokens: e.tokens?.output })
+    }
+    return byTurn
+  }, [entries])
+
+  const matcher = React.useMemo(() => (find ? matcherFor(find) : null), [find])
+
+  /**
+   * The ids of the rows the term appears in, in log order.
+   *
+   * Computed over `entries` rather than `rows` on purpose: `rows` hoists a
+   * *running* turn clock to the bottom, and a clock has no text to match, so the
+   * two orders only ever differ by a row that can never be a hit.
+   */
+  const hits = React.useMemo(() => {
+    if (!matcher) return []
+    return entries.filter((e) => matcher.test(searchTextOf(e))).map((e) => e.id)
+  }, [entries, matcher])
+
+  // The position is clamped rather than reset: typing another character usually
+  // narrows the same hit list, and jumping back to the first match on every
+  // keystroke is what makes a find bar feel like it is fighting you.
+  const at = hits.length === 0 ? 0 : Math.min(find?.at ?? 0, hits.length - 1)
+  const activeHit = hits[at] ?? null
+
+  const stepFind = React.useCallback(
+    (back: boolean) => {
+      setFind((f) => {
+        if (!f || hits.length === 0) return f
+        const next = (at + (back ? -1 : 1) + hits.length) % hits.length
+        return { ...f, at: next }
+      })
+    },
+    [at, hits.length]
+  )
+
+  const openFind = React.useCallback(() => {
+    // Reopening keeps the term, as a browser's find does — and selects it, so
+    // the next keystroke replaces it and Enter alone steps through what is
+    // already there.
+    setFind((f) => f ?? { term: '', caseSensitive: false, at: 0 })
+    // After the bar exists: the input mounts on this render.
+    requestAnimationFrame(() => findInputRef.current?.select())
+  }, [])
+
+  const closeFind = React.useCallback(() => {
+    setFind(null)
+    inputRef.current?.focus()
+  }, [])
+
+  /**
+   * Ctrl+F / Ctrl+Shift+F opens the find bar, the terminal's chord exactly.
+   *
+   * On the view root in the **capture** phase, and scoped to the visible chat.
+   * Capture, because the composer is a textarea that would otherwise see the key
+   * first and Chromium would open its own find; scoped, because every chat that
+   * has ever been opened stays mounted behind this one (see TerminalHost), and a
+   * bubbling handler on all of them would open several bars at once.
+   */
+  React.useEffect(() => {
+    if (!visible) return
+    const el = rootRef.current
+    if (!el) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (!e.ctrlKey || e.altKey || e.key.toLowerCase() !== 'f') return
+      e.preventDefault()
+      e.stopPropagation()
+      openFind()
+    }
+    el.addEventListener('keydown', onKey, true)
+    return () => el.removeEventListener('keydown', onKey, true)
+  }, [visible, openFind])
+
+  /**
+   * Bring the current hit into view.
+   *
+   * `block: 'center'` rather than `nearest`: a match at the very bottom of the
+   * scroller is legible but gives no context, and the row above it is usually
+   * what says which conversation you are in.
+   *
+   * It also drops the tail pin. Scrolling away to read a hit is exactly the
+   * gesture `pinned` exists to respect, and leaving it set means the next
+   * streamed token yanks you back to the bottom mid-read.
+   */
+  React.useEffect(() => {
+    if (!activeHit) return
+    const el = logRef.current?.querySelector(`[data-row="${CSS.escape(activeHit)}"]`)
+    if (!el) return
+    pinned.current = false
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [activeHit])
 
   const revert = async (entryId: string): Promise<void> => {
     setRewind({ busy: true })
@@ -763,6 +933,33 @@ export function ChatView({
         </div>
       )}
 
+      {find && (
+        <ChatFindBar
+          query={find}
+          inputRef={findInputRef}
+          hits={hits.length}
+          at={at}
+          /* Tool bodies are clipped on the way out of main and fetched on
+             expand, so a match inside an unexpanded one is genuinely not
+             searchable — the bar says so rather than quietly missing it. */
+          clipped={entries.some((e) => e.kind === 'tool' && e.body.truncated)}
+          earlier={chat ? Math.max(0, chat.total - entries.length) : 0}
+          onLoadEarlier={() => void loadEarlier(session.id)}
+          onTerm={(term) => setFind((f) => (f ? { ...f, term, at: 0 } : f))}
+          onToggleCase={() =>
+            setFind((f) => (f ? { ...f, caseSensitive: !f.caseSensitive, at: 0 } : f))
+          }
+          onStep={stepFind}
+          onClose={closeFind}
+        />
+      )}
+
+      {/* The log and the outline rail sit in a row inside the column, so the
+          rail takes width from the log rather than floating over the messages it
+          is an index of. `minHeight: 0` because a flex child's default
+          `min-height: auto` refuses to shrink below its content, which in a
+          scroller means the composer gets pushed off the bottom of the window. */}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
       <div
         ref={logRef}
         className="vchat-scroll"
@@ -784,6 +981,19 @@ export function ChatView({
               hint: 'Ctrl+C',
               disabled: !selection,
               onSelect: () => void window.vivarium.clipboardWriteText(selection)
+            },
+            { label: '---' },
+            {
+              label: 'Find…',
+              icon: <Search size={14} />,
+              hint: 'Ctrl+F',
+              onSelect: () => openFind()
+            },
+            {
+              label: outline ? 'Hide outline' : 'Show outline',
+              icon: <PanelToggle size={14} />,
+              disabled: outlineTurns.length === 0,
+              onSelect: () => setOutline((o) => !o)
             },
             { label: '---' },
             {
@@ -835,9 +1045,30 @@ export function ChatView({
               load earlier ({chat.total - entries.length})
             </button>
           )}
-          {rows.map((e) => (
-            <LogRow key={e.id} entry={e} handlers={handlers} streaming={e.id === streamingId} />
-          ))}
+          {/* Every row gets a plain block wrapper carrying its id, which is what
+              `scrollIntoView` and the outline both aim at. Layout-neutral: the
+              column is a block container and `Line` spaces itself with padding
+              rather than margins, so there is no collapsing to disturb.
+
+              The current hit takes a rail in the `you` hue — the same left-edge
+              idiom the sidebar's active item uses — rather than a second wash.
+              Every match in the log is already washed, and washing one of them
+              *harder* is not a difference you can find by eye; an edge is. */}
+          <FindContext.Provider value={matcher}>
+            {rows.map((e) => (
+              <div
+                key={e.id}
+                data-row={e.id}
+                style={
+                  e.id === activeHit
+                    ? { borderLeft: `2px solid ${CHAT.you}`, marginLeft: -2, scrollMarginBlock: 24 }
+                    : undefined
+                }
+              >
+                <LogRow entry={e} handlers={handlers} streaming={e.id === streamingId} />
+              </div>
+            ))}
+          </FindContext.Provider>
           {entries.length === 0 && chat?.open && (
             <div
               style={{
@@ -864,6 +1095,25 @@ export function ChatView({
             />
           )}
         </div>
+      </div>
+        {outline && (
+          <Outline
+            turns={outlineTurns}
+            clocks={turnClocks}
+            activeId={activeHit}
+            zoom={zoom}
+            onPick={(id) => {
+              const el = logRef.current?.querySelector(`[data-row="${CSS.escape(id)}"]`)
+              if (!el) return
+              // Same reasoning as the find bar's jump: deliberately going
+              // somewhere in the log drops the tail pin, or the next streamed
+              // token drags you straight back to the bottom.
+              pinned.current = false
+              el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+            }}
+            onClose={() => setOutline(false)}
+          />
+        )}
       </div>
 
       {/* The composer region floats over the end of the log rather than sitting
@@ -2672,6 +2922,346 @@ function Typeahead({
             ? 'tab insert · ⏎ send · ↑↓ next · esc dismiss'
             : 'tab · ⏎ insert · ↑↓ next · esc dismiss'}
       </div>
+    </div>
+  )
+}
+
+/**
+ * The chat's find bar.
+ *
+ * Its own component rather than a reuse of TerminalView's, because the two share
+ * a shape and nothing else: that one drives an xterm addon over a canvas and
+ * reports the addon's own occurrence index, this one drives a list of DOM rows
+ * and reports a position in it. What they *do* share is the chord, the counter's
+ * place, Enter / Shift+Enter and Esc — the muscle memory, which is the part worth
+ * keeping identical.
+ *
+ * It takes layout at the top of the log rather than floating over it. The
+ * terminal's has to float, because anything taking space there resizes the pty
+ * and makes the TUI repaint; a chat has no such constraint, and a bar that
+ * covers the first row of what you searched is a worse trade than 34 pixels.
+ */
+function ChatFindBar({
+  query,
+  inputRef,
+  hits,
+  at,
+  clipped,
+  earlier,
+  onLoadEarlier,
+  onTerm,
+  onToggleCase,
+  onStep,
+  onClose
+}: {
+  query: FindQuery
+  inputRef: React.RefObject<HTMLInputElement>
+  hits: number
+  at: number
+  /** some tool body in the log is clipped, so its full text was not searched */
+  clipped: boolean
+  /** how many entries main holds that the renderer has not mounted */
+  earlier: number
+  onLoadEarlier: () => void
+  onTerm: (term: string) => void
+  onToggleCase: () => void
+  onStep: (back: boolean) => void
+  onClose: () => void
+}): React.ReactElement {
+  const empty = !query.term
+  const none = !empty && hits === 0
+  const counter = empty ? '' : none ? 'no matches' : `${at + 1}/${hits}`
+
+  return (
+    <div
+      style={{
+        flex: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: `0 ${EDGE}px`,
+        height: 34,
+        background: CHAT.header,
+        borderBottom: `1px solid ${CHAT.border}`
+      }}
+    >
+      <span style={{ display: 'flex', color: CHAT.dim3, flex: 'none' }}>
+        <Search size={13} />
+      </span>
+      <input
+        ref={inputRef}
+        value={query.term}
+        autoFocus
+        spellCheck={false}
+        placeholder="Find in conversation"
+        onChange={(e) => onTerm(e.target.value)}
+        onKeyDown={(e) => {
+          // Kept off the view root's capture handler and off the composer: while
+          // this input has focus it owns every key it names.
+          e.stopPropagation()
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            onStep(e.shiftKey)
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            onClose()
+          }
+          if (e.ctrlKey && e.key.toLowerCase() === 'f') {
+            e.preventDefault()
+            inputRef.current?.select()
+          }
+        }}
+        style={{
+          width: 200,
+          height: 24,
+          background: 'transparent',
+          border: 0,
+          color: CHAT.text,
+          fontFamily: MONO,
+          fontSize: 12.5,
+          padding: 0,
+          outline: 'none',
+          boxShadow: 'none'
+        }}
+      />
+      <span
+        style={{
+          minWidth: 62,
+          fontFamily: MONO,
+          fontSize: 11.5,
+          color: none ? CHAT.danger : CHAT.dim3,
+          flex: 'none'
+        }}
+      >
+        {counter}
+      </span>
+      <FindBtn title="Match case" active={query.caseSensitive} onClick={onToggleCase}>
+        <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: '.3px' }}>Aa</span>
+      </FindBtn>
+      <FindBtn title="Previous match (Shift+Enter)" onClick={() => onStep(true)}>
+        <Chevron size={13} style={{ transform: 'rotate(-90deg)' }} />
+      </FindBtn>
+      <FindBtn title="Next match (Enter)" onClick={() => onStep(false)}>
+        <Chevron size={13} style={{ transform: 'rotate(90deg)' }} />
+      </FindBtn>
+
+      <div style={{ flex: 1 }} />
+
+      {/* What was *not* searched, stated rather than left to be discovered. Both
+          notes are about the same thing — the renderer holds a clipped view of a
+          conversation main holds whole — and both offer the one action that
+          widens it. */}
+      {earlier > 0 && (
+        <button
+          onClick={onLoadEarlier}
+          title="Earlier messages are not loaded, so they were not searched"
+          style={{
+            fontFamily: MONO,
+            fontSize: 11,
+            border: `1px solid ${CHAT.border}`,
+            background: 'transparent',
+            color: CHAT.dim3,
+            padding: '2px 8px',
+            cursor: 'pointer',
+            flex: 'none'
+          }}
+        >
+          {earlier} earlier not searched
+        </button>
+      )}
+      {clipped && (
+        <span
+          title="A long tool result is clipped until you expand it; only the part on screen was
+            searched."
+          style={{ fontFamily: MONO, fontSize: 11, color: CHAT.dim4, flex: 'none' }}
+        >
+          clipped bodies skipped
+        </span>
+      )}
+      <FindBtn title="Close (Esc)" onClick={onClose}>
+        <Close size={12} />
+      </FindBtn>
+    </div>
+  )
+}
+
+function FindBtn({
+  title,
+  active,
+  onClick,
+  children
+}: {
+  title: string
+  active?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}): React.ReactElement {
+  const [hover, setHover] = React.useState(false)
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      // The bar's input stays focused through a button press, so Enter keeps
+      // stepping after you have clicked one.
+      onMouseDown={(e) => e.preventDefault()}
+      style={{
+        width: 24,
+        height: 24,
+        flex: 'none',
+        border: 0,
+        background: active ? CHAT.hover : hover ? CHAT.inset : 'transparent',
+        color: active || hover ? CHAT.text : CHAT.dim2,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer'
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * The turn outline: what you asked, in order, as a rail you can jump from.
+ *
+ * `MOUNT_WINDOW` is 300 entries with a "load earlier" behind it, and a long
+ * conversation is scrollable but not navigable — the revert picker already
+ * proved the useful shape (your own messages, in order, each addressable) and
+ * this is that list without the destructive verb.
+ *
+ * It reaches exactly as far back as the log is loaded, which is the same honest
+ * boundary the revert picker draws, and for the same reason: both are derived
+ * from `entries` rather than fetched.
+ *
+ * **Not zoomed.** `chatZoom` scales the log and the composer because they are
+ * the thing being read; the rail is chrome, and a 220% index would take half the
+ * window to say the same thing. It does take the zoom as a prop to size its own
+ * width against — a rail that stayed 240px while the text beside it doubled
+ * would read as having shrunk.
+ */
+function Outline({
+  turns,
+  clocks,
+  activeId,
+  zoom,
+  onPick,
+  onClose
+}: {
+  turns: { id: string; at: number; text: string; turn: number }[]
+  clocks: Map<number, { durationMs?: number; tokens?: number }>
+  /** the current find hit, so the rail agrees with the log about where you are */
+  activeId: string | null
+  zoom: number
+  onPick: (id: string) => void
+  onClose: () => void
+}): React.ReactElement {
+  return (
+    <div
+      className="vchat-scroll"
+      style={{
+        flex: 'none',
+        width: Math.round(248 * Math.min(zoom, 1.4)),
+        overflowY: 'auto',
+        borderLeft: `1px solid ${CHAT.border}`,
+        background: CHAT.header
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 8px 0 12px',
+          height: 34,
+          position: 'sticky',
+          top: 0,
+          background: CHAT.header,
+          borderBottom: `1px solid ${CHAT.border}`,
+          fontFamily: MONO,
+          fontSize: 11,
+          letterSpacing: '.04em',
+          textTransform: 'uppercase',
+          color: CHAT.dim3
+        }}
+      >
+        outline
+        <span style={{ color: CHAT.dim4, letterSpacing: 0, textTransform: 'none' }}>
+          {turns.length} {turns.length === 1 ? 'turn' : 'turns'}
+        </span>
+        <div style={{ flex: 1 }} />
+        <FindBtn title="Hide outline" onClick={onClose}>
+          <Close size={12} />
+        </FindBtn>
+      </div>
+      {turns.map((t) => {
+        const clock = clocks.get(t.turn)
+        const on = t.id === activeId
+        return (
+          <button
+            key={t.id}
+            onClick={() => onPick(t.id)}
+            title={t.text}
+            style={{
+              display: 'block',
+              width: '100%',
+              textAlign: 'left',
+              border: 0,
+              borderLeft: `2px solid ${on ? CHAT.you : 'transparent'}`,
+              background: on ? CHAT.hover : 'transparent',
+              padding: '7px 10px 8px 12px',
+              cursor: 'pointer',
+              // A rail is a list of siblings; without this each row's bottom
+              // edge is the next one's top edge and the whole thing reads as one
+              // block of text.
+              borderBottom: `1px solid ${CHAT.borderSoft}`
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                gap: 8,
+                fontFamily: MONO,
+                fontSize: 10.5,
+                color: CHAT.dim4,
+                marginBottom: 3
+              }}
+            >
+              <span>{clockOf(t.at)}</span>
+              {/* Only once the turn has finished. A running turn has no duration
+                  to report and the log's own clock is already saying so. */}
+              {clock?.durationMs !== undefined && (
+                <span>{Math.round(clock.durationMs / 1000)}s</span>
+              )}
+              {clock?.tokens ? <span>↓{tok(clock.tokens)}</span> : null}
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                lineHeight: 1.4,
+                color: on ? CHAT.text : CHAT.dim,
+                // Two lines, then an ellipsis: enough to tell two turns apart,
+                // never enough for one long prompt to own the rail.
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
+                overflow: 'hidden',
+                overflowWrap: 'anywhere'
+              }}
+            >
+              {t.text.trim() || '(no text)'}
+            </div>
+          </button>
+        )
+      })}
+      {turns.length === 0 && (
+        <div style={{ padding: '18px 12px', fontFamily: MONO, fontSize: 11.5, color: CHAT.dim4 }}>
+          Nothing asked yet.
+        </div>
+      )}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import React from 'react'
 import type { ChatEntry, ChatToolStatus, ChatTurnTokens } from '@shared/types'
 import { CHAT, CHAT_TEXT as TYPE, MONO } from '../../theme'
+import { Hi } from './find'
 import { Elapsed } from '../Elapsed'
 import { Md, Preview, clock } from './Markdown'
 import { langForPath, tokenize } from './highlight'
@@ -243,7 +244,7 @@ export const LogRow = React.memo(function LogRow({
                   overflowWrap: 'anywhere'
                 }}
               >
-                {entry.md}
+                <Hi>{entry.md}</Hi>
               </div>
             )}
             {entry.chips && entry.chips.length > 0 && (
@@ -294,7 +295,7 @@ export const LogRow = React.memo(function LogRow({
                   wider than the card, and `pre-wrap` alone would carry it out
                   through the border. */}
               <span style={{ minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                {entry.md}
+                <Hi>{entry.md}</Hi>
               </span>
             </Card>
           )}
@@ -465,7 +466,9 @@ export const LogRow = React.memo(function LogRow({
       // is the strip above the composer.
       return (
         <Line at={entry.at} role="todo" color={CHAT.dim2}>
-          <div style={{ ...mono, color: CHAT.dim3, paddingTop: 3 }}>{entry.text}</div>
+          <div style={{ ...mono, color: CHAT.dim3, paddingTop: 3 }}>
+            <Hi>{entry.text}</Hi>
+          </div>
         </Line>
       )
 
@@ -490,7 +493,7 @@ export const LogRow = React.memo(function LogRow({
                 color: entry.tone === 'alert' ? CHAT.danger : CHAT.dim
               }}
             >
-              {entry.text}
+              <Hi>{entry.text}</Hi>
             </span>
             {entry.retry && (
               // Never automatic: a respawn costs a process and a 14.6 MB-class
@@ -806,7 +809,7 @@ function ToolCard({
             whiteSpace: 'nowrap'
           }}
         >
-          {entry.title}
+          <Hi>{entry.title}</Hi>
         </span>
         {entry.status === 'running' ? (
           <>
@@ -827,7 +830,7 @@ function ToolCard({
               overflowWrap: 'anywhere'
             }}
           >
-            {entry.result}
+            <Hi>{entry.result}</Hi>
           </span>
         )}
         {expandable && (
@@ -920,7 +923,7 @@ function ToolCard({
             overflowX: 'auto'
           }}
         >
-          {text}
+          <Hi>{text}</Hi>
         </div>
       )}
     </Line>

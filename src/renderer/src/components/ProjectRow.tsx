@@ -10,6 +10,7 @@ import {
   GitBranch,
   Plus,
   Power,
+  Search,
   Sparkle,
   Stop,
   ThinkingDots,
@@ -68,6 +69,7 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   const runProjectDiff = useStore((s) => s.runProjectDiff)
   const openClaudeUpdate = useStore((s) => s.openClaudeUpdate)
   const openVolumes = useStore((s) => s.openVolumes)
+  const openTranscriptSearch = useStore((s) => s.openTranscriptSearch)
   // aggregate: worst outstanding attention among child agents (shown when the
   // project is collapsed, so a notification isn't hidden with its session
   // rows); a question beats finished — an agent blocked on an answer is the
@@ -151,6 +153,14 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
       // to be reachable from any of them (and this is where you'd look after
       // deleting one).
       { label: 'Docker volumes…', icon: <Disks size={14} />, onSelect: openVolumes },
+      // App-wide for the same reason, and one step further: it reaches
+      // conversations whose *session* no longer exists, so it cannot belong to
+      // any project's menu in particular.
+      {
+        label: 'Search conversations…',
+        icon: <Search size={14} />,
+        onSelect: openTranscriptSearch
+      },
       { label: '---' },
       {
         label: hasOutput

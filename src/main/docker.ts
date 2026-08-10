@@ -1231,6 +1231,95 @@ export class DockerService {
     return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
   }
 
+  /**
+   * Grep every conversation on the shared creds volume.
+   *
+   * Conversations accumulate there forever — deliberately, since deletion is
+   * explicit and there is no sweep — so the archive only grows, and until now
+   * there was no way to ask it anything. "Which chat was it where I worked out
+   * the WSL gateway" was unanswerable without opening sessions one at a time.
+   *
+   * **Not a `sh -c` anywhere in here, and that is the whole safety story.** The
+   * query is the one piece of genuine free-text user input this app puts near a
+   * shell, and every other interpolated command in this file has had to argue
+   * that its variable is a `randomUUID()`. This one cannot make that argument, so
+   * it does not interpolate at all: the term travels as its own argv element,
+   * where a quote, a backtick or a `;` is just a character grep looks for.
+   * `-F` keeps it a literal rather than a regex (nobody types `a.b(` meaning a
+   * pattern), and `-e` is what stops a term beginning with `-` being read as an
+   * option.
+   *
+   * Counts rather than `-l`, which would stop at the first match per file: the
+   * count is what ranks the results, and "the conversation that mentions this
+   * thirty times" is almost always the one being looked for. It costs a full read
+   * of every transcript, which is why this is a button and not a keystroke.
+   *
+   * Prefers a running container over a throwaway one, following
+   * `readSharedCredentials` — the volume is the same from either, and an exec
+   * into something already up needs no image and no container create.
+   */
+  async searchTranscripts(
+    query: string,
+    timeoutMs = 60_000
+  ): Promise<{ ok: boolean; counts: Map<string, number>; error?: string }> {
+    const empty = new Map<string, number>()
+    if (!query.trim()) return { ok: true, counts: empty }
+    if (!(await this.detect())) return { ok: false, counts: empty, error: 'docker-missing' }
+    // Or `docker run -v` would *create* claude-box-creds on a machine that has
+    // never run a container — the same trap deleteTranscripts documents.
+    if (!(await this.volumeExists(CREDS_VOLUME))) {
+      return { ok: false, counts: empty, error: 'no-volume' }
+    }
+
+    const root = '/home/node/.claude/projects'
+    const grep = ['grep', '-rFc', '--include=*.jsonl', '-e', query, root]
+
+    // A running container first (instant), else a throwaway mounting the volume.
+    const ps = await this.exec(
+      ['ps', '--filter', 'name=vivarium-', '--format', '{{.Names}}'],
+      5_000
+    )
+    const up =
+      ps.code === 0
+        ? ps.stdout.split('\n').map((s) => s.trim()).filter(Boolean)[0]
+        : undefined
+    const r = up
+      ? await this.exec(['exec', up, ...grep], timeoutMs)
+      : await this.exec(
+          ['run', '--rm', '-v', `${CREDS_VOLUME}:/home/node/.claude`, SLIM_IMAGE, ...grep],
+          timeoutMs
+        )
+
+    if (r.code === 124) return { ok: false, counts: empty, error: 'timed-out' }
+    // grep exits 1 for "no lines matched anywhere", which is a successful search
+    // that found nothing — not a failure. Anything above that is one.
+    if (r.code > 1) {
+      const msg = (r.stderr || r.stdout).trim().split('\n')[0]
+      return { ok: false, counts: empty, error: msg || `grep exited ${r.code}` }
+    }
+
+    // `grep -rc` prints a line for every file it read, matched or not, so the
+    // zeros are filtered here rather than through a shell pipe.
+    const counts = new Map<string, number>()
+    for (const line of r.stdout.split('\n')) {
+      const at = line.lastIndexOf(':')
+      if (at < 0) continue
+      const n = parseInt(line.slice(at + 1), 10)
+      if (!Number.isFinite(n) || n <= 0) continue
+      const file = line.slice(0, at)
+      const uuid = file.slice(file.lastIndexOf('/') + 1).replace(/\.jsonl$/, '')
+      if (!uuid) continue
+      // A subagent's sibling log lives at `<uuid>/subagents/agent-*.jsonl`, so
+      // its hits are folded into the conversation that spawned it rather than
+      // reported as a conversation of their own — which is what the parent's
+      // collapsed task row means anyway.
+      const parent = /\/([0-9a-fA-F-]{36})\/subagents\//.exec(file)?.[1]
+      const key = parent ?? uuid
+      counts.set(key, (counts.get(key) ?? 0) + n)
+    }
+    return { ok: true, counts }
+  }
+
   async volumeExists(name: string): Promise<boolean> {
     const r = await this.exec(['volume', 'inspect', name])
     return r.code === 0

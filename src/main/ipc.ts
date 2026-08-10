@@ -28,6 +28,8 @@ import type {
   Project,
   SessionType,
   SpawnResult,
+  TranscriptHit,
+  TranscriptSearchResult,
   UpdateProjectInput,
   VolumeRemoveResult,
   VolumeReport
@@ -966,6 +968,79 @@ export function registerIpc(win: BrowserWindow): void {
     }
     return out
   }
+
+  // ---- transcript search --------------------------------------------------
+  /**
+   * "Which conversation was that in." Greps every transcript on the shared creds
+   * volume (see DockerService.searchTranscripts) and maps the uuids it finds back
+   * onto sessions.
+   *
+   * The mapping is where this stops being a grep and becomes useful, and it has
+   * three cases rather than one. A uuid can be a session's *current*
+   * conversation; it can be one a `/clear` retired onto
+   * `previousClaudeSessionIds`, which is a real place the answer might be and the
+   * only feature in the app that surfaces those at all; or it can belong to
+   * nothing here — claude-box's own transcripts share this volume by design, and
+   * a deleted session's conversation may still be awaiting a drain. The third
+   * kind is reported rather than filtered, because "12 matches somewhere outside
+   * Vivarium" is a true and useful answer, and silently dropping it would make
+   * the totals lie.
+   */
+  ipcMain.handle(
+    CH.searchTranscripts,
+    async (_e, query: string): Promise<TranscriptSearchResult> => {
+      const term = typeof query === 'string' ? query.trim() : ''
+      if (!term) return { ok: true, hits: [] }
+      const r = await docker.searchTranscripts(term)
+      if (!r.ok) return { ok: false, hits: [], error: r.error }
+
+      // uuid → where it lives, built once rather than searched per hit.
+      const owner = new Map<
+        string,
+        {
+          projectId: string
+          projectName: string
+          sessionId: string
+          sessionName: string
+          archived: boolean
+        }
+      >()
+      for (const p of store.get().projects) {
+        for (const s of p.sessions) {
+          const base = {
+            projectId: p.id,
+            projectName: p.name,
+            sessionId: s.id,
+            sessionName: s.name
+          }
+          if (s.claudeSessionId) owner.set(s.claudeSessionId, { ...base, archived: false })
+          for (const old of s.previousClaudeSessionIds ?? []) {
+            owner.set(old, { ...base, archived: true })
+          }
+        }
+      }
+
+      const hits: TranscriptHit[] = []
+      for (const [uuid, matches] of r.counts) {
+        const own = owner.get(uuid)
+        hits.push({
+          uuid,
+          matches,
+          projectId: own?.projectId ?? null,
+          projectName: own?.projectName ?? null,
+          sessionId: own?.sessionId ?? null,
+          sessionName: own?.sessionName ?? null,
+          archived: own?.archived ?? false,
+          foreign: !own
+        })
+      }
+      // Most matches first: the conversation that mentions a thing thirty times
+      // is nearly always the one being looked for, and a uuid has no other order
+      // worth sorting by — the file's mtime would need a second docker call.
+      hits.sort((a, b) => b.matches - a.matches)
+      return { ok: true, hits }
+    }
+  )
 
   // ---- clipboard ---------------------------------------------------------
   ipcMain.handle(CH.pasteImage, async (_e, projectId: string): Promise<string | null> =>

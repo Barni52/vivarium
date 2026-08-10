@@ -94,6 +94,11 @@ export const CH = {
   // other generated title, rather than being awaited by a context menu.
   chatRetitle: 'chat:retitle',
   chatEvent: 'chat:event',
+  // Grep every conversation on the shared creds volume. Not a chat channel
+  // despite the name's family: it is answered without any chat session being
+  // open, spans every project at once, and reaches conversations whose session
+  // was deleted — so it belongs to the app, not to a session.
+  searchTranscripts: 'transcripts:search',
 
   // A link in a chat message, opened in the user's own browser. The renderer
   // never navigates: this window has no new-window handler, so an <a> would

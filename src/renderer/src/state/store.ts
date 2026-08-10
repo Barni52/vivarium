@@ -23,6 +23,7 @@ import type {
   Project,
   SessionType,
   AgentActivity,
+  TranscriptHit,
   UsageSnapshot,
   VolumeInfo
 } from '@shared/types'
@@ -57,6 +58,7 @@ export type DialogKind =
   | 'confirmQuit'
   | 'claudeUpdate'
   | 'volumes'
+  | 'searchTranscripts'
   | null
 
 export interface ContextMenuItem {
@@ -354,6 +356,25 @@ interface AppState {
   /** last removal failure per volume (docker's own message) */
   volumeErrors: Record<string, string>
 
+  // transcript search (the "which conversation was that in" dialog)
+  /** what is in the search box; kept in the store so reopening restores it */
+  transcriptQuery: string
+  /** null until a search has actually run — [] genuinely means "no matches" */
+  transcriptHits: TranscriptHit[] | null
+  transcriptSearching: boolean
+  transcriptError?: string
+  /**
+   * A term to hand to the next chat that becomes visible, so picking a result
+   * lands you in the conversation *with the find bar already open on it*.
+   *
+   * In the store rather than passed down because the two ends are in different
+   * trees — a dialog and whichever ChatView the selection is about to reveal —
+   * and the chat may not even be mounted yet when the dialog closes. Consumed
+   * once and cleared, so switching back to that session later does not reopen a
+   * search you finished with.
+   */
+  pendingFind: { sessionId: string; term: string } | null
+
   dialog: DialogKind
   ap: ProjectDraft
   st: SettingsDraft | null
@@ -387,6 +408,14 @@ interface AppState {
   // docker volume housekeeping
   openVolumes: () => void
   refreshVolumes: () => Promise<void>
+
+  // transcript search
+  openTranscriptSearch: () => void
+  setTranscriptQuery: (q: string) => void
+  runTranscriptSearch: () => Promise<void>
+  /** jump to the conversation a result names, with the term ready to find */
+  openTranscriptHit: (hit: TranscriptHit) => void
+  takePendingFind: (sessionId: string) => string | null
   removeVolume: (name: string) => Promise<void>
   removeOrphanVolumes: () => Promise<void>
 
@@ -632,6 +661,10 @@ export const useStore = create<AppState>((set, get) => ({
   volumesSized: true,
   volumeBusy: {},
   volumeErrors: {},
+  transcriptQuery: '',
+  transcriptHits: null,
+  transcriptSearching: false,
+  pendingFind: null,
   dialog: null,
   ap: emptyDraft(),
   st: null,
@@ -810,6 +843,61 @@ export const useStore = create<AppState>((set, get) => ({
       (v) => !v.locked && v.links === 0 && v.projects.length === 0
     )
     for (const v of orphans) await get().removeVolume(v.name)
+  },
+
+  // ---- transcript search ---------------------------------------------------
+  // Conversations pile up on the shared creds volume forever — deletion is
+  // explicit and there is no sweep — so the archive only grows and nothing could
+  // ask it anything. This is the one feature that reaches a `/clear`'d
+  // conversation, which is otherwise recoverable only through Claude's own
+  // --resume picker.
+  openTranscriptSearch: () => {
+    // Results are kept, the way the query is: reopening the dialog to check the
+    // second hit after visiting the first should not make you search again — the
+    // grep reads every transcript on disk.
+    set({ dialog: 'searchTranscripts', transcriptError: undefined })
+  },
+
+  setTranscriptQuery: (transcriptQuery) => set({ transcriptQuery }),
+
+  runTranscriptSearch: async () => {
+    const query = get().transcriptQuery.trim()
+    if (!query || get().transcriptSearching) return
+    set({ transcriptSearching: true, transcriptError: undefined })
+    try {
+      const res = await window.vivarium.searchTranscripts(query)
+      set({
+        transcriptHits: res.ok ? res.hits : null,
+        transcriptError: res.ok ? undefined : res.error
+      })
+    } catch {
+      // A rejected invoke has to land something, or the dialog sits on a
+      // spinner that never resolves with nothing to say.
+      set({ transcriptHits: null, transcriptError: 'the search could not be run' })
+    } finally {
+      set({ transcriptSearching: false })
+    }
+  },
+
+  openTranscriptHit: (hit) => {
+    if (!hit.sessionId) return
+    // The term rides along so the conversation opens with the find bar already
+    // on it — global search says *which* conversation, find-in-chat says where
+    // in it, and picking a result should not make you type the term twice.
+    set({
+      dialog: null,
+      pendingFind: { sessionId: hit.sessionId, term: get().transcriptQuery.trim() }
+    })
+    get().select(hit.sessionId)
+  },
+
+  takePendingFind: (sessionId) => {
+    const p = get().pendingFind
+    if (!p || p.sessionId !== sessionId) return null
+    // Consumed on read: coming back to this session tomorrow should not reopen
+    // a search that was finished with today.
+    set({ pendingFind: null })
+    return p.term
   },
 
   setSharedOutput: async (folder) => {

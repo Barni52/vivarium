@@ -362,6 +362,46 @@ export interface VolumeRemoveResult {
   message?: string
 }
 
+/**
+ * One conversation that contains the search term.
+ *
+ * Keyed by the Claude conversation uuid rather than by session, because the two
+ * are not one-to-one: `/clear` retires an id onto `previousClaudeSessionIds` and
+ * mints a new one, so a single sidebar row can own several transcripts. Each is
+ * reported separately — an archived one is a real place the answer might be, and
+ * folding it into its session's current conversation would claim the hit is
+ * somewhere it is not.
+ */
+export interface TranscriptHit {
+  /** the Claude conversation uuid */
+  uuid: string
+  /** how many transcript lines matched (lines, not occurrences — grep counts lines) */
+  matches: number
+  /** null when no session in config owns this uuid — see `foreign` */
+  projectId: string | null
+  projectName: string | null
+  sessionId: string | null
+  sessionName: string | null
+  /** this uuid was retired by a `/clear`; its session has moved on */
+  archived: boolean
+  /**
+   * Nothing in config.json owns this conversation. The shared creds volume holds
+   * the user's claude-box transcripts as well as Vivarium's, and a deleted
+   * session's conversation may still be sitting there awaiting a drain — so these
+   * are real hits that simply have nowhere to navigate to, and they are reported
+   * rather than hidden.
+   */
+  foreign: boolean
+}
+
+export interface TranscriptSearchResult {
+  ok: boolean
+  /** newest-looking first is meaningless here, so: most matches first */
+  hits: TranscriptHit[]
+  /** why ok=false: 'docker-missing' | 'no-volume' | 'timed-out' | a docker message */
+  error?: string
+}
+
 /** Versions shown on the title-bar chip — enough to paste into a bug report. */
 export interface AppInfo {
   version: string

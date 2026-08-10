@@ -1,6 +1,7 @@
 import React from 'react'
 import { Check, Copy } from '../Icons'
 import { CHAT, CHAT_TEXT as TYPE, MONO } from '../../theme'
+import { Hi } from './find'
 import { langFor, tokenize } from './highlight'
 
 // Markdown for a conversation — headings, paragraphs, nested lists, task lists,
@@ -79,7 +80,7 @@ function Link({ href, children }: { href: string; children: React.ReactNode }): 
   )
 }
 
-function Code({ children }: { children: string }): React.ReactElement {
+function Code({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
     <code
       style={{
@@ -181,11 +182,30 @@ export function inlineNodes(src: string): React.ReactNode[] {
   const out: React.ReactNode[] = []
   let buf = ''
   let key = 0
+  /**
+   * Every run of plain text leaves here as `<Hi>` rather than as a bare string,
+   * which is what makes find-in-chat reach markdown at all.
+   *
+   * The alternative — walking the tree `Md` returns and splitting the strings in
+   * it — was written first and does not work, for a reason worth recording: the
+   * block components take their content as *props* (`Paragraph({ lines })` calls
+   * this function itself), so from outside, a paragraph is an element with no
+   * children and the walk has nothing to descend into. Highlighting has to
+   * happen where text becomes nodes, and this is that place — one line, and it
+   * covers paragraphs, headings, list items, quotes and table cells at once
+   * because all of them come through here.
+   *
+   * `Hi` reads the find matcher from context and returns its input untouched
+   * when there is none, so this costs an extra component per text run and
+   * nothing else.
+   */
+  const flush = (): void => {
+    if (!buf) return
+    out.push(<Hi key={`t${key++}`}>{buf}</Hi>)
+    buf = ''
+  }
   const push = (node: React.ReactNode): void => {
-    if (buf) {
-      out.push(buf)
-      buf = ''
-    }
+    flush()
     out.push(<React.Fragment key={key++}>{node}</React.Fragment>)
   }
 
@@ -204,7 +224,11 @@ export function inlineNodes(src: string): React.ReactNode[] {
       const fence = /^`+/.exec(src.slice(i))![0]
       const end = src.indexOf(fence, i + fence.length)
       if (end > 0) {
-        push(<Code>{src.slice(i + fence.length, end).trim()}</Code>)
+        push(
+          <Code>
+            <Hi>{src.slice(i + fence.length, end).trim()}</Hi>
+          </Code>
+        )
         i = end + fence.length
         continue
       }
@@ -276,7 +300,7 @@ export function inlineNodes(src: string): React.ReactNode[] {
     buf += c
     i++
   }
-  if (buf) out.push(buf)
+  flush()
   return out
 }
 
@@ -855,6 +879,10 @@ export function Md({
     () => blocks(src.replace(/\r\n?/g, '\n').split('\n'), { color, size }),
     [src, color, size]
   )
+  // No find handling here: the highlight is applied by `inlineNodes`, where text
+  // becomes nodes (see the note on `flush` there). That also keeps this memo
+  // honest — the parse depends on the source and nothing else, so typing in the
+  // find bar never re-parses a row; only the `Hi` leaves re-render.
   return <div style={{ fontSize: size, wordBreak: 'break-word' }}>{nodes}</div>
 }
 

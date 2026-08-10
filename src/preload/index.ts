@@ -25,6 +25,7 @@ import type {
   PtyExitEvent,
   SessionType,
   SpawnResult,
+  TranscriptSearchResult,
   UpdateProjectInput,
   UsageSnapshot,
   VolumeRemoveResult,
@@ -182,6 +183,12 @@ const api = {
   ): Promise<ChatEntry[]> => ipcRenderer.invoke(CH.chatSubagent, sessionId, toolUseId, agentId),
   chatMountTree: (projectId: string): Promise<MountNode[]> =>
     ipcRenderer.invoke(CH.chatMountTree, projectId),
+
+  // Grep every conversation on the shared creds volume. App-wide rather than
+  // per-session: it answers with no chat open and reaches conversations whose
+  // session has been deleted.
+  searchTranscripts: (query: string): Promise<TranscriptSearchResult> =>
+    ipcRenderer.invoke(CH.searchTranscripts, query),
   /** Re-scan what `/` can expand; the fresh list arrives as a `meta` event. */
   chatRefreshCommands: (sessionId: string): void =>
     ipcRenderer.send(CH.chatRefreshCommands, sessionId),

@@ -55,6 +55,21 @@ const MIDNIGHT = {
   muted: '#7c8497',
   /** timestamps, paths, hints */
   dim: '#5b6376',
+  /**
+   * A find-in-chat match.
+   *
+   * Its own token rather than a reuse of `--accent2-soft`, on the rule this file
+   * already states for `--warn`: a token is a meaning, not a hex. "The find bar
+   * matched here" and "this chip is in bypass" are two meanings, and one of them
+   * changing colour later must not drag the other with it.
+   *
+   * An alpha wash of the theme's `--str`, which is the hue this palette already
+   * spends on *the part of the text somebody picked out* — a quoted string, a
+   * bold run. A search hit is the reader picking one out, so it is the same
+   * idea. Translucent, so the glyphs keep their own colour and a match inside a
+   * code span or a bold run still reads as code or bold.
+   */
+  find: 'rgba(217,160,106,.30)',
   /** the empty half of a progress bar */
   track: '#2a3042',
   /** the one filled accent: "Add project", the active-item left bar */
@@ -165,6 +180,7 @@ const GRAPHITE: Tokens = {
   fg: '#e5e3dd',
   muted: '#8c8a83',
   dim: '#6a6862',
+  find: 'rgba(201,160,106,.30)',
   track: '#2f2f2d',
   accent: '#b8792b',
   'accent-fg': '#1a1305',
@@ -228,6 +244,7 @@ const PAPER: Tokens = {
   fg: '#2c2b26',
   muted: '#78736a',
   dim: '#9a9488',
+  find: 'rgba(154,91,28,.26)',
   track: '#e2ddd0',
   accent: '#1f5f8b',
   'accent-fg': '#f4fbff',
@@ -639,6 +656,8 @@ export const CHAT = {
   stop: 'var(--role-stop)',
   /** plan / question — the "hold on" register */
   hold: 'var(--str)',
+  /** a find-in-chat match; the current row additionally takes a `you` rail */
+  find: 'var(--find)',
   danger: 'var(--danger)',
   /** context fill, escalating — `--accent2` while there is room, then amber, then red */
   ctx: ['var(--accent2)', 'var(--str)', 'var(--danger)']
