@@ -272,8 +272,13 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          height: 46,
-          padding: '0 8px 0 10px',
+          // `minHeight`, not `height`: the branch line is a third line and the
+          // three of them come to ~45.4px at the stated line-heights — inside
+          // 46, but by too little to bet a clipped descender on across fonts.
+          // A project with no branch is still exactly 46. The drop indicator
+          // measures the row with `getBoundingClientRect`, so growth is free.
+          minHeight: 46,
+          padding: '2px 8px 2px 10px',
           cursor: 'pointer',
           background: hover ? 'var(--sel)' : 'transparent',
           transition: 'background-color .1s',
@@ -324,44 +329,47 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
             {project.name}
           </span>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          {/* Path and branch are stacked, not side by side: sharing one line
+              meant a long path and a long branch each ate the other's room, and
+              both ellipsised while half the sidebar sat empty. Stacked, each
+              gets the full width. Both line-heights are stated so the three
+              lines add up to a known height — see `minHeight` on the header. */}
+          <span
+            title={project.basePath}
+            style={{
+              minWidth: 0,
+              fontFamily: MONO,
+              fontSize: 11,
+              lineHeight: 1.2,
+              color: 'var(--dim)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {project.basePath}
+          </span>
+
+          {branch && (
             <span
-              title={project.basePath}
+              title={`git branch: ${branch}`}
               style={{
-                flex: '0 1 auto',
                 minWidth: 0,
-                fontFamily: MONO,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                color: 'var(--accent2)',
                 fontSize: 11,
-                color: 'var(--dim)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap'
+                lineHeight: 1.2,
+                overflow: 'hidden'
               }}
             >
-              {project.basePath}
-            </span>
-
-            {branch && (
-              <span
-                title={`git branch: ${branch}`}
-                style={{
-                  flex: 'none',
-                  maxWidth: '48%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  color: 'var(--accent2)',
-                  fontSize: 11,
-                  overflow: 'hidden'
-                }}
-              >
-                <GitBranch size={10} style={{ flex: 'none' }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {branch}
-                </span>
+              <GitBranch size={10} style={{ flex: 'none' }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {branch}
               </span>
-            )}
-          </div>
+            </span>
+          )}
         </div>
 
         {!expanded && hasWorking && !attention && (
