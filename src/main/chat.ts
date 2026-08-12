@@ -101,6 +101,15 @@ const PROVISIONAL_MAX = 40
 /** How much of one message is worth sending to the titler. */
 const TITLE_EXCERPT = 800
 
+/**
+ * How many of your most recent messages the titler is shown.
+ *
+ * One is not enough — the newest message is very often a bare "yes, do that",
+ * which names nothing — and the count is small because these lead the prompt and
+ * are meant to be read as a single recent thread, not as a history.
+ */
+const TITLE_RECENT = 3
+
 /** `chat-4` — what the counter in `defaultSessionName` produces, and nothing else. */
 const DEFAULT_NAME_RE = /^chat-\d+$/
 
@@ -136,14 +145,24 @@ function provisionalTitle(text: string): string | null {
 }
 
 /**
- * What the titler is shown: the opening ask, where the conversation is now, and
- * nothing in between.
+ * What the titler is shown: **where the conversation is now**, with the opening
+ * ask behind it as background.
  *
- * Three excerpts rather than the transcript, for a reason beyond cost. A chat's
- * name has to answer "which one is this" from a list, and that is *what it was
- * for* plus *what it turned into* — the sixty tool calls in the middle are the
- * work, not the subject. It also keeps the call flat: a conversation compacted
- * four times sends the same handful of hundred tokens as its first turn.
+ * A handful of excerpts rather than the transcript, for a reason beyond cost. A
+ * chat's name has to answer "which one is this" from a list, and the sixty tool
+ * calls in the middle are the work, not the subject. It also keeps the call
+ * flat: a conversation compacted four times sends the same few hundred tokens as
+ * its first turn.
+ *
+ * **The recent end leads, and that is the whole point of the ordering.** This
+ * used to open with `First message:` and add the latest one underneath, and it
+ * named conversations after where they began — which is exactly wrong for the
+ * two moments a title is *regenerated*. "Retitle" is asked for precisely when
+ * the name no longer fits, and a compaction is the CLI's own evidence that the
+ * opening prompt is now the smallest part of the conversation. A model given
+ * "first" first anchors on it; given the last three messages first, and the
+ * opening labelled as background, it names what the session has become. On the
+ * first turn the two are the same message, so nothing changes there.
  *
  * The excerpts are the user's own text and the agent's, so a conversation could
  * in principle contain something aimed at this prompt. The blast radius is a
@@ -158,11 +177,28 @@ function titlePrompt(entries: ChatEntry[]): string | null {
   if (yours.length === 0) return null
   const excerpt = (e: ChatEntry | undefined): string =>
     e && e.kind === 'text' ? clip(e.md.trim().replace(/\s+/g, ' '), TITLE_EXCERPT) : ''
-  const parts = [`First message: ${excerpt(yours[0])}`]
-  if (yours.length > 1) parts.push(`Latest message: ${excerpt(yours[yours.length - 1])}`)
-  if (theirs.length > 0) parts.push(`Latest reply: ${excerpt(theirs[theirs.length - 1])}`)
+
+  // More than one, because the newest message on its own is routinely "yes do
+  // that" or "now the same for the other one" — true, and useless as a name.
+  const recent = yours.slice(-TITLE_RECENT)
+  const heading =
+    recent.length === 1
+      ? 'The last thing asked'
+      : `The last ${recent.length} things asked, oldest first`
+  const asked = recent.map((e) => `- ${excerpt(e)}`).join('\n')
+  const parts = [`${heading}:\n${asked}`]
+  if (theirs.length > 0) parts.push(`The latest reply: ${excerpt(theirs[theirs.length - 1])}`)
+  // Only when it is not already one of the recent ones, and always last.
+  if (yours.length > recent.length) {
+    parts.push(
+      `Background — how it began, which may no longer be the subject: ${excerpt(yours[0])}`
+    )
+  }
   return [
     'Name this coding session so its owner can pick it out of a list of twenty in a sidebar.',
+    '',
+    'Name what the conversation is about NOW. The most recent messages are what matter; if it',
+    'started somewhere else and has moved on, name where it ended up rather than where it began.',
     '',
     'Answer with the name alone: 3 to 6 words, sentence case, no quotes, no full stop, no',
     'markdown. Name the subject or the task, not the outcome and not the tools used. Ignore',
@@ -345,6 +381,19 @@ function silenceBudget(l: Live): number {
   return l.spoke || l.slowTurn ? SILENCE_BUSY_MS : SILENCE_MS
 }
 
+/**
+ * The turn the CLI is **executing right now** — the head of the queue.
+ *
+ * Not `l.turn`, which is the turn most recently *typed*. The two differ for as
+ * long as a message sits queued behind a running one, and every frame arriving
+ * in that window belongs to the head: the rows the mapper builds, the text a
+ * partial paints into, the tokens the clock counts. Falls back to `l.turn` for
+ * frames that arrive with nothing in flight at all (history, a stray late line).
+ */
+function activeTurn(l: Live): number {
+  return l.inFlight[0] ?? l.turn
+}
+
 /** How many entries the renderer mounts; the rest come from `chat:earlier`. */
 const MOUNT_WINDOW = 300
 
@@ -468,13 +517,6 @@ interface Live {
   /** byte offset into the transcript that has already been mapped */
   offset: number
   /**
-   * Where the running turn's lines begin. A settle re-maps the turn from here
-   * rather than from wherever the last read stopped, which is what makes
-   * settling the same turn twice idempotent — the second pass replaces the same
-   * rows with the same ids instead of appending a second copy of them.
-   */
-  turnOffset: number
-  /**
    * Whether the conversation already has a transcript, when the read could tell.
    * `undefined` after a *failed* read — then execArgs must fall back to its own
    * probe, or a session whose file exists would be launched with `--session-id`
@@ -524,6 +566,25 @@ interface Live {
    */
   usage: Map<string, ChatTurnTokens>
   turnRunning: boolean
+  /**
+   * The turns that have been sent and not yet reported a `result`, oldest first.
+   *
+   * Almost always zero or one. It is a *queue* because Claude Code accepts a
+   * message while it is still working — the composer says so, `⏎ queue` — and
+   * then runs the turns one after another, emitting one `result` each, in order.
+   *
+   * Before this existed there was only `l.turn`, and a queued send incremented it
+   * immediately: so the *first* turn's `result` froze the clock belonging to the
+   * turn that had only just been typed, and settled the first turn's transcript
+   * bytes under the second turn's number. The first turn's clock was never
+   * frozen and sat there reading `working · 4m` for the rest of the session,
+   * which is the bug this fixes; the mis-numbered settle was the same mistake
+   * doing quieter damage next to it.
+   *
+   * Results arrive in send order, so shifting the head is the whole
+   * correspondence — no ids to match, nothing to reconcile.
+   */
+  inFlight: number[]
   /**
    * This turn has emitted at least one frame, so the CLI is provably alive and
    * a later silence means "busy" rather than "broken" (see SILENCE_BUSY_MS).
@@ -656,7 +717,6 @@ export class ChatService {
       subagents: new Map(),
       subagentsRead: new Set(),
       offset: 0,
-      turnOffset: 0,
       transcriptExists: undefined,
       turn: 0,
       mapper: null,
@@ -674,6 +734,7 @@ export class ChatService {
       streamTimer: null,
       usage: new Map(),
       turnRunning: false,
+      inFlight: [],
       spoke: false,
       slowTurn: false,
       interrupted: false,
@@ -770,7 +831,6 @@ export class ChatService {
     // next read rather than consume half of it (see completeLines).
     const { complete, bytes } = completeLines(r.text)
     l.offset = bytes
-    l.turnOffset = bytes
     l.transcriptExists = r.bytes > 0
     const mapper = new ChatMapper(0)
     // Minus anything a revert threw away. Claude Code does not truncate the file
@@ -989,19 +1049,24 @@ export class ChatService {
     // which is the only diagnostic the user gets.
     if (l.turnRunning) {
       const bad = l.malformed > 0 ? ` · ${l.malformed} malformed lines` : ''
+      const turn = activeTurn(l)
       this.appendEntries(l, [
         {
-          id: `exit:${l.turn}`,
+          id: `exit:${turn}`,
           role: 'stop',
           at: Date.now(),
-          turn: l.turn,
+          turn,
           kind: 'stop',
           text: `claude exited (code ${code})${bad}`,
           tone: 'alert',
           retry: true
         }
       ])
-      this.dropTurnClock(l)
+      // Every clock, not just the executing turn's: the process is gone, so a
+      // turn still queued behind it is never going to run either, and its row
+      // would otherwise be left counting for the rest of the session.
+      for (const t of l.inFlight) this.dropTurnClock(l, t)
+      l.inFlight = []
       this.setActivity(l, 'idle', true)
       l.turnRunning = false
     }
@@ -1063,19 +1128,23 @@ export class ChatService {
     l.turnRunning = false
     const waited = Math.round(silenceBudget(l) / 1000)
     const said = waited >= 120 ? `${Math.round(waited / 60)}m` : `${waited}s`
+    const turn = activeTurn(l)
     this.appendEntries(l, [
       {
-        id: `timeout:${l.turn}`,
+        id: `timeout:${turn}`,
         role: 'stop',
         at: Date.now(),
-        turn: l.turn,
+        turn,
         kind: 'stop',
         text: `no response for ${said}`,
         tone: 'alert',
         retry: true
       }
     ])
-    this.dropTurnClock(l)
+    // The whole queue: a CLI that has answered nothing is not going to work
+    // through the messages stacked behind the one it is stuck on.
+    for (const t of l.inFlight) this.dropTurnClock(l, t)
+    l.inFlight = []
     this.setActivity(l, 'idle', true)
     this.emit({
       kind: 'error',
@@ -1202,7 +1271,7 @@ export class ChatService {
 
   private mapperFor(l: Live): ChatMapper {
     if (!l.mapper) {
-      l.mapper = new ChatMapper(l.turn)
+      l.mapper = new ChatMapper(activeTurn(l))
       l.mapper.model = l.model
       // This mapper is dropped at every `result`, and a background agent is not:
       // one launched two turns ago reports into *this* one. Its row is handed
@@ -1332,7 +1401,7 @@ export class ChatService {
         id,
         role: 'claude',
         at: s.at,
-        turn: l.turn,
+        turn: activeTurn(l),
         kind: 'text',
         md: s.text.get(index) ?? ''
       })
@@ -1353,7 +1422,7 @@ export class ChatService {
     const next = readUsage(raw)
     if (!next) return
     l.usage.set(msgId, next)
-    const entry = l.entries.find((e) => e.turn === l.turn && e.kind === 'turn')
+    const entry = l.entries.find((e) => e.turn === activeTurn(l) && e.kind === 'turn')
     // Only while it is running: a frozen clock holds `result.usage`, which is the
     // CLI's own arithmetic, and a late frame must not reopen it.
     if (!entry || entry.kind !== 'turn' || entry.durationMs !== undefined) return
@@ -1380,14 +1449,24 @@ export class ChatService {
   private result(l: Live, f: Json): void {
     if (l.silence) clearTimeout(l.silence)
     l.silence = null
-    const turn = l.turn
+    // **The turn this result is about is the one that has been waiting longest**,
+    // not the one most recently typed. They are the same thing until a message is
+    // queued behind a running turn, at which point reading `l.turn` here freezes
+    // the wrong clock and settles the wrong bytes (see Live.inFlight).
+    const turn = l.inFlight.shift() ?? l.turn
     const reason = str(f.terminal_reason)
     // `is_error` cannot discriminate a user interrupt from a failure — a clean
     // deny-then-interrupt reports is_error: true — so terminal_reason is the only
     // test, and it is the only one used anywhere in this file.
     const aborted = reason === 'aborted_streaming' || reason === 'aborted_tools'
-    const from = l.turnOffset
-    l.turnRunning = false
+    // Read now rather than captured at send: two turns queued back to back both
+    // snapshot the same offset at send time, and the second would then re-map the
+    // first one's lines. `l.offset` is "everything accounted for so far", which
+    // is exactly where this turn's lines begin — and the settle below advances it
+    // past them before the next result is handled.
+    const from = l.offset
+    // Still running if something is queued behind this.
+    l.turnRunning = l.inFlight.length > 0
     if (l.streamTimer) clearTimeout(l.streamTimer)
     l.streamTimer = null
     l.streaming = null
@@ -1420,16 +1499,25 @@ export class ChatService {
       // two clocks, the other invents a figure Claude Code never reported, in the
       // one case where the reading has no meaning. The gutter already stamps
       // hh:mm on the `you` row and this one.
-      this.dropTurnClock(l)
+      this.dropTurnClock(l, turn)
     } else {
-      this.freezeTurnClock(l, num(f.duration_ms), obj(f.usage))
+      this.freezeTurnClock(l, turn, num(f.duration_ms), obj(f.usage))
     }
 
-    // Suppressed at the same branch that reads terminal_reason for the stop row:
-    // you ended it, and being told it ended is noise.
-    this.setActivity(l, 'idle', aborted || l.interrupted)
+    // Only once the queue is empty. A turn finishing with another still queued
+    // has not ended the agent's work, and reporting idle there flickers the
+    // sidebar and raises an attention flag for a session that is still going.
+    if (l.inFlight.length === 0) {
+      // Suppressed at the same branch that reads terminal_reason for the stop
+      // row: you ended it, and being told it ended is noise.
+      this.setActivity(l, 'idle', aborted || l.interrupted)
+    }
     l.interrupted = false
     l.mapper = null
+    // The next queued turn counts from zero; this one's total is frozen onto its
+    // own row above. Cleared here rather than at send, which is too early when a
+    // message is queued into a turn that is still counting.
+    l.usage.clear()
 
     // The degradation path that lost the vote survives as exactly that: when
     // get_context_usage fails the meter derives from result.usage and goes
@@ -1461,15 +1549,16 @@ export class ChatService {
   /**
    * Record that the transcript is mapped up to `to`.
    *
-   * `turnOffset` moves with it rather than only at `send`, because both reads
-   * above are a `docker exec` round trip: a user who types the next message
-   * during it would otherwise have snapshotted the *previous* turn's start, and
-   * that turn's lines would be mapped a second time under the new turn's number.
-   * The re-settle is unaffected — it holds its own `from` in a local.
+   * Monotonic, and now the *only* thing a settle's start offset is read from
+   * (see `result`). There used to be a second marker, `turnOffset`, snapshotted
+   * at send — wrong in exactly the case this class had to grow a queue for: two
+   * messages sent back to back both captured the same offset, so the second
+   * turn's settle re-mapped the first turn's lines. Taking each turn's start
+   * from "everything accounted for so far" cannot have that bug, because a
+   * settle advances this past its own turn before the next result is handled.
    */
   private accounted(l: Live, to: number): void {
     l.offset = Math.max(l.offset, to)
-    l.turnOffset = Math.max(l.turnOffset, l.offset)
   }
 
   // ---- naming -------------------------------------------------------------
@@ -1593,7 +1682,8 @@ export class ChatService {
     l.subagents.clear()
     l.subagentsRead.clear()
     l.offset = 0
-    l.turnOffset = 0
+    // The conversation those turns belonged to is gone.
+    l.inFlight = []
     if (l.streamTimer) clearTimeout(l.streamTimer)
     l.streamTimer = null
     l.streaming = null
@@ -1727,22 +1817,30 @@ export class ChatService {
     const prose = `${text}${trailer}`
     const isCommand = text.trimStart().startsWith('/')
 
+    // Queued behind a turn that is still running, or the only one in flight?
+    // Everything below that resets *per-turn* state has to know, because a
+    // queued send must not reach into the turn that is currently executing —
+    // dropping its mapper mid-turn would unpair its tool calls, and clearing its
+    // token accumulator would restart the reading it is in the middle of.
+    const queued = l.inFlight.length > 0
     l.turn += 1
-    l.malformed = 0
-    l.mapper = null
+    l.inFlight.push(l.turn)
     l.turnRunning = true
-    l.spoke = false
+    l.interrupted = false
+    if (!queued) {
+      l.malformed = 0
+      l.mapper = null
+      l.spoke = false
+      l.streaming = null
+      // The reading is per turn, so the messages of the last one are not this one's.
+      l.usage.clear()
+    }
     // `/compact` is the one message that reliably goes quiet for minutes before
     // it says anything, so this turn starts on the wide budget instead of
-    // earning it with a first frame that will not come in time.
-    l.slowTurn = SLOW_COMMANDS.has(leadingCommand(text) ?? '')
-    l.interrupted = false
-    l.streaming = null
-    // The reading is per turn, so the messages of the last one are not this one's.
-    l.usage.clear()
-    // Everything the CLI writes from here belongs to this turn, and the settle
-    // re-reads from exactly here.
-    l.turnOffset = l.offset
+    // earning it with a first frame that will not come in time. OR-ed when
+    // queued: a compaction anywhere in the queue keeps the budget wide.
+    const slow = SLOW_COMMANDS.has(leadingCommand(text) ?? '')
+    l.slowTurn = queued ? l.slowTurn || slow : slow
 
     if (inline.length > 0) {
       const blocks = inline.map((a) => inlineBlock(a))
@@ -1951,6 +2049,7 @@ export class ChatService {
     l.streaming = null
     l.mapper = null
     l.turnRunning = false
+    l.inFlight = []
 
     // Then re-derive the whole log from the transcript, exactly as opening the
     // session would — which is the point, and worth the second read.
@@ -1962,7 +2061,7 @@ export class ChatService {
     // A stopped-short loop could therefore land on a message with no row to find,
     // and silently truncate nothing. Re-reading has no such case, rebuilds the
     // todo fold — which spans the conversation and is not addressable by turn —
-    // and re-anchors `offset`/`turnOffset` onto the real end of the file, so the
+    // and re-anchors `offset` onto the real end of the file, so the
     // next settle cannot map the abandoned stretch a second time. It also makes
     // the claim literal rather than aspirational: after a revert the log *is* the
     // bytes a restart would render.
@@ -2313,8 +2412,8 @@ export class ChatService {
    * the renderer drops a turn's clock row when a `stop` row for that turn lands,
    * which is the same rule stated from the other side.
    */
-  private dropTurnClock(l: Live): void {
-    const i = l.entries.findIndex((e) => e.turn === l.turn && e.kind === 'turn')
+  private dropTurnClock(l: Live, turn: number): void {
+    const i = l.entries.findIndex((e) => e.turn === turn && e.kind === 'turn')
     if (i >= 0) l.entries.splice(i, 1)
   }
 
@@ -2335,8 +2434,13 @@ export class ChatService {
    * blanking the row: that shape has not been observed, and the reading it would
    * throw away is the CLI's own arithmetic either way.
    */
-  private freezeTurnClock(l: Live, durationMs: number | null, usage?: Json | null): void {
-    const i = l.entries.findIndex((e) => e.turn === l.turn && e.kind === 'turn')
+  private freezeTurnClock(
+    l: Live,
+    turn: number,
+    durationMs: number | null,
+    usage?: Json | null
+  ): void {
+    const i = l.entries.findIndex((e) => e.turn === turn && e.kind === 'turn')
     const entry = l.entries[i]
     if (!entry || entry.kind !== 'turn') return
     entry.durationMs = durationMs ?? Date.now() - entry.startedAt
