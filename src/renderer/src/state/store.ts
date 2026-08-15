@@ -1342,14 +1342,25 @@ export const useStore = create<AppState>((set, get) => ({
   loadEarlier: async (sessionId) => {
     const c = get().chats[sessionId]
     if (!c) return
-    const res = await window.vivarium.chatEarlier(sessionId, c.entries.length)
+    // The topmost row is the anchor: main slices what sits above *it*, which is
+    // the only reading that stays right when this list is not an exact tail of
+    // main's (see ChatService.earlier).
+    const res = await window.vivarium.chatEarlier(sessionId, c.entries.length, c.entries[0]?.id)
     set((s) => {
       const cur = s.chats[sessionId]
       if (!cur) return {}
+      // Deduped on the way in. Prepending blind is what the count-based ask made
+      // safe by construction and the anchored one does not: an entry that came
+      // back while the same id is still mounted would give the log two rows under
+      // one key, which React answers by dropping or duplicating a row rather than
+      // erroring. `total` is taken, not maxed — main is the authority on how many
+      // entries exist, and this is the one call that asks it.
+      const held = new Set(cur.entries.map((e) => e.id))
+      const add = res.entries.filter((e) => !held.has(e.id))
       return {
         chats: {
           ...s.chats,
-          [sessionId]: { ...cur, entries: [...res.entries, ...cur.entries], total: res.total }
+          [sessionId]: { ...cur, entries: [...add, ...cur.entries], total: res.total }
         }
       }
     })

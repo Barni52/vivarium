@@ -174,11 +174,13 @@ const api = {
   /** The `data:` URL behind an image chip; null once main has evicted it. */
   chatImage: (sessionId: string, imageId: string): Promise<string | null> =>
     ipcRenderer.invoke(CH.chatImage, sessionId, imageId),
+  /** The window above `firstId`, the topmost row the renderer holds. */
   chatEarlier: (
     sessionId: string,
-    mounted: number
+    mounted: number,
+    firstId?: string
   ): Promise<{ entries: ChatEntry[]; total: number }> =>
-    ipcRenderer.invoke(CH.chatEarlier, sessionId, mounted),
+    ipcRenderer.invoke(CH.chatEarlier, sessionId, mounted, firstId),
   chatSubagent: (
     sessionId: string,
     toolUseId: string,

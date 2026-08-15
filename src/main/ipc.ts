@@ -923,8 +923,12 @@ export function registerIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     CH.chatEarlier,
-    (_e, sessionId: string, mounted: number): { entries: ChatEntry[]; total: number } =>
-      chat.earlier(sessionId, mounted)
+    (
+      _e,
+      sessionId: string,
+      mounted: number,
+      firstId?: string
+    ): { entries: ChatEntry[]; total: number } => chat.earlier(sessionId, mounted, firstId)
   )
 
   ipcMain.handle(

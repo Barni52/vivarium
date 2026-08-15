@@ -429,15 +429,19 @@ const IMAGE_BUDGET = 64 * 1024 * 1024
 const RESETTLE_MS = 700
 
 /**
- * How many reads a settle gets before it accepts a transcript holding less prose
- * than the stream painted.
+ * How many reads a settle gets to find a transcript holding at least as much
+ * prose as the stream painted.
  *
  * Three (so ~1.4s of waiting) rather than one, because the wait is invisible —
- * the streamed rows are on screen and complete throughout it — while giving up
- * early is not: whatever the last read holds is what replaces them. A cap has to
- * exist at all because the two readings can also differ for a reason no amount of
- * re-reading will fix, and re-reading a settled file every 700 ms for the rest of
- * the session is the one outcome worse than a stale row.
+ * the streamed rows are on screen and complete throughout it. A cap has to exist
+ * because the two readings can also differ for a reason no amount of re-reading
+ * will fix, and re-reading a settled file every 700 ms for the rest of the
+ * session is the one outcome worse than a stale row.
+ *
+ * What running out means is **keep the streamed rows**, not "apply the short
+ * read". That distinction is the whole safety net under this file: a settle
+ * deletes everything it does not re-map, so a read that turns out not to cover
+ * the turn would otherwise erase it from the only copy either process holds.
  */
 const SETTLE_ATTEMPTS = 3
 
@@ -957,9 +961,23 @@ export class ChatService {
     // simply arrived first — so the streamed rows stay on screen untouched and
     // the replacement waits for a file that has caught up. Withholding is free
     // because a settle is idempotent: `accounted` is monotonic and the re-read
-    // starts from this same `from`, so the only thing lost by skipping this pass
-    // is the pass itself.
-    if (landed < painted && attempt + 1 < SETTLE_ATTEMPTS) {
+    // starts from this same `from`, so the only thing lost by skipping a pass is
+    // the pass itself.
+    //
+    // **And withholding is still the answer once the passes run out.** Applying
+    // the short read on the last attempt is what turned a mis-aligned read into
+    // permanent loss: `takeTurn` handed this a stretch of file that was not the
+    // turn at all (see its note on deferred boundaries), and 1.4s later the
+    // turn's message and answer were gone from the only copy either process
+    // holds — with `load earlier` offering them back and having nothing to give.
+    // The cap was always about not re-reading a settled file every 700 ms
+    // forever, which giving up on the *reads* satisfies; giving up on the *rows*
+    // was never part of it. So this makes the trade the abandoned-turn branch
+    // below already makes — a turn that stays stream-derived costs something
+    // real but bounded (no transcript uuids on its rows, so it cannot be aimed
+    // at by a revert), where deleting it is not bounded at all.
+    if (landed < painted) {
+      if (attempt + 1 >= SETTLE_ATTEMPTS) return
       setTimeout(() => {
         // Not if a follow-up has since started: rows are replaced by appending
         // them, so settling a turn that is no longer the last one would hoist it
@@ -2408,10 +2426,32 @@ export class ChatService {
     }
   }
 
-  earlier(sessionId: string, mounted: number): { entries: ChatEntry[]; total: number } {
+  /**
+   * The window of entries immediately above the one the renderer is showing.
+   *
+   * Anchored on `firstId` — the id of the topmost row the renderer holds —
+   * rather than on its row count, because the count only names the right slice
+   * while the renderer holds an exact tail of this list, and it does not always.
+   * Main mutates rows in place and ships them as ordinary appends (a background
+   * agent's task row completing, `freezeTurnClock` moving a clock to the end);
+   * when the row being mutated sits *above* the mount window the renderer has
+   * never seen its id, so it appends it as new. One extra row on that side, one
+   * row silently skipped on this one, per event — which is the wrong kind of bug
+   * to leave in the control whose entire job is "nothing has been lost".
+   *
+   * `mounted` stays as the fallback for an anchor this list no longer holds (the
+   * settle that replaced that row landed between the click and the read), and is
+   * what an empty log asks with.
+   */
+  earlier(
+    sessionId: string,
+    mounted: number,
+    firstId?: string
+  ): { entries: ChatEntry[]; total: number } {
     const l = this.live.get(sessionId)
     if (!l) return { entries: [], total: 0 }
-    const end = Math.max(0, l.entries.length - mounted)
+    const anchored = firstId ? l.entries.findIndex((e) => e.id === firstId) : -1
+    const end = anchored >= 0 ? anchored : Math.max(0, l.entries.length - mounted)
     const start = Math.max(0, end - MOUNT_WINDOW)
     return { entries: this.wireEntries(l.entries.slice(start, end)), total: l.entries.length }
   }

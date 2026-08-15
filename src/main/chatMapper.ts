@@ -1286,13 +1286,49 @@ export function completeLines(text: string): { complete: string; bytes: number }
  * command's echo and its `<local-command-stdout>` reply are all plain user text
  * lines *inside* a turn, so any structural rule would have to enumerate them and
  * would break on the next one the CLI adds. When the marker is absent (an older
- * CLI, a turn that was cut) this consumes the whole read, which is exactly the
- * behaviour it replaces.
+ * CLI, a turn under the CLI's own 30s reporting threshold, a turn that was cut)
+ * this consumes the whole read, which is exactly the behaviour it replaces.
+ *
+ * **The first boundary in the read is not necessarily this turn's**, and that is
+ * the whole reason for the segment walk below. A settle reads from "everything
+ * accounted for so far", and the file can have grown *between* turns since — a
+ * `set_model` echo, and above all a background agent's `<task-notification>`
+ * followed by the `turn_duration` the CLI **held back** while that agent ran
+ * (it defers the line until nothing is running, so an agent launched in turn 4
+ * flushes turn 4's boundary during turn 7). Those leftovers sit in front of the
+ * turn being settled, so stopping at the first marker took a handful of stale
+ * lines to *be* the turn — and since a settle replaces everything it does not
+ * re-map, the turn's own message and answer were deleted from the log, then
+ * re-materialised under the *next* turn's number by the settle after it.
+ *
+ * A leftover stretch is told apart from a turn by the one thing a turn produces
+ * and bookkeeping never does: model work. A subagent's own output is not written
+ * here (it lives in the sibling file), so between two turns this file grows only
+ * user and system lines. So: walk the read in segments ending at each boundary,
+ * skip the leading segments that produced none, and stop at the end of the first
+ * one that did.
+ *
+ * "Model work" is an `assistant` line **or** a compaction. The second is not a
+ * flourish: `/compact` is the one turn that can run for minutes — the only kind
+ * that reliably crosses the CLI's 30s threshold for writing a boundary at all —
+ * and it writes no assistant line, only a `compact_boundary` and a summary
+ * carried on a user line. Without it, the turn that is *most* likely to have a
+ * marker would be read as leftovers and merged into the turn after it.
+ *
+ * The skipped lines are **kept, not dropped** — they are returned at the head of
+ * `lines` and counted in `bytes`. That notification is the only place a
+ * background agent's outcome is written down, and it has to reach the mapper to
+ * complete the row that launched it; `settleTurn` ships anything it touches
+ * outside this turn as an upsert (see `foreign` there).
  */
 export function takeTurn(text: string): { lines: Json[]; bytes: number } {
   const raw = text.split('\n')
   const lines: Json[] = []
   let bytes = 0
+  // The end of the last segment that held no model work: how far to rewind to if
+  // the read turns out to be nothing *but* leftovers.
+  let leftovers: { lines: number; bytes: number } | null = null
+  let sawWork = false
   // `text` always ends with a newline (see completeLines), so the final element
   // is the empty string after it and is not a line.
   for (let i = 0; i < raw.length - 1; i++) {
@@ -1307,7 +1343,20 @@ export function takeTurn(text: string): { lines: Json[]; bytes: number } {
     }
     if (!o) continue
     lines.push(o)
-    if (str(o.type) === 'system' && str(o.subtype) === 'turn_duration') break
+    const type = str(o.type)
+    const subtype = str(o.subtype)
+    if (type === 'assistant' || (type === 'system' && subtype === 'compact_boundary')) sawWork = true
+    if (type === 'system' && subtype === 'turn_duration') {
+      if (sawWork) break
+      leftovers = { lines: lines.length, bytes }
+    }
+  }
+  // Every segment was bookkeeping and the read ended without a turn starting.
+  // Stop at the last boundary rather than swallowing the trailing fragment: a
+  // turn that has begun but not finished is the *next* settle's to map, and
+  // taking its opening lines here would stamp them with this turn's number.
+  if (!sawWork && leftovers) {
+    return { lines: lines.slice(0, leftovers.lines), bytes: leftovers.bytes }
   }
   return { lines, bytes }
 }

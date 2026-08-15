@@ -227,12 +227,23 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   read over `docker exec`; there is **no host-side mirror**, which would drift from the file
   `--resume` actually feeds the model. A turn paints from the stream, and at `result` main
   re-reads from its stored byte offset and *replaces* that turn's rows. Accepted cost: no history
-  while the container is stopped. Three rules make the replacement safe, all because it deletes
-  what it replaces — whole lines only (`completeLines`), one turn per settle (`takeTurn`, bounded
-  by `system/turn_duration`), and a settle reads from the turn's own start offset, which makes it
-  idempotent and is what lets a settle holding *less prose than the stream already painted* be
-  **withheld** rather than applied and repaired. An aborted turn is not settled, but its bytes are
+  while the container is stopped. Four rules make the replacement safe, all because it deletes
+  what it replaces — whole lines only (`completeLines`), one turn per settle (`takeTurn`), a settle
+  reading from the turn's own start offset (which makes it idempotent), and, under all of them, the
+  floor: a settle holding **less prose than the stream already painted is never applied**. It
+  re-reads `SETTLE_ATTEMPTS` times and then keeps the streamed rows *for good* — running out of
+  attempts is not permission to delete a turn. An aborted turn is not settled, but its bytes are
   still stepped over (`skipTurn`).
+- **The first `turn_duration` in a settle's read is not necessarily that turn's end.** `takeTurn`
+  walks the read in segments and skips leading ones that produced no model work (no `assistant`
+  line and no `compact_boundary`), because the file grows *between* turns too: a `set_model` echo,
+  and above all a background agent's `<task-notification>` followed by the `turn_duration` the CLI
+  **defers** for as long as any background task is running. Stopping at the first marker made a
+  handful of stale lines *be* the turn, so the turn's own message and answer were deleted and then
+  re-materialised under the next turn's number — with `load earlier` offering them back and having
+  nothing to give, because main had thrown them away too. The skipped lines are **kept**, not
+  dropped: the notification is the only record of a background agent's outcome and has to reach the
+  mapper to complete the row that launched it.
 - **A revert is the CLI's own `rewind_conversation` control request, and the transcript does not
   shrink for it.** It pops exactly one message (so reverting N is N sequential calls, newest
   first), cannot pop the first, must be aimed from the *file* rather than `l.entries`, and
