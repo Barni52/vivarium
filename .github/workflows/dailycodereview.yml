@@ -39,10 +39,10 @@ jobs:
           # The `||` accepts either secret name: an unset secret is the empty string, so the
           # first truthy one wins. Collapse it to whichever name you kept once you know.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_API_KEY }}
-          # Temporarily on again: run 7 went green having skipped Step 1 entirely, and without
-          # the stream there is no way to see which commands were refused. Take it back out once
-          # a run is confirmed good — it copies the whole review into logs that are public here.
-          show_full_output: true
+          # If a run ever goes green having done nothing, add `show_full_output: true` here and
+          # re-dispatch: the SDK stream is hidden by default, and that silence is what made the
+          # first two failures — and later the skipped label step — undiagnosable. Off by
+          # default so the daily run does not copy the whole review into this repo's public logs.
           # Task/Agent are refused outright, not just discouraged in the prompt: a background
           # agent's findings die with the process at end of turn, and that failure is silent —
           # the run goes green having written nothing. One agent, one turn, everything inline.
