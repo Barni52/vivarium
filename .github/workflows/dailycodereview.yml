@@ -47,15 +47,20 @@ jobs:
           claude_args: >-
             --allowedTools "Write,Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*),Bash(grep:*),Bash(sed:*),Bash(sort:*),Bash(uniq:*),Bash(comm:*),Bash(diff:*),Bash(head:*),Bash(tail:*)"
             --disallowedTools "Task,Agent"
-            --max-turns 80
+            --max-turns 120
           prompt: |
-            You maintain a single long-lived GitHub Issue that acts as a RUNNING LIST of
-            code-review findings for this repository. You run once per day. Your job is to
-            update that list — not to write a fresh report each time.
+            You maintain a single long-lived GitHub Issue that acts as a RUNNING LIST for
+            this repository, in two parts: FINDINGS (defects worth fixing) and IDEAS
+            (features and improvements worth building). You run once per day. Your job is
+            to update that list — not to write a fresh report each time.
 
             The repository is checked out in the current working directory. Read CLAUDE.md
-            first: it documents the architecture and the project's own rules, and findings
-            that contradict a documented deliberate decision are NOT findings.
+            first: it documents the architecture and the project's own rules. Anything that
+            contradicts a documented deliberate decision is NOT a finding and NOT an idea.
+            This codebase documents many things it has deliberately chosen *not* to do, and
+            the reasoning behind each; proposing one of them back is the single most likely
+            way for this job to waste everyone's time. If CLAUDE.md says a thing was removed,
+            rejected, or is absent by design, it stays absent.
 
             ## Step 1 — Find the tracker issue
 
@@ -66,17 +71,23 @@ jobs:
                 --jq '.[] | select(.body | contains("<!-- code-review-tracker -->")) | .number'
 
             If it exists, read its full current body — that is your previous list.
-            If it does not exist, you will create it in Step 4.
+            If it does not exist, you will create it in Step 5.
 
-            ## Step 2 — Verify the existing findings
+            ## Step 2 — Verify what is already on the list
 
-            For EVERY item already on the list, go look at the code it points to and decide:
+            For EVERY finding already on the list, go look at the code it points to and decide:
               - STILL PRESENT  -> keep the item, keep its original ID and "first seen" date
               - FIXED          -> drop it from the list entirely, and note it in the daily comment
               - NO LONGER VALID (was wrong, or the code was deleted/refactored away)
                                -> drop it, and note it as "withdrawn" in the daily comment
 
-            Never silently drop an item. Every removal is accounted for in Step 5.
+            For EVERY idea already on the list, go look at the code and decide the same way:
+              - STILL WANTED   -> keep it, with its original ID and "first seen" date
+              - BUILT          -> drop it, and note it as "shipped" in the daily comment
+              - NO LONGER WANTED (superseded, made irrelevant by other work, or you can now
+                see it contradicts CLAUDE.md) -> drop it, and note it as "dropped"
+
+            Never silently drop an item. Every removal is accounted for in Step 6.
 
             ## Step 3 — Review the whole codebase for new findings
 
@@ -96,7 +107,32 @@ jobs:
 
             Anything already on the list from Step 2 must NOT be added again as a new item.
 
-            ## Step 4 — Write the updated issue body
+            ## Step 4 — Look for features and improvements worth building
+
+            Separately from the defects above, look for work that would make this a better
+            app or a better codebase. Consider:
+              - Features the app plausibly wants next, judged from what it already does
+              - Rough edges in existing behaviour — things that work but are awkward to use
+              - Architectural improvements that would remove a whole class of future bugs
+              - Performance and resource wins worth the change they require
+
+            Quality bar, deliberately high: an idea earns a place only if you can name where
+            it would go, say concretely what it would do, and say why it is worth doing for
+            THIS app. Generic engineering advice — "add tests", "improve error handling",
+            "adopt stricter types" — is not an idea. Neither is anything CLAUDE.md rules out.
+
+            This section is for things worth BUILDING. A defect belongs in Findings and never
+            here; an idea never goes in a severity band. If you catch yourself filing a
+            nitpick as a Low finding to avoid deciding, it is neither — drop it.
+
+            Cap the open ideas at 10. If you have a new one and the list is full, it earns
+            its place only by being better than the weakest idea already there — in which
+            case drop that one as "dropped" and say so in the comment. A backlog nobody can
+            read is a backlog nobody uses.
+
+            Anything already on the list from Step 2 must NOT be proposed again.
+
+            ## Step 5 — Write the updated issue body
 
             Title: `Code review tracker`
 
@@ -106,7 +142,7 @@ jobs:
             <!-- code-review-tracker -->
             _Maintained automatically. Last updated: YYYY-MM-DD._
 
-            **Open: N**  ·  High: N · Medium: N · Low: N
+            **Open: N**  ·  High: N · Medium: N · Low: N  ·  **Ideas: N**
 
             ## High
             - **[H-01]** `src/main/docker.ts:112-140` — One-line claim.
@@ -118,12 +154,22 @@ jobs:
 
             ## Low
             ...
+
+            ## Ideas
+            - **[F-01]** `src/renderer/src/components/chat/` — One-line proposal.
+              Why: what it gets you, and when it would matter.
+              _First seen: YYYY-MM-DD_
             ```
 
-            ID rules: IDs are permanent. `H-01`, `M-07`, `L-03`. Never renumber an existing
-            item and never reuse the ID of a removed one — always allocate the next unused
-            number in that severity band. If an item's severity changes, keep the original ID
-            and move it under the new heading.
+            `Open: N` counts findings only, so that number keeps meaning the same thing day
+            to day; ideas are counted separately beside it.
+
+            ID rules: IDs are permanent. `H-01`, `M-07`, `L-03` for findings, `F-01` for
+            ideas. Never renumber an existing item and never reuse the ID of a removed one —
+            always allocate the next unused number in that band. If a finding's severity
+            changes, keep the original ID and move it under the new heading. A finding never
+            turns into an idea and an idea never turns into a finding: if you filed one as
+            the wrong kind, drop that item and add a new one under the right band.
 
             Sort each section with the oldest items first, so long-lived items stay visible.
 
@@ -137,7 +183,7 @@ jobs:
             and pass that to --body-file; do not pass the body inline. /tmp is the only place
             you may write — never write inside the checkout.
 
-            ## Step 5 — Post the daily delta comment
+            ## Step 6 — Post the daily delta comment
 
             Editing an issue body sends no notification, so the comment is how the change
             gets seen. ONLY comment if something actually changed today. If nothing changed,
@@ -153,7 +199,11 @@ jobs:
             New (1): [M-09] `src/main/pty.ts:88` — resize handler can fire after dispose
             Withdrawn (0): —
 
-            Open: 14 (High 2 · Medium 7 · Low 5)
+            Shipped (1): [F-03] per-project default model
+            Proposed (1): [F-08] `ChatView` — jump-to-latest button when scrolled up
+            Dropped (0): —
+
+            Open: 14 (High 2 · Medium 7 · Low 5) · Ideas: 6
             ```
 
             Post it with `gh issue comment <number> --body-file <file>`.
