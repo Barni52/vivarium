@@ -1,0 +1,152 @@
+name: Daily Code Review Tracker
+
+# Runs a full-codebase review every day and maintains ONE long-lived GitHub Issue
+# as a running list of findings: new items get added, fixed items get removed.
+#
+# 13:00 UTC = 15:00 Europe/Budapest (summer) / 14:00 (winter), so it lands
+# comfortably before 17:00 local even if GitHub delays the scheduled run.
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: daily-code-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --allowedTools "Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*)"
+            --max-turns 80
+          prompt: |
+            You maintain a single long-lived GitHub Issue that acts as a RUNNING LIST of
+            code-review findings for this repository. You run once per day. Your job is to
+            update that list — not to write a fresh report each time.
+
+            The repository is checked out in the current working directory. Read CLAUDE.md
+            first: it documents the architecture and the project's own rules, and findings
+            that contradict a documented deliberate decision are NOT findings.
+
+            ## Step 1 — Find the tracker issue
+
+            The tracker issue is identified by the HTML marker `<!-- code-review-tracker -->`
+            in its body. Find it with:
+
+              gh issue list --state open --limit 100 --json number,title,body \
+                --jq '.[] | select(.body | contains("<!-- code-review-tracker -->")) | .number'
+
+            If it exists, read its full current body — that is your previous list.
+            If it does not exist, you will create it in Step 4.
+
+            ## Step 2 — Verify the existing findings
+
+            For EVERY item already on the list, go look at the code it points to and decide:
+              - STILL PRESENT  -> keep the item, keep its original ID and "first seen" date
+              - FIXED          -> drop it from the list entirely, and note it in the daily comment
+              - NO LONGER VALID (was wrong, or the code was deleted/refactored away)
+                               -> drop it, and note it as "withdrawn" in the daily comment
+
+            Never silently drop an item. Every removal is accounted for in Step 5.
+
+            ## Step 3 — Review the whole codebase for new findings
+
+            Review the entire codebase, not just recent changes. Look for:
+              - Correctness bugs, logic errors, unhandled edge cases
+              - Race conditions, resource/handle leaks, missing cleanup
+              - Security issues (command injection, unsafe IPC, path traversal, secret handling)
+              - Error handling gaps and swallowed failures
+              - Type-safety holes (`any`, unchecked casts, non-null assertions covering real risk)
+              - Dead code, duplication, and structural/maintainability problems
+              - Style and consistency drift from the conventions in CLAUDE.md
+
+            Quality bar: only report things a competent reviewer would actually act on.
+            No nitpicks, no "consider adding a comment", no speculative refactors.
+            Every finding must name a specific file and line range and state the concrete
+            consequence — what actually goes wrong, and when.
+
+            Anything already on the list from Step 2 must NOT be added again as a new item.
+
+            ## Step 4 — Write the updated issue body
+
+            Title: `Code review tracker`
+
+            Body format (keep it exactly this shape so it stays diffable day to day):
+
+            ```
+            <!-- code-review-tracker -->
+            _Maintained automatically. Last updated: YYYY-MM-DD._
+
+            **Open: N**  ·  High: N · Medium: N · Low: N
+
+            ## High
+            - **[H-01]** `src/main/docker.ts:112-140` — One-line claim.
+              Consequence: what breaks and under what conditions.
+              _First seen: YYYY-MM-DD_
+
+            ## Medium
+            ...
+
+            ## Low
+            ...
+            ```
+
+            ID rules: IDs are permanent. `H-01`, `M-07`, `L-03`. Never renumber an existing
+            item and never reuse the ID of a removed one — always allocate the next unused
+            number in that severity band. If an item's severity changes, keep the original ID
+            and move it under the new heading.
+
+            Sort each section with the oldest items first, so long-lived items stay visible.
+
+            Then apply it:
+              - Issue exists: `gh issue edit <number> --body-file <file>`
+              - Issue does not exist:
+                `gh issue create --title "Code review tracker" --body-file <file>`
+                and then pin it if you can.
+
+            Write the body to a temp file and use --body-file; do not pass it inline.
+
+            ## Step 5 — Post the daily delta comment
+
+            Editing an issue body sends no notification, so the comment is how the change
+            gets seen. ONLY comment if something actually changed today. If nothing changed,
+            still update the "Last updated" date in the body, post no comment, and say
+            "no changes" as your final output.
+
+            Comment format:
+
+            ```
+            **YYYY-MM-DD**
+
+            Fixed (2): [H-02] stale container handle, [L-05] unused import in chat.ts
+            New (1): [M-09] `src/main/pty.ts:88` — resize handler can fire after dispose
+            Withdrawn (0): —
+
+            Open: 14 (High 2 · Medium 7 · Low 5)
+            ```
+
+            Post it with `gh issue comment <number> --body-file <file>`.
+
+            ## Rules
+
+            - This is an unattended run. Never ask questions. Make the call and proceed.
+            - Do not open pull requests, do not modify any repository files, do not push.
+              Your only writes are to the tracker issue and its comments.
+            - If `gh` fails, retry once, then report the exact error as your final output.
