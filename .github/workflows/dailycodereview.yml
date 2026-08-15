@@ -79,7 +79,7 @@ jobs:
               gh label create severity:medium --color D93F0B --description "Code review: medium severity" 2>/dev/null || true
               gh label create severity:low  --color FBCA04 --description "Code review: low severity" 2>/dev/null || true
               gh label create idea          --color 1D76DB --description "Feature or improvement worth building" 2>/dev/null || true
-              gh label create cr-auto-closed --color C5DEF5 --description "Closed by the review job, not by a human" 2>/dev/null || true
+              gh label create cr-auto-closed --color C5DEF5 --description "Closed by automation, not by a person — reopenable if it regresses" 2>/dev/null || true
 
             ## Step 2 — Read the existing backlog
 
@@ -172,8 +172,10 @@ jobs:
             is not permission to file a second copy.
 
               - Matches an OPEN issue -> already tracked. Do nothing at all.
-              - Matches an issue closed WITH the `cr-auto-closed` label -> you closed this
-                yourself. If the defect has genuinely returned, REOPEN that same issue
+              - Matches an issue closed WITH the `cr-auto-closed` label -> automation closed
+                this: either you on an earlier run, or the `/fix` skill after landing a fix
+                for it. Either way the closure describes the code, not a person's decision,
+                so if the defect has genuinely returned, REOPEN that same issue
                 (`gh issue reopen <n>`), remove the label (`--remove-label cr-auto-closed`)
                 and comment that it regressed. Never file a second issue for it.
               - Matches an issue closed WITHOUT that label -> a human closed it. That is a
