@@ -39,10 +39,10 @@ jobs:
           # The `||` accepts either secret name: an unset secret is the empty string, so the
           # first truthy one wins. Collapse it to whichever name you kept once you know.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_API_KEY }}
-          # If a run ever goes green having written nothing, add `show_full_output: true` here and
-          # re-dispatch. The SDK stream is hidden by default and that silence is exactly what made
-          # the first two failures undiagnosable. Left off so the daily run does not copy the whole
-          # review into logs that are public on this repo.
+          # Temporarily on again: run 7 went green having skipped Step 1 entirely, and without
+          # the stream there is no way to see which commands were refused. Take it back out once
+          # a run is confirmed good — it copies the whole review into logs that are public here.
+          show_full_output: true
           # Task/Agent are refused outright, not just discouraged in the prompt: a background
           # agent's findings die with the process at end of turn, and that failure is silent —
           # the run goes green having written nothing. One agent, one turn, everything inline.
@@ -70,16 +70,28 @@ jobs:
 
             ## Step 1 — Make sure the labels exist
 
-            Every label is created up front, because `gh issue create --label` fails outright
+            Every label must exist up front, because `gh issue create --label` fails outright
             on a label that does not exist, and that failure would look like a broken run.
-            Already-exists errors are expected and ignored:
 
-              gh label create code-review   --color 0E8A16 --description "Filed by the daily review job" 2>/dev/null || true
-              gh label create severity:high --color B60205 --description "Code review: high severity" 2>/dev/null || true
-              gh label create severity:medium --color D93F0B --description "Code review: medium severity" 2>/dev/null || true
-              gh label create severity:low  --color FBCA04 --description "Code review: low severity" 2>/dev/null || true
-              gh label create idea          --color 1D76DB --description "Feature or improvement worth building" 2>/dev/null || true
-              gh label create cr-auto-closed --color C5DEF5 --description "Closed by automation, not by a person — reopenable if it regresses" 2>/dev/null || true
+            First read what is already there:
+
+              gh label list --limit 200 --json name --jq '.[].name'
+
+            Then create ONLY the missing ones, one plain command each:
+
+              gh label create code-review     --color 0E8A16 --description "Filed by the daily review job"
+              gh label create severity:high   --color B60205 --description "Code review: high severity"
+              gh label create severity:medium --color D93F0B --description "Code review: medium severity"
+              gh label create severity:low    --color FBCA04 --description "Code review: low severity"
+              gh label create idea            --color 1D76DB --description "Feature or improvement worth building"
+              gh label create cr-auto-closed  --color C5DEF5 --description "Closed by automation, not by a person - reopenable if it regresses"
+
+            Do not append `|| true` or `2>/dev/null` to these, and do not chain them with `&&`.
+            Your Bash allowlist matches each operand of a compound command separately, and
+            `true` is not on it — so `gh label create ... || true` is refused *as a whole* and
+            the label is never created. That failure is silent and downstream: nothing breaks
+            until an issue you try to file carries a label that does not exist. List first,
+            then create only what is missing; that way no command ever needs a fallback.
 
             ## Step 2 — Read the existing backlog
 
