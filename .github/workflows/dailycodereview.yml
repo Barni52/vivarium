@@ -41,8 +41,12 @@ jobs:
           # undiagnosable — it exited 0 having created nothing. Drop this once a run is confirmed
           # good. Logs on a public repo are public, but everything here is bound for a public issue.
           show_full_output: true
+          # Task/Agent are refused outright, not just discouraged in the prompt: a background
+          # agent's findings die with the process at end of turn, and that failure is silent —
+          # the run goes green having written nothing. One agent, one turn, everything inline.
           claude_args: >-
-            --allowedTools "Write,Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*)"
+            --allowedTools "Write,Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*),Bash(grep:*),Bash(sed:*),Bash(sort:*),Bash(uniq:*),Bash(comm:*),Bash(diff:*),Bash(head:*),Bash(tail:*)"
+            --disallowedTools "Task,Agent"
             --max-turns 80
           prompt: |
             You maintain a single long-lived GitHub Issue that acts as a RUNNING LIST of
@@ -157,6 +161,11 @@ jobs:
             ## Rules
 
             - This is an unattended run. Never ask questions. Make the call and proceed.
+            - **Do the whole review yourself, in this one turn.** Never delegate to background
+              agents. This is a single `claude -p` process: when your turn ends the process
+              exits, so anything still running in the background is killed and its findings
+              are lost. Ending your turn to "wait for results" ends the job having done
+              nothing. Your turn ends only after the issue has been written.
             - Do not open pull requests, do not modify any repository files, do not push.
               Your only writes are to the tracker issue and its comments.
             - If `gh` fails, retry once, then report the exact error as your final output.
