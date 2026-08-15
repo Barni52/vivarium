@@ -37,8 +37,12 @@ jobs:
           # The `||` accepts either secret name: an unset secret is the empty string, so the
           # first truthy one wins. Collapse it to whichever name you kept once you know.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_API_KEY }}
+          # Temporary: the SDK stream is hidden by default, which made the first run's failure
+          # undiagnosable — it exited 0 having created nothing. Drop this once a run is confirmed
+          # good. Logs on a public repo are public, but everything here is bound for a public issue.
+          show_full_output: true
           claude_args: >-
-            --allowedTools "Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*)"
+            --allowedTools "Write,Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*)"
             --max-turns 80
           prompt: |
             You maintain a single long-lived GitHub Issue that acts as a RUNNING LIST of
@@ -125,7 +129,9 @@ jobs:
                 `gh issue create --title "Code review tracker" --body-file <file>`
                 and then pin it if you can.
 
-            Write the body to a temp file and use --body-file; do not pass it inline.
+            Write the body with the Write tool to a path under /tmp (e.g. /tmp/tracker-body.md)
+            and pass that to --body-file; do not pass the body inline. /tmp is the only place
+            you may write — never write inside the checkout.
 
             ## Step 5 — Post the daily delta comment
 
