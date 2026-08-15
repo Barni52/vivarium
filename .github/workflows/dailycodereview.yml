@@ -1,7 +1,9 @@
 name: Daily Code Review Tracker
 
-# Runs a full-codebase review every day and maintains ONE long-lived GitHub Issue
-# as a running list of findings: new items get added, fixed items get removed.
+# Runs a full-codebase review every day and keeps the code-review backlog in sync as
+# ordinary GitHub Issues — one issue per item, so each can be closed, assigned, discussed
+# and closed from a PR with "Fixes #N". `label:code-review` is the running list; there is
+# no index issue, because the issue list already is one and a second copy would drift.
 #
 # 13:00 UTC = 15:00 Europe/Budapest (summer) / 14:00 (winter), so it lands
 # comfortably before 17:00 local even if GitHub delays the scheduled run.
@@ -49,10 +51,14 @@ jobs:
             --disallowedTools "Task,Agent"
             --max-turns 120
           prompt: |
-            You maintain a single long-lived GitHub Issue that acts as a RUNNING LIST for
-            this repository, in two parts: FINDINGS (defects worth fixing) and IDEAS
-            (features and improvements worth building). You run once per day. Your job is
-            to update that list — not to write a fresh report each time.
+            You maintain this repository's code-review backlog as ordinary GitHub Issues —
+            one issue per item. You run once per day. Your job is to reconcile that backlog
+            with the current state of the code: close what is done, file what is new, and
+            leave everything else alone. You are not writing a report.
+
+            Two kinds of item, and they never mix:
+              FINDING — a defect worth fixing.
+              IDEA    — a feature or improvement worth building.
 
             The repository is checked out in the current working directory. Read CLAUDE.md
             first: it documents the architecture and the project's own rules. Anything that
@@ -62,34 +68,59 @@ jobs:
             way for this job to waste everyone's time. If CLAUDE.md says a thing was removed,
             rejected, or is absent by design, it stays absent.
 
-            ## Step 1 — Find the tracker issue
+            ## Step 1 — Make sure the labels exist
 
-            The tracker issue is identified by the HTML marker `<!-- code-review-tracker -->`
-            in its body. Find it with:
+            Every label is created up front, because `gh issue create --label` fails outright
+            on a label that does not exist, and that failure would look like a broken run.
+            Already-exists errors are expected and ignored:
 
-              gh issue list --state open --limit 100 --json number,title,body \
-                --jq '.[] | select(.body | contains("<!-- code-review-tracker -->")) | .number'
+              gh label create code-review   --color 0E8A16 --description "Filed by the daily review job" 2>/dev/null || true
+              gh label create severity:high --color B60205 --description "Code review: high severity" 2>/dev/null || true
+              gh label create severity:medium --color D93F0B --description "Code review: medium severity" 2>/dev/null || true
+              gh label create severity:low  --color FBCA04 --description "Code review: low severity" 2>/dev/null || true
+              gh label create idea          --color 1D76DB --description "Feature or improvement worth building" 2>/dev/null || true
+              gh label create cr-auto-closed --color C5DEF5 --description "Closed by the review job, not by a human" 2>/dev/null || true
 
-            If it exists, read its full current body — that is your previous list.
-            If it does not exist, you will create it in Step 5.
+            ## Step 2 — Read the existing backlog
 
-            ## Step 2 — Verify what is already on the list
+              gh issue list --label code-review --state all --limit 300 \
+                --json number,title,body,state,labels,url
 
-            For EVERY finding already on the list, go look at the code it points to and decide:
-              - STILL PRESENT  -> keep the item, keep its original ID and "first seen" date
-              - FIXED          -> drop it from the list entirely, and note it in the daily comment
-              - NO LONGER VALID (was wrong, or the code was deleted/refactored away)
-                               -> drop it, and note it as "withdrawn" in the daily comment
+            Read OPEN and CLOSED alike. The closed ones are what stops you re-filing work
+            that is already done or already refused.
 
-            For EVERY idea already on the list, go look at the code and decide the same way:
-              - STILL WANTED   -> keep it, with its original ID and "first seen" date
-              - BUILT          -> drop it, and note it as "shipped" in the daily comment
-              - NO LONGER WANTED (superseded, made irrelevant by other work, or you can now
-                see it contradicts CLAUDE.md) -> drop it, and note it as "dropped"
+            **Identity.** Every issue you create ends its body with an identity marker on
+            its own final line:
 
-            Never silently drop an item. Every removal is accounted for in Step 6.
+              <!-- cr-key: <path> | <slug> -->
 
-            ## Step 3 — Review the whole codebase for new findings
+            `<path>` is the primary file or directory the item is about, and `<slug>` is a
+            short kebab-case description of the claim (`clip-dir-never-cleaned`). Line
+            numbers are never part of the key — they drift with every edit, and an item
+            whose identity drifts gets filed twice. Choose a key you would generate again
+            tomorrow from the same observation.
+
+            ## Step 3 — Verify every OPEN item
+
+            For each open issue, go look at the code it points to and decide:
+
+              - STILL PRESENT (finding) / STILL WANTED (idea) -> leave it completely alone.
+                Do not comment. Do not edit it. An untouched issue is the normal case and
+                should stay silent; a job that comments daily on unchanged items is noise.
+              - FIXED (the defect is gone) / BUILT (the idea shipped) ->
+                  gh issue close <n> --reason completed \
+                    --comment "Verified fixed: <what changed, and where you looked>."
+                then: gh issue edit <n> --add-label cr-auto-closed
+              - NO LONGER VALID (it was wrong, or the code it described is gone) ->
+                  gh issue close <n> --reason "not planned" \
+                    --comment "Withdrawn: <why this is no longer a real item>."
+                then: gh issue edit <n> --add-label cr-auto-closed
+
+            If the line numbers in an issue have drifted but the item is still real, update
+            the body to the current lines. That is the one edit worth making to an unchanged
+            item, because a stale line reference sends the next reader to the wrong place.
+
+            ## Step 4 — Review the whole codebase for new findings
 
             Review the entire codebase, not just recent changes. Look for:
               - Correctness bugs, logic errors, unhandled edge cases
@@ -105,9 +136,7 @@ jobs:
             Every finding must name a specific file and line range and state the concrete
             consequence — what actually goes wrong, and when.
 
-            Anything already on the list from Step 2 must NOT be added again as a new item.
-
-            ## Step 4 — Look for features and improvements worth building
+            ## Step 5 — Look for features and improvements worth building
 
             Separately from the defects above, look for work that would make this a better
             app or a better codebase. Consider:
@@ -121,92 +150,79 @@ jobs:
             THIS app. Generic engineering advice — "add tests", "improve error handling",
             "adopt stricter types" — is not an idea. Neither is anything CLAUDE.md rules out.
 
-            This section is for things worth BUILDING. A defect belongs in Findings and never
-            here; an idea never goes in a severity band. If you catch yourself filing a
-            nitpick as a Low finding to avoid deciding, it is neither — drop it.
+            A defect is a finding and never an idea. If you catch yourself filing a nitpick
+            as a low-severity finding to avoid deciding, it is neither — drop it.
 
-            Cap the open ideas at 10. If you have a new one and the list is full, it earns
-            its place only by being better than the weakest idea already there — in which
-            case drop that one as "dropped" and say so in the comment. A backlog nobody can
-            read is a backlog nobody uses.
+            Cap the OPEN `idea` issues at 10. If you have a new one and the cap is reached,
+            it earns its place only by being better than the weakest idea already open — in
+            which case close that one (`--reason "not planned"`, `cr-auto-closed`, comment
+            saying it was displaced) and file the new one. A backlog nobody can read is a
+            backlog nobody uses.
 
-            Anything already on the list from Step 2 must NOT be proposed again.
+            ## Step 6 — File what is genuinely new
 
-            ## Step 5 — Write the updated issue body
+            For every finding and idea from Steps 4 and 5, compute its `cr-key` and match it
+            against the backlog you read in Step 2. Then, and only then:
 
-            Title: `Code review tracker`
+              - Matches an OPEN issue -> already tracked. Do nothing at all.
+              - Matches an issue closed WITH the `cr-auto-closed` label -> you closed this
+                yourself. If the defect has genuinely returned, REOPEN that same issue
+                (`gh issue reopen <n>`), remove the label (`--remove-label cr-auto-closed`)
+                and comment that it regressed. Never file a second issue for it.
+              - Matches an issue closed WITHOUT that label -> a human closed it. That is a
+                decision, and it is permanent. Never re-file it, never reopen it, never
+                comment on it. This rule outranks your own judgement about whether the item
+                is real.
+              - No match -> file it.
 
-            Body format (keep it exactly this shape so it stays diffable day to day):
+            Filing an issue:
 
-            ```
-            <!-- code-review-tracker -->
-            _Maintained automatically. Last updated: YYYY-MM-DD._
+              Title: one plain sentence naming the thing. No ID prefix, no severity prefix —
+              severity is a label, and GitHub renders labels.
 
-            **Open: N**  ·  High: N · Medium: N · Low: N  ·  **Ideas: N**
+              Body (write to a file under /tmp with the Write tool, pass with --body-file;
+              /tmp is the only place you may write — never write inside the checkout):
 
-            ## High
-            - **[H-01]** `src/main/docker.ts:112-140` — One-line claim.
-              Consequence: what breaks and under what conditions.
-              _First seen: YYYY-MM-DD_
+              ```
+              `src/main/clipboard.ts:11-28`
 
-            ## Medium
-            ...
+              What: one-line statement of the defect, or of the proposal.
 
-            ## Low
-            ...
+              Why it matters: the concrete consequence — what actually goes wrong and
+              under what conditions. For an idea: what it gets you, and when it would
+              matter.
 
-            ## Ideas
-            - **[F-01]** `src/renderer/src/components/chat/` — One-line proposal.
-              Why: what it gets you, and when it would matter.
-              _First seen: YYYY-MM-DD_
-            ```
+              _Found by the daily review job on YYYY-MM-DD._
 
-            `Open: N` counts findings only, so that number keeps meaning the same thing day
-            to day; ideas are counted separately beside it.
+              <!-- cr-key: src/main/clipboard.ts | clip-dir-never-cleaned -->
+              ```
 
-            ID rules: IDs are permanent. `H-01`, `M-07`, `L-03` for findings, `F-01` for
-            ideas. Never renumber an existing item and never reuse the ID of a removed one —
-            always allocate the next unused number in that band. If a finding's severity
-            changes, keep the original ID and move it under the new heading. A finding never
-            turns into an idea and an idea never turns into a finding: if you filed one as
-            the wrong kind, drop that item and add a new one under the right band.
+              Findings:  gh issue create --title "..." --body-file /tmp/item.md \
+                           --label code-review --label severity:high
+              Ideas:     gh issue create --title "..." --body-file /tmp/item.md \
+                           --label code-review --label idea
 
-            Sort each section with the oldest items first, so long-lived items stay visible.
+            ## Step 7 — Write the run summary
 
-            Then apply it:
-              - Issue exists: `gh issue edit <number> --body-file <file>`
-              - Issue does not exist:
-                `gh issue create --title "Code review tracker" --body-file <file>`
-                and then pin it if you can.
-
-            Write the body with the Write tool to a path under /tmp (e.g. /tmp/tracker-body.md)
-            and pass that to --body-file; do not pass the body inline. /tmp is the only place
-            you may write — never write inside the checkout.
-
-            ## Step 6 — Post the daily delta comment
-
-            Editing an issue body sends no notification, so the comment is how the change
-            gets seen. ONLY comment if something actually changed today. If nothing changed,
-            still update the "Last updated" date in the body, post no comment, and say
-            "no changes" as your final output.
-
-            Comment format:
+            Write `/tmp/run-summary.md` with the Write tool. A later workflow step publishes
+            it to the run summary — this is the "what changed today" view, and it goes there
+            rather than into a comment so that an unchanged backlog makes no noise at all.
 
             ```
-            **YYYY-MM-DD**
+            ### Daily review — YYYY-MM-DD
 
-            Fixed (2): [H-02] stale container handle, [L-05] unused import in chat.ts
-            New (1): [M-09] `src/main/pty.ts:88` — resize handler can fire after dispose
-            Withdrawn (0): —
-
-            Shipped (1): [F-03] per-project default model
-            Proposed (1): [F-08] `ChatView` — jump-to-latest button when scrolled up
-            Dropped (0): —
-
-            Open: 14 (High 2 · Medium 7 · Low 5) · Ideas: 6
+            | | |
+            |---|---|
+            | Closed as fixed | #12, #14 |
+            | Closed as withdrawn | — |
+            | Reopened (regressed) | — |
+            | New findings | #31 stale container handle |
+            | New ideas | #32 jump-to-latest button in ChatView |
+            | Open now | 6 findings · 4 ideas |
             ```
 
-            Post it with `gh issue comment <number> --body-file <file>`.
+            Write it even when nothing changed — a summary saying nothing changed is the
+            evidence the job ran and looked.
 
             ## Rules
 
@@ -215,7 +231,25 @@ jobs:
               agents. This is a single `claude -p` process: when your turn ends the process
               exits, so anything still running in the background is killed and its findings
               are lost. Ending your turn to "wait for results" ends the job having done
-              nothing. Your turn ends only after the issue has been written.
+              nothing. Your turn ends only after the backlog is reconciled.
+            - **Never touch an issue that is not labelled `code-review`.** Other issues in
+              this repository are not yours.
             - Do not open pull requests, do not modify any repository files, do not push.
-              Your only writes are to the tracker issue and its comments.
+              Your only writes are to issues, their labels, and their comments.
+            - Prefer doing nothing to doing something twice. A duplicate issue is worse than
+              a missed one: the missed finding shows up tomorrow, the duplicate has to be
+              cleaned up by hand.
             - If `gh` fails, retry once, then report the exact error as your final output.
+
+      # Published by a plain shell step rather than by the agent: appending to
+      # $GITHUB_STEP_SUMMARY needs a redirect, and the agent's Bash allowlist matches on
+      # command prefixes, so a redirect inside a compound command is the kind of thing that
+      # gets denied mid-run. `always()` so a failed review still reports what it managed.
+      - name: Publish run summary
+        if: always()
+        run: |
+          if [ -f /tmp/run-summary.md ]; then
+            cat /tmp/run-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_The review job wrote no summary — check the step above._" >> "$GITHUB_STEP_SUMMARY"
+          fi
