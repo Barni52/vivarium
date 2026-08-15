@@ -504,6 +504,22 @@ export interface ChatChip {
   name: string
   /** container path for `path`, dimensions for images, the reason for `error` */
   detail?: string
+  /**
+   * A handle for the picture itself, fetched over `chat:image` when the row is
+   * on screen — **never the bytes**.
+   *
+   * A screenshot is a megabyte or two of base64, and a chip rides on an ordinary
+   * `you` row: inlining it would put that megabyte in every `entries-appended`
+   * payload the turn emits, in the renderer's store for the life of the session,
+   * and in the clone the store makes on each update. Tool bodies are clipped on
+   * the way out for exactly this reason (`wireEntries`), and this is the same
+   * rule for the same size of thing — main keeps the picture, the renderer asks
+   * for the one it is about to draw.
+   *
+   * Absent when main no longer holds it (see the image budget in chat.ts), and
+   * the row falls back to naming the attachment rather than showing it.
+   */
+  imageId?: string
 }
 
 export interface ChatQuestionOption {

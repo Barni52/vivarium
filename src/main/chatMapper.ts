@@ -432,6 +432,17 @@ export interface MapResult {
 export class ChatMapper {
   readonly entries: ChatEntry[] = []
   readonly bodies = new Map<string, string>()
+  /**
+   * The pictures this mapper found, as `data:` URLs, by the handle their chip
+   * carries.
+   *
+   * Kept beside the rows rather than on them, exactly as `bodies` is and for the
+   * same reason: an image block is the heaviest thing in a transcript by a wide
+   * margin, and a row is copied and shipped over IPC every time its turn moves.
+   * `ChatService` drains this into its own bounded store and serves one at a
+   * time (see `chat:image`).
+   */
+  readonly images = new Map<string, string>()
   readonly todos = new Map<string, ChatTodo>()
   readonly subagents = new Map<string, ChatEntry[]>()
   model: string | null = null
@@ -624,7 +635,24 @@ export class ChatMapper {
       if (!b) return
       const type = str(b.type)
       if (type === 'text') texts.push({ text: str(b.text), id: `${uuid}#${i}` })
-      else if (type === 'image') chips.push({ kind: 'image', name: 'image' })
+      else if (type === 'image') {
+        // The block index, not a counter: the id has to name the same picture
+        // when this line is mapped again — every settle re-reads its turn, and a
+        // reopen re-reads the whole file. A counter would renumber on the second
+        // pass and orphan the copy the renderer had already fetched.
+        const id = `${uuid}#img#${i}`
+        const src = obj(b.source)
+        const data = str(src?.data)
+        const media = str(src?.media_type) || 'image/png'
+        // Only base64 blocks carry the picture. A `url` source would need the
+        // renderer to reach the network on a model's say-so, which this window
+        // does not do anywhere (see the image note in Markdown.tsx).
+        if (data && str(src?.type) === 'base64') this.images.set(id, `data:${media};base64,${data}`)
+        // The transcript records no filename — the API block has nowhere to put
+        // one — so the picture is its own label, and the chip says so when the
+        // bytes are not around to draw.
+        chips.push({ kind: 'image', name: 'image', imageId: data ? id : undefined })
+      }
       else if (type === 'document') chips.push({ kind: 'document', name: str(b.title) || 'document' })
       else if (type === 'tool_result') {
         const done = this.toolResult(b, obj(line.toolUseResult) ?? obj(line.tool_use_result), at)

@@ -171,6 +171,9 @@ const api = {
   chatClose: (sessionId: string): void => ipcRenderer.send(CH.chatClose, sessionId),
   chatBody: (sessionId: string, entryId: string): Promise<string | null> =>
     ipcRenderer.invoke(CH.chatBody, sessionId, entryId),
+  /** The `data:` URL behind an image chip; null once main has evicted it. */
+  chatImage: (sessionId: string, imageId: string): Promise<string | null> =>
+    ipcRenderer.invoke(CH.chatImage, sessionId, imageId),
   chatEarlier: (
     sessionId: string,
     mounted: number

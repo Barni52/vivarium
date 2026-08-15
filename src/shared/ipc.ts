@@ -82,6 +82,10 @@ export const CH = {
   chatModels: 'chat:models',
   chatClose: 'chat:close',
   chatBody: 'chat:body',
+  // The bytes behind an image chip, by the handle the chip carries. A sibling of
+  // chatBody in every respect: main holds the heavy thing, the renderer asks for
+  // the one it is drawing.
+  chatImage: 'chat:image',
   chatEarlier: 'chat:earlier',
   chatSubagent: 'chat:subagent',
   chatMountTree: 'chat:mount-tree',

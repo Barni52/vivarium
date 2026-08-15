@@ -914,6 +914,13 @@ export function registerIpc(win: BrowserWindow): void {
     chat.body(sessionId, entryId)
   )
 
+  // The picture behind an image chip. Fetched per chip rather than shipped with
+  // the row, for the reason ChatChip.imageId documents: a screenshot is the
+  // heaviest thing in a conversation and a row is copied on every turn update.
+  ipcMain.handle(CH.chatImage, (_e, sessionId: string, imageId: string): string | null =>
+    chat.image(sessionId, imageId)
+  )
+
   ipcMain.handle(
     CH.chatEarlier,
     (_e, sessionId: string, mounted: number): { entries: ChatEntry[]; total: number } =>

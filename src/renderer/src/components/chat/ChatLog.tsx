@@ -195,6 +195,10 @@ export interface LogHandlers {
   onExpandTask: (toolUseId: string, agentId: string | null) => void
   /** full bodies that have already been fetched */
   bodies: Record<string, string>
+  /** pictures already fetched, by chip handle; `null` means main no longer has it */
+  images: Record<string, string | null>
+  /** ask for one — idempotent, and remembers the miss */
+  onImage: (imageId: string) => void
   subagents: Record<string, ChatEntry[]>
   /** the one Retry, offered by a crash / timeout row and by the read banner */
   onRetry: () => void
@@ -251,6 +255,10 @@ export const LogRow = React.memo(function LogRow({
               <div
                 style={{
                   display: 'flex',
+                  // Pictures are blocks, labels are inline-ish; aligning to the
+                  // start keeps a thumbnail from stretching a row of text chips
+                  // to its own height.
+                  alignItems: 'flex-start',
                   gap: 14,
                   flexWrap: 'wrap',
                   marginTop: entry.md ? 10 : 0,
@@ -259,11 +267,15 @@ export const LogRow = React.memo(function LogRow({
                   color: CHAT.dim3
                 }}
               >
-                {entry.chips.map((c, i) => (
-                  <span key={`${c.name}-${i}`} title={c.detail}>
-                    {c.kind === 'image' ? '▣' : c.kind === 'path' ? '≡' : '⌘'} {c.name}
-                  </span>
-                ))}
+                {entry.chips.map((c, i) =>
+                  c.kind === 'image' && c.imageId ? (
+                    <Thumb key={`${c.name}-${i}`} imageId={c.imageId} handlers={handlers} />
+                  ) : (
+                    <span key={`${c.name}-${i}`} title={c.detail}>
+                      {c.kind === 'image' ? '▣' : c.kind === 'path' ? '≡' : '⌘'} {c.name}
+                    </span>
+                  )
+                )}
               </div>
             )}
           </Line>
@@ -631,6 +643,73 @@ function ClaudeText({
     <Line at={entry.at} role="claude" color={CHAT.claude}>
       <Md src={md} />
     </Line>
+  )
+}
+
+/**
+ * An attached picture, in the `you` row that sent it.
+ *
+ * A chip used to read `▣ image` and that was all you ever got back — the
+ * transcript records no filename (the API's image block has nowhere to put one),
+ * so the label was the same four characters whether you had pasted a screenshot
+ * of a stack trace or a design mock. The picture is its own label.
+ *
+ * **The bytes are fetched, not carried.** The chip holds a handle and this asks
+ * for it on mount (see ChatChip.imageId): a screenshot is a megabyte or two of
+ * base64, and a `you` row is copied and re-shipped every time its turn updates.
+ *
+ * Click to swap between a thumbnail and the full width of the column. There is
+ * no "open externally" — the picture only exists as a `data:` URL, and this
+ * app's `openExternal` allows http/https/mailto precisely so that a URL from a
+ * model can never reach the shell. So the log is where it opens.
+ */
+function Thumb({
+  imageId,
+  handlers
+}: {
+  imageId: string
+  handlers: LogHandlers
+}): React.ReactElement {
+  const [big, setBig] = React.useState(false)
+  const url = handlers.images[imageId]
+  const { onImage } = handlers
+  React.useEffect(() => {
+    onImage(imageId)
+  }, [onImage, imageId])
+
+  // `undefined` is "not asked yet", `null` is "main no longer holds it" — the
+  // second is a real answer and has to read as the labelled chip it replaces
+  // rather than as a picture that is still loading.
+  if (url === null) {
+    return <span title="the picture is no longer held in memory">▣ image</span>
+  }
+  if (url === undefined) {
+    return <span style={{ color: CHAT.dim4 }}>▣ …</span>
+  }
+  return (
+    <img
+      src={url}
+      alt="attached image"
+      onClick={() => setBig((v) => !v)}
+      data-click=""
+      title={big ? 'Click to shrink' : 'Click to enlarge'}
+      style={{
+        display: 'block',
+        // Capped in both directions so a panorama cannot set the row's height and
+        // a tall screenshot cannot own the window. `contain` rather than `cover`:
+        // a cropped thumbnail of a screenshot is unreadable, which defeats it.
+        maxWidth: '100%',
+        maxHeight: big ? '70vh' : 150,
+        objectFit: 'contain',
+        border: `1px solid ${CHAT.borderCard}`,
+        borderRadius: CHAT.radius,
+        // The band behind a `you` row is a surface; a transparent PNG dropped on
+        // it would read as whatever happens to be underneath, so it gets a ground
+        // of its own.
+        background: CHAT.inset,
+        cursor: 'pointer'
+      }}
+    />
   )
 }
 

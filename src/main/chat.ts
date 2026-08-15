@@ -5,6 +5,7 @@ import type {
   ChatAnswer,
   ChatAttachment,
   ChatBlockingCard,
+  ChatChip,
   ChatContextUsage,
   ChatEntry,
   ChatEvent,
@@ -398,6 +399,22 @@ function activeTurn(l: Live): number {
 const MOUNT_WINDOW = 300
 
 /**
+ * How much picture main will hold for one conversation, so a chip can be drawn.
+ *
+ * Images are the only thing in a transcript that is *large by nature* — a
+ * screenshot is a megabyte or two of base64, where the 20-session sample that
+ * sized the body cache put all of its assistant prose at 1.2 MB. A conversation
+ * you have been pasting screenshots into all afternoon would otherwise grow this
+ * without limit for the life of the session.
+ *
+ * 64 MB is far above any real conversation and still a bound. Over it, the
+ * oldest pictures are dropped first (a Map keeps insertion order, so that is the
+ * whole eviction rule) — the newest are the ones on screen, and a chip whose
+ * bytes have gone simply renders as the labelled attachment it used to be.
+ */
+const IMAGE_BUDGET = 64 * 1024 * 1024
+
+/**
  * How long after a turn's `result` to re-read the transcript, when the settle
  * came back with less prose than the stream had already painted.
  *
@@ -503,6 +520,13 @@ interface Live {
   entries: ChatEntry[]
   /** full tool bodies by entry id, so a 10 MB transcript is never a 10 MB clone */
   bodies: Map<string, string>
+  /**
+   * Attached pictures as `data:` URLs, by the handle their chip carries, oldest
+   * first and bounded by IMAGE_BUDGET. Served one at a time over `chat:image`.
+   */
+  images: Map<string, string>
+  /** what `images` currently weighs, so the budget costs no re-measuring */
+  imageBytes: number
   todos: Map<string, ChatTodo>
   /** live sub-log frames, by their spawning tool_use id */
   subagents: Map<string, ChatEntry[]>
@@ -713,6 +737,8 @@ export class ChatService {
       stdout: '',
       entries: [],
       bodies: new Map(),
+      images: new Map(),
+      imageBytes: 0,
       todos: new Map(),
       subagents: new Map(),
       subagentsRead: new Set(),
@@ -855,6 +881,7 @@ export class ChatService {
     mapper.finishHistory(now)
     l.entries = mapper.entries
     l.bodies = mapper.bodies
+    this.keepImages(l, mapper.images)
     l.todos = mapper.todos
     l.model = mapper.model ?? l.model
     // A history turn is turn 0; live turns start at 1 so a settle can never
@@ -950,6 +977,7 @@ export class ChatService {
     // a renderer-side fold would lose a task created 400 entries ago.
     for (const [id, t] of mapper.todos) l.todos.set(id, t)
     for (const [id, body] of mapper.bodies) l.bodies.set(id, body)
+    this.keepImages(l, mapper.images)
     if (mapper.model) l.model = mapper.model
 
     // Keep the turn's clock row: it is the only row in a turn that the transcript
@@ -1248,6 +1276,7 @@ export class ChatService {
     )
     if (rows.length) {
       for (const [id, body] of mapper.bodies) l.bodies.set(id, body)
+      this.keepImages(l, mapper.images)
       this.upsert(l, rows)
       const todos = [...mapper.todos.values()]
       if (todos.length) {
@@ -1678,6 +1707,8 @@ export class ChatService {
     for (const [requestId] of l.pending) this.respond(l, requestId, { behavior: 'cancelled' })
     l.entries = []
     l.bodies.clear()
+    l.images.clear()
+    l.imageBytes = 0
     l.todos.clear()
     l.subagents.clear()
     l.subagentsRead.clear()
@@ -1883,7 +1914,15 @@ export class ChatService {
         turn: l.turn,
         kind: 'text',
         md: text,
-        chips: attachments.length ? attachments.map(chipOf) : undefined
+        // The picture is on screen from the moment you press Enter, not from the
+        // settle a turn later: the bytes are right here in the attachment, so
+        // they go into the same store the transcript's copy will land in. The
+        // two get different ids — this one is keyed off the optimistic row, the
+        // settled one off the transcript uuid — and both resolve, because the
+        // settle adds rather than replaces.
+        chips: attachments.length
+          ? attachments.map((a, i) => this.chipFor(l, a, `you:${l.turn}#img#${i}`))
+          : undefined
       },
       { id: `clock:${l.turn}`, role: 'run', at, turn: l.turn, kind: 'turn', startedAt: at }
     ])
@@ -2334,6 +2373,41 @@ export class ChatService {
     return this.live.get(sessionId)?.bodies.get(entryId) ?? null
   }
 
+  /** One picture, by the handle its chip carries. Null once it has been evicted. */
+  image(sessionId: string, imageId: string): string | null {
+    return this.live.get(sessionId)?.images.get(imageId) ?? null
+  }
+
+  /**
+   * Take a mapper's pictures into the session's store, oldest out first once the
+   * budget is spent.
+   *
+   * Re-setting a key it already holds is the common case, not the exception: a
+   * settle re-maps its own turn and a reopen re-maps the whole file, so the same
+   * picture arrives again under the same id. Re-inserting would count its bytes
+   * twice and then evict for a growth that never happened, so a key already
+   * present is skipped entirely — the bytes cannot have changed, the id is
+   * derived from the block they came from.
+   */
+  private keepImages(l: Live, images: Map<string, string>): void {
+    for (const [id, url] of images) {
+      if (l.images.has(id)) continue
+      l.images.set(id, url)
+      l.imageBytes += url.length
+    }
+    // Insertion order is eviction order, and the newest are the ones on screen.
+    //
+    // Never down to nothing, though: a single picture larger than the whole
+    // budget would otherwise evict every other one *and then itself*, so the
+    // biggest screenshot — the one most worth looking at — would be the only one
+    // that never drew. One always survives, whatever it weighs.
+    for (const [id, url] of l.images) {
+      if (l.imageBytes <= IMAGE_BUDGET || l.images.size <= 1) break
+      l.images.delete(id)
+      l.imageBytes -= url.length
+    }
+  }
+
   earlier(sessionId: string, mounted: number): { entries: ChatEntry[]; total: number } {
     const l = this.live.get(sessionId)
     if (!l) return { entries: [], total: 0 }
@@ -2457,6 +2531,19 @@ export class ChatService {
     this.upsert(l, [entry])
   }
 
+  /**
+   * One outgoing attachment as its chip, recording an image's bytes on the way
+   * past so the row can be drawn before the transcript has one.
+   */
+  private chipFor(l: Live, a: ChatAttachment, imageId: string): ChatChip {
+    if (a.kind === 'path') return { kind: 'path', name: a.name, detail: a.containerPath }
+    if (a.kind === 'image') {
+      this.keepImages(l, new Map([[imageId, `data:${a.mediaType};base64,${a.data}`]]))
+      return { kind: 'image', name: a.name, imageId }
+    }
+    return { kind: a.kind, name: a.name }
+  }
+
   private setActivity(
     l: Live,
     activity: AgentActivityEvent['activity'],
@@ -2520,11 +2607,7 @@ function inlineBlock(a: ChatAttachment): Json {
   return { type: 'text', text: '' }
 }
 
-function chipOf(a: ChatAttachment): { kind: 'path' | 'image' | 'document' | 'text'; name: string; detail?: string } {
-  return a.kind === 'path'
-    ? { kind: 'path', name: a.name, detail: a.containerPath }
-    : { kind: a.kind, name: a.name }
-}
+
 
 /**
  * `annotations`, the second half of an `AskUserQuestion` answer.

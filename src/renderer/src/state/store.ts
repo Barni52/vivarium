@@ -186,6 +186,12 @@ export interface ChatSessionState {
   error?: ChatErrorInfo
   /** full tool bodies fetched on expand, by entry id */
   bodies: Record<string, string>
+  /**
+   * Attached pictures as `data:` URLs, by the handle their chip carries, fetched
+   * when a row carrying one is drawn. `null` records that main no longer has it,
+   * so a chip that has been evicted is asked for once and not on every render.
+   */
+  images: Record<string, string | null>
   /** a subagent's sub-log, by its spawning tool_use id */
   subagents: Record<string, ChatEntry[]>
 }
@@ -202,6 +208,7 @@ const emptyChat = (): ChatSessionState => ({
   open: false,
   opening: false,
   bodies: {},
+  images: {},
   subagents: {}
 })
 
@@ -470,6 +477,8 @@ interface AppState {
   setChatModel: (sessionId: string, model: string) => Promise<void>
   loadEarlier: (sessionId: string) => Promise<void>
   loadBody: (sessionId: string, entryId: string) => Promise<void>
+  /** fetch the picture behind an image chip, once */
+  loadImage: (sessionId: string, imageId: string) => Promise<void>
   loadSubagent: (sessionId: string, toolUseId: string, agentId: string | null) => Promise<void>
 
   // dialogs
@@ -1356,6 +1365,23 @@ export const useStore = create<AppState>((set, get) => ({
       const c = s.chats[sessionId]
       if (!c) return {}
       return { chats: { ...s.chats, [sessionId]: { ...c, bodies: { ...c.bodies, [entryId]: body } } } }
+    })
+  },
+
+  // Asked for once per picture and then remembered — including the miss. Main
+  // holds a bounded store (IMAGE_BUDGET), so an old picture in a very
+  // image-heavy conversation can genuinely be gone, and a chip that re-asked on
+  // every render would be an IPC call per frame for an answer that will not
+  // change.
+  loadImage: async (sessionId, imageId) => {
+    if (get().chats[sessionId]?.images[imageId] !== undefined) return
+    const url = await window.vivarium.chatImage(sessionId, imageId)
+    set((s) => {
+      const c = s.chats[sessionId]
+      if (!c) return {}
+      return {
+        chats: { ...s.chats, [sessionId]: { ...c, images: { ...c.images, [imageId]: url } } }
+      }
     })
   },
 

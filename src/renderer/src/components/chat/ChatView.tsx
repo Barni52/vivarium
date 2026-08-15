@@ -112,6 +112,7 @@ export function ChatView({
   const loadEarlier = useStore((s) => s.loadEarlier)
   const loadBody = useStore((s) => s.loadBody)
   const loadSubagent = useStore((s) => s.loadSubagent)
+  const loadImage = useStore((s) => s.loadImage)
   const takePendingFind = useStore((s) => s.takePendingFind)
 
   // Draft and pending chips live here, not in the store: they are meant to die
@@ -586,10 +587,22 @@ export function ChatView({
       onExpandTask: (toolUseId: string, agentId: string | null) =>
         void loadSubagent(session.id, toolUseId, agentId),
       bodies: chat?.bodies ?? {},
+      images: chat?.images ?? {},
+      onImage: (imageId: string) => void loadImage(session.id, imageId),
       subagents: chat?.subagents ?? {},
       onRetry: () => void openChat(project.id, session.id, true)
     }),
-    [chat?.bodies, chat?.subagents, loadBody, loadSubagent, openChat, project.id, session.id]
+    [
+      chat?.bodies,
+      chat?.images,
+      chat?.subagents,
+      loadBody,
+      loadImage,
+      loadSubagent,
+      openChat,
+      project.id,
+      session.id
+    ]
   )
 
   /**
@@ -2805,14 +2818,37 @@ function ChipStrip({
           key={c.id}
           style={{
             display: 'flex',
-            alignItems: 'baseline',
+            // `center`, not `baseline`: a thumbnail has no baseline to sit on, and
+            // on a baseline row it hangs the whole line off its bottom edge.
+            alignItems: 'center',
             gap: 9,
             fontFamily: MONO,
             fontSize: 11.5,
             color: c.ok ? CHAT.dim : CHAT.danger
           }}
         >
-          <span style={{ flex: 'none' }}>{c.ok ? (c.attachment.kind === 'image' ? '▣' : '≡') : '⚠'}</span>
+          {/* The picture rather than a glyph, and free: the composer already read
+              the file to build the attachment, so the bytes are right here — no
+              fetch, no handle, nothing to evict. This is the half of the preview
+              that answers "did I attach the right screenshot", which is the
+              question you have *before* pressing Enter. */}
+          {c.ok && c.attachment.kind === 'image' ? (
+            <img
+              src={`data:${c.attachment.mediaType};base64,${c.attachment.data}`}
+              alt=""
+              style={{
+                flex: 'none',
+                width: 34,
+                height: 34,
+                objectFit: 'cover',
+                borderRadius: CHAT.radius,
+                border: `1px solid ${CHAT.borderCard}`,
+                background: CHAT.inset
+              }}
+            />
+          ) : (
+            <span style={{ flex: 'none' }}>{c.ok ? '≡' : '⚠'}</span>
+          )}
           <span style={{ color: CHAT.text }}>{c.ok ? c.attachment.name : c.name}</span>
           <span style={{ flex: 1, minWidth: 0, opacity: 0.8, overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {c.ok ? c.detail : c.reason}
