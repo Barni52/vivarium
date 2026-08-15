@@ -162,7 +162,14 @@ jobs:
             ## Step 6 — File what is genuinely new
 
             For every finding and idea from Steps 4 and 5, compute its `cr-key` and match it
-            against the backlog you read in Step 2. Then, and only then:
+            against the backlog you read in Step 2.
+
+            **The key is a fast path, not the authority — you are.** Two people describing
+            the same defect pick different slugs, and so will you tomorrow. So when no key
+            matches, still read the open issues for that file and ask whether one of them
+            already describes this same thing in different words. If one does, it is
+            tracked: leave it alone. Only the substance decides; a key that failed to match
+            is not permission to file a second copy.
 
               - Matches an OPEN issue -> already tracked. Do nothing at all.
               - Matches an issue closed WITH the `cr-auto-closed` label -> you closed this
