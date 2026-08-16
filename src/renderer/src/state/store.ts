@@ -1203,7 +1203,24 @@ export const useStore = create<AppState>((set, get) => ({
       case 'reset':
         // `/clear` landed. Live and reopened views stay identical the instant the
         // reset does: the log is dropped and the todo fold goes with it.
-        patch((c) => ({ ...c, entries: [], total: 0, todos: [], blocking: null, subagents: {} }))
+        //
+        // `bodies` and `images` go too, and they are the reason this list is the
+        // same five main's `ChatService.reset` drops. Both are caches keyed by an
+        // id belonging to a row that no longer exists — nothing will ever read
+        // them again, ids from the new conversation cannot collide with them, and
+        // they are the two entries here that hold *bulk*: a full tool body and a
+        // `data:` URL of a pasted screenshot. Left behind they are pure leak, for
+        // the life of the mounted chat, one `/clear` at a time.
+        patch((c) => ({
+          ...c,
+          entries: [],
+          total: 0,
+          todos: [],
+          blocking: null,
+          subagents: {},
+          bodies: {},
+          images: {}
+        }))
         break
       case 'rewound':
         // A revert landed. The **one** event on this channel that replaces the log
