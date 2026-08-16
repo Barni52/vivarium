@@ -110,6 +110,47 @@ function parseSize(size: string): number | null {
   return mult && Number.isFinite(n) ? Math.round(n * mult) : null
 }
 
+/**
+ * How much of the matching line the transcript search keeps either side of the
+ * term. Wider after than before: a match reads forwards, and the line it is cut
+ * out of is one long JSON object, so the half that follows is the half more
+ * likely to be the sentence you were looking for.
+ */
+const SNIPPET_BEFORE = 44
+const SNIPPET_AFTER = 72
+/** How many transcripts the snippet pass will name on one command line. */
+const SNIPPET_FILES = 60
+
+/** Escape a user's text for grep's ERE — `-F` is not available to a pattern
+ *  that has to carry a context window with it (see transcriptSnippets). */
+function ereEscape(s: string): string {
+  return s.replace(/[\\^$.[\]|()*+?{}]/g, '\\$&')
+}
+
+/**
+ * A grep fragment out of a transcript line, made readable.
+ *
+ * The line it came from is a whole JSON object, so a window cut out of one
+ * arrives with the escapes still in it. Unescaping the handful that occur in
+ * prose is enough to stop a snippet reading like source; nothing here tries to
+ * *parse* the line, because a slice of a JSON object never parses — this is a
+ * preview, and it is allowed to show the seam it was cut on.
+ *
+ * The replacement chars are the window's own doing: grep counts bytes in the
+ * container's C locale, so either edge can land inside a multi-byte character.
+ * Only the ends are stripped — one in the middle is real damage in the file.
+ */
+function cleanSnippet(fragment: string): string {
+  return fragment
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\[nrt]/g, ' ')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\"/g, '"')
+    .replace(/^�+|�+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 export class DockerService {
   /** Resolved container-runtime binary, or null if none found. */
   private binary: string | null | undefined
@@ -1306,23 +1347,32 @@ export class DockerService {
    *
    * Prefers a running container over a throwaway one, following
    * `readSharedCredentials` — the volume is the same from either, and an exec
-   * into something already up needs no image and no container create.
+   * into something already up needs no image and no container create. The choice
+   * is made once and both passes go the same way.
    */
   async searchTranscripts(
     query: string,
     timeoutMs = 60_000
-  ): Promise<{ ok: boolean; counts: Map<string, number>; error?: string }> {
+  ): Promise<{
+    ok: boolean
+    counts: Map<string, number>
+    /** one line of context per conversation, by the same key as `counts` */
+    snippets: Map<string, string>
+    error?: string
+  }> {
     const empty = new Map<string, number>()
-    if (!query.trim()) return { ok: true, counts: empty }
-    if (!(await this.detect())) return { ok: false, counts: empty, error: 'docker-missing' }
+    const none = new Map<string, string>()
+    if (!query.trim()) return { ok: true, counts: empty, snippets: none }
+    if (!(await this.detect())) {
+      return { ok: false, counts: empty, snippets: none, error: 'docker-missing' }
+    }
     // Or `docker run -v` would *create* claude-box-creds on a machine that has
     // never run a container — the same trap deleteTranscripts documents.
     if (!(await this.volumeExists(CREDS_VOLUME))) {
-      return { ok: false, counts: empty, error: 'no-volume' }
+      return { ok: false, counts: empty, snippets: none, error: 'no-volume' }
     }
 
     const root = '/home/node/.claude/projects'
-    const grep = ['grep', '-rFc', '--include=*.jsonl', '-e', query, root]
 
     // A running container first (instant), else a throwaway mounting the volume.
     const ps = await this.exec(
@@ -1333,24 +1383,31 @@ export class DockerService {
       ps.code === 0
         ? ps.stdout.split('\n').map((s) => s.trim()).filter(Boolean)[0]
         : undefined
-    const r = up
-      ? await this.exec(['exec', up, ...grep], timeoutMs)
-      : await this.exec(
-          ['run', '--rm', '-v', `${CREDS_VOLUME}:/home/node/.claude`, SLIM_IMAGE, ...grep],
-          timeoutMs
-        )
+    const grep = (args: string[]): Promise<ExecResult> =>
+      up
+        ? this.exec(['exec', up, ...args], timeoutMs)
+        : this.exec(
+            ['run', '--rm', '-v', `${CREDS_VOLUME}:/home/node/.claude`, SLIM_IMAGE, ...args],
+            timeoutMs
+          )
 
-    if (r.code === 124) return { ok: false, counts: empty, error: 'timed-out' }
+    const r = await grep(['grep', '-rFc', '--include=*.jsonl', '-e', query, root])
+
+    if (r.code === 124) return { ok: false, counts: empty, snippets: none, error: 'timed-out' }
     // grep exits 1 for "no lines matched anywhere", which is a successful search
     // that found nothing — not a failure. Anything above that is one.
     if (r.code > 1) {
       const msg = (r.stderr || r.stdout).trim().split('\n')[0]
-      return { ok: false, counts: empty, error: msg || `grep exited ${r.code}` }
+      return { ok: false, counts: empty, snippets: none, error: msg || `grep exited ${r.code}` }
     }
 
     // `grep -rc` prints a line for every file it read, matched or not, so the
     // zeros are filtered here rather than through a shell pipe.
     const counts = new Map<string, number>()
+    // The file each key's snippet will be cut from: the one that matched most,
+    // which for a conversation with a subagent is the log that is actually about
+    // the term rather than whichever of the two grep happened to reach first.
+    const densest = new Map<string, { file: string; n: number }>()
     for (const line of r.stdout.split('\n')) {
       const at = line.lastIndexOf(':')
       if (at < 0) continue
@@ -1366,8 +1423,106 @@ export class DockerService {
       const parent = /\/([0-9a-fA-F-]{36})\/subagents\//.exec(file)?.[1]
       const key = parent ?? uuid
       counts.set(key, (counts.get(key) ?? 0) + n)
+      const best = densest.get(key)
+      if (!best || n > best.n) densest.set(key, { file, n })
     }
-    return { ok: true, counts }
+
+    // The snippet pass names its files on the command line, and Windows caps a
+    // process's whole command line at ~32k characters. An archive with hundreds
+    // of matching transcripts would push past that and the exec would fail —
+    // costing every row its snippet, not just the tail. So the densest rows are
+    // asked for and the rest go without: they are the ones the ranking already
+    // puts on screen first, and a missing snippet is a row that reads exactly as
+    // it did before this existed.
+    const byFile = await this.transcriptSnippets(
+      query,
+      [...densest.values()]
+        .sort((a, b) => b.n - a.n)
+        .slice(0, SNIPPET_FILES)
+        .map((b) => b.file),
+      grep
+    )
+    const snippets = new Map<string, string>()
+    for (const [key, best] of densest) {
+      const text = byFile.get(best.file)
+      if (text) snippets.set(key, text)
+    }
+    return { ok: true, counts, snippets }
+  }
+
+  /**
+   * One readable line of context per matching conversation, by file.
+   *
+   * A second grep, and deliberately not a second *search*: it is handed the
+   * files the count pass already named, so it reads a handful of transcripts as
+   * far as their first match instead of the whole archive again. The expensive
+   * half of this feature has already happened by the time it runs.
+   *
+   * **`-o` with the window baked into the pattern is what keeps it small.** A
+   * transcript line is a whole JSON object and can be megabytes of inlined
+   * image, so printing the matching *line* was never an option — `.{0,N}` either
+   * side of the term makes grep hand back the slice we would have cut anyway.
+   * That costs the `-F` the count pass argues for, so the term is escaped into
+   * an ERE instead; it is still its own argv element, still behind `-e`, and
+   * still nowhere near a shell.
+   *
+   * Never fatal. This is a nicety on top of a search that has already succeeded,
+   * so a timeout, a non-zero exit or an unparsable line all end as "no snippet
+   * on that row" rather than as an error over a result the user can use.
+   */
+  private async transcriptSnippets(
+    query: string,
+    files: string[],
+    grep: (args: string[]) => Promise<ExecResult>
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    if (!files.length) return out
+
+    const pattern = `.{0,${SNIPPET_BEFORE}}${ereEscape(query)}.{0,${SNIPPET_AFTER}}`
+    // -H because grep omits the filename when handed exactly one file, and the
+    // one-result case must parse like every other.
+    const r = await grep(['grep', '-EHo', '-m1', '-e', pattern, ...files]).catch(() => null)
+    if (!r || r.code > 1) return out
+
+    const wanted = new Set(files)
+    for (const line of r.stdout.split('\n')) {
+      // `path:fragment`. Split at the *first* colon and only believe it if the
+      // result is a file we asked about: the fragment is JSON and carries
+      // colons of its own, so `lastIndexOf` — right for a trailing count — is
+      // wrong here.
+      const at = line.indexOf(':')
+      if (at < 0) continue
+      const file = line.slice(0, at)
+      // `-m1` stops after the first matching line but `-o` still prints every
+      // match *on* it, so the first fragment per file is the snippet and the
+      // rest are the same line again.
+      if (!wanted.has(file) || out.has(file)) continue
+
+      const fragment = line.slice(at + 1)
+      const cut = fragment.indexOf(query)
+      const lead = cut < 0 ? 0 : cut
+      const tail = cut < 0 ? 0 : fragment.length - cut - query.length
+
+      // A window this wide almost always opens mid-object —
+      // `"type":"text","text":"The WSL gateway…` — and those leading keys are
+      // the least interesting characters on the line. If the value the match
+      // sits in *starts* inside the window, start the snippet there instead.
+      // The seam is the last `":"` before the match, and it can be trusted to be
+      // structural: a quote inside a JSON string arrives escaped, so an
+      // unescaped one is punctuation. (A window that cut a `\":\"` in half can
+      // fool it, which costs a few more characters of lead and nothing else.)
+      const seam = fragment.slice(0, lead).lastIndexOf('":"')
+      const body = seam < 0 ? fragment : fragment.slice(seam + 3)
+
+      const text = cleanSnippet(body)
+      if (!text) continue
+      // Ellipses only where something was actually cut — the window hit its
+      // limit on that side, or the seam trim just dropped a key. Measured on the
+      // raw fragment, before unescaping moves every offset.
+      const before = lead >= SNIPPET_BEFORE || seam >= 0 ? '…' : ''
+      out.set(file, `${before}${text}${tail >= SNIPPET_AFTER ? '…' : ''}`)
+    }
+    return out
   }
 
   async volumeExists(name: string): Promise<boolean> {

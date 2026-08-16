@@ -1056,7 +1056,8 @@ export function registerIpc(win: BrowserWindow): void {
           sessionId: own?.sessionId ?? null,
           sessionName: own?.sessionName ?? null,
           archived: own?.archived ?? false,
-          foreign: !own
+          foreign: !own,
+          snippet: r.snippets.get(uuid)
         })
       }
       // Most matches first: the conversation that mentions a thing thirty times

@@ -95,6 +95,28 @@ function Row({ hit }: { hit: TranscriptHit }): React.ReactElement {
           )}
         </div>
         <div style={{ fontSize: 11.5, color: 'var(--dim)', marginTop: 1 }}>{detail}</div>
+        {/* What the match actually says. The count ranks the rows and the kind
+            line says where they live, but choosing between two plausible
+            conversations was a guess until you opened one — this is the line
+            that answers it. Mono because it is a slice of a transcript rather
+            than prose, and clipped to one line so a row keeps its height no
+            matter how long the sentence it landed in was. */}
+        {hit.snippet && (
+          <div
+            title={hit.snippet}
+            style={{
+              fontFamily: MONO,
+              fontSize: 11,
+              color: 'var(--muted)',
+              marginTop: 3,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {hit.snippet}
+          </div>
+        )}
       </div>
       <span
         title={`${hit.matches} transcript ${hit.matches === 1 ? 'line' : 'lines'} match`}

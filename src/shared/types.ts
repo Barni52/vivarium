@@ -385,6 +385,14 @@ export interface TranscriptHit {
   /** this uuid was retired by a `/clear`; its session has moved on */
   archived: boolean
   /**
+   * One line of context around the first match, or absent when the second grep
+   * found nothing to show (see DockerService.transcriptSnippets). It is a slice
+   * of a JSON line rather than a rendered message, so it is a *preview* — enough
+   * to tell two plausible conversations apart, which is the question the count
+   * on its own could not answer.
+   */
+  snippet?: string
+  /**
    * Nothing in config.json owns this conversation. The shared creds volume holds
    * the user's claude-box transcripts as well as Vivarium's, and a deleted
    * session's conversation may still be sitting there awaiting a drain — so these
