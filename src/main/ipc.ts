@@ -40,7 +40,7 @@ import { BridgeWatcher, bridgeDir } from './bridge'
 import { ChatService } from './chat'
 import { gitBranch, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
-import { pasteImage } from './clipboard'
+import { pasteImage, removeClips } from './clipboard'
 import { UsageService } from './usage'
 import { ClaudeService } from './claude'
 
@@ -317,6 +317,11 @@ export function registerIpc(win: BrowserWindow): void {
         chat.close(s.id)
       }
       await docker.remove(project)
+      // The container is gone, so nothing can read /clip any more — and nothing
+      // will ever name this directory again, since it is keyed by a project id
+      // that is about to leave config.json. The same cascade the conversations
+      // get, for the same reason.
+      await removeClips(id)
     }
     const cfg = await store.mutate((cfg) => {
       cfg.projects = cfg.projects.filter((p) => p.id !== id)

@@ -22,6 +22,7 @@ import {
   fullDockerfile
 } from './dockerfiles'
 import { bridgeDir, ensureBridgeFiles } from './bridge'
+import { pruneClips } from './clipboard'
 
 export type LineSink = (chunk: string) => void
 
@@ -785,6 +786,10 @@ export class DockerService {
 
     // Refresh hook script/settings + drop stale events before every start.
     await ensureBridgeFiles(project.id)
+    // Same window, same reason: this is past the already-running check, so no
+    // agent in this container can be mid-turn holding a /clip path it is about
+    // to read. Pasted images are otherwise written once and never removed.
+    await pruneClips(project.id)
 
     // Exists but stopped → just start it.
     if (exists) {
