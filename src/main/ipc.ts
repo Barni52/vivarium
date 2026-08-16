@@ -44,6 +44,23 @@ import { pasteImage, removeClips } from './clipboard'
 import { UsageService } from './usage'
 import { ClaudeService } from './claude'
 
+/**
+ * What a new chat is spawned on, until someone picks something else.
+ *
+ * Hardcoded, and deliberately not a project setting: this is a single-user tool
+ * whose answer to "which model" is the same in every project, and a per-project
+ * default would be a persisted `Config` field, a control in Project settings and
+ * a second place a session's model can come from — all to express one line.
+ *
+ * The **pinned id, not the `opus` alias**: an alias moves with each release, and
+ * a default that silently becomes the next generation is not a default anybody
+ * chose. `Session.model` holds what `--model` is given at the next spawn (see
+ * DockerService.execArgs), so this is that spelling and not a display name.
+ * Changing a session's model in the picker overwrites it and nothing here
+ * reaches back in — this seeds, it does not enforce.
+ */
+const DEFAULT_CHAT_MODEL = 'claude-opus-5'
+
 export function registerIpc(win: BrowserWindow): void {
   const store = new ConfigStore()
   const docker = new DockerService()
@@ -358,7 +375,13 @@ export function registerIpc(win: BrowserWindow): void {
             claudeSessionId,
             // A new chat starts in bypass, matching today's terminal agent:
             // nothing in daily use gets slower and no habit needs retraining.
-            mode: type === 'chat' ? 'bypassPermissions' : undefined
+            mode: type === 'chat' ? 'bypassPermissions' : undefined,
+            // …and on a model of this app's choosing rather than the CLI's. Chat
+            // only, for the same reason `mode` is: nothing reads `Session.model`
+            // for a terminal agent — that one is `--model`-less on purpose and
+            // takes its model from the CLI's own config and its own `/model` —
+            // so writing one there would be a stored preference with no effect.
+            model: type === 'chat' ? DEFAULT_CHAT_MODEL : undefined
           })
         }
         return cfg
