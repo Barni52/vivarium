@@ -170,6 +170,31 @@ export interface Config {
    * case is a drain that runs immediately and succeeds.
    */
   pendingTranscriptDeletes?: string[]
+  /**
+   * Where and how big the window was when it was last touched.
+   *
+   * The same argument `chatZoom` makes, one level out: it is a fact about the
+   * monitor you are sitting at, nothing can query it once the window is gone,
+   * and a window that opens 1200×800 every morning is a setting the app keeps
+   * forgetting. Absent until the first resize, and absent from a config written
+   * by an older build — which is why every field is optional and the restore
+   * validates rather than trusts (see `restoreBounds` in main/index.ts).
+   */
+  window?: WindowBounds
+}
+
+/**
+ * A remembered window rectangle. `width`/`height` are the *restored* size even
+ * when the window is maximized — Electron's `getNormalBounds()` — because
+ * un-maximizing has to land somewhere, and "the size it was before it was
+ * maximized" is the only answer that is not a guess.
+ */
+export interface WindowBounds {
+  x?: number
+  y?: number
+  width: number
+  height: number
+  maximized?: boolean
 }
 
 /** Result of the "Write branch diff" project action. */

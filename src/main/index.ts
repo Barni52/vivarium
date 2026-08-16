@@ -1,8 +1,10 @@
-import { app, BrowserWindow, Menu } from 'electron'
+import { app, BrowserWindow, Menu, screen } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { registerIpc } from './ipc'
+import { ConfigStore } from './config'
 import { DEFAULT_THEME, THEME_BG } from '@shared/theme'
+import type { WindowBounds } from '@shared/types'
 import type { PtyManager } from './pty'
 import type { ChatService } from './chat'
 
@@ -31,14 +33,57 @@ if (cdpPort) {
 
 let mainWindow: BrowserWindow | null = null
 
-function createWindow(): void {
+const DEFAULT_BOUNDS = { width: 1200, height: 800 }
+
+/**
+ * The saved rectangle, if it still describes somewhere a window can be seen.
+ *
+ * A remembered position is the one piece of this that can be *wrong* rather than
+ * merely stale: unplug the second monitor, or come back from a projector, and
+ * yesterday's x/y put the window on a desktop that no longer exists — off screen,
+ * unreachable, with no visible way to get it back. So the position is only
+ * honoured when a decent piece of the title bar would land inside some display's
+ * work area, and otherwise dropped on its own, keeping the size and letting
+ * Windows place the window.
+ *
+ * The size is not validated the same way: `minWidth`/`minHeight` already clamp it
+ * from below, and a window wider than the current screen is a nuisance the user
+ * can drag out of, not a window they cannot reach.
+ */
+function restoreBounds(saved: WindowBounds | undefined): {
+  width: number
+  height: number
+  x?: number
+  y?: number
+} {
+  if (!saved || !Number.isFinite(saved.width) || !Number.isFinite(saved.height)) {
+    return DEFAULT_BOUNDS
+  }
+  const size = { width: Math.round(saved.width), height: Math.round(saved.height) }
+  if (!Number.isFinite(saved.x ?? NaN) || !Number.isFinite(saved.y ?? NaN)) return size
+
+  const x = Math.round(saved.x as number)
+  const y = Math.round(saved.y as number)
+  // Enough of the top edge to grab, on one display — not the whole rectangle,
+  // which would refuse a window the user deliberately left hanging off an edge.
+  const GRAB = 120
+  const onScreen = screen.getAllDisplays().some(({ workArea: w }) => {
+    const overlapX = Math.min(x + size.width, w.x + w.width) - Math.max(x, w.x)
+    const overlapY = Math.min(y + 40, w.y + w.height) - Math.max(y, w.y)
+    return overlapX >= GRAB && overlapY > 0
+  })
+  return onScreen ? { ...size, x, y } : size
+}
+
+function createWindow(store: ConfigStore): void {
   // Dev/taskbar icon. Packaged builds get their icon from the exe (electron-
   // builder reads build/icon.ico), which isn't inside the asar, so guard it.
   const iconPath = join(app.getAppPath(), 'build', 'icon.ico')
 
+  const saved = store.get().window
+
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    ...restoreBounds(saved),
     minWidth: 760,
     minHeight: 480,
     show: false,
@@ -67,7 +112,45 @@ function createWindow(): void {
     }
   })
 
-  registerIpc(mainWindow)
+  // Before `show`, so a window that was maximized comes back maximized rather
+  // than restoring at its old size and snapping a frame later.
+  if (saved?.maximized) mainWindow.maximize()
+
+  registerIpc(mainWindow, store)
+
+  // Remember the rectangle. Debounced because `resize` and `move` fire per pixel
+  // of a drag, and each one would otherwise be a full rewrite of the only durable
+  // state this app has. `getNormalBounds` rather than `getBounds`: while
+  // maximized the latter reports the screen, which would make un-maximizing after
+  // a restart land on a window the size of the monitor with no way back to the
+  // size you actually chose.
+  let saveTimer: NodeJS.Timeout | null = null
+  const rememberBounds = (): void => {
+    const win = mainWindow
+    if (!win || win.isDestroyed() || win.isMinimized()) return
+    const { x, y, width, height } = win.getNormalBounds()
+    void store.mutate((cfg) => {
+      cfg.window = { x, y, width, height, maximized: win.isMaximized() }
+      return cfg
+    })
+  }
+  const rememberSoon = (): void => {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(rememberBounds, 500)
+  }
+  mainWindow.on('resize', rememberSoon)
+  mainWindow.on('move', rememberSoon)
+  // Not debounced: these are single deliberate acts, and the flag they change is
+  // not recoverable from the geometry afterwards.
+  mainWindow.on('maximize', rememberBounds)
+  mainWindow.on('unmaximize', rememberBounds)
+  // The last resize before an Alt+F4 can still be inside the debounce window.
+  // Best effort by nature — the write is async and the process is on its way out
+  // — but the queue is empty by this point in all but the tightest race.
+  mainWindow.on('close', () => {
+    if (saveTimer) clearTimeout(saveTimer)
+    rememberBounds()
+  })
 
   // **The renderer never navigates, and never opens a window.** Every link in a
   // chat message goes out through CH.openExternal, which validates the scheme
@@ -115,10 +198,21 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
-  createWindow()
+app.whenReady().then(async () => {
+  // The store is created *here* and handed to both halves, rather than made
+  // inside registerIpc as it used to be: the window's own size is now in
+  // config.json, and it has to be read before `new BrowserWindow`, not after.
+  // Sizing the window afterwards would mean opening at 1200×800 and jumping —
+  // `show` waits for the renderer, which is long after this file is done.
+  //
+  // A failed load is not fatal to the window: `load` never throws, and a config
+  // it could not read comes back empty, which is the same "no saved size" case
+  // as a first run.
+  const store = new ConfigStore()
+  await store.load()
+  createWindow(store)
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(store)
   })
 })
 

@@ -61,8 +61,13 @@ import { ClaudeService } from './claude'
  */
 const DEFAULT_CHAT_MODEL = 'claude-opus-5'
 
-export function registerIpc(win: BrowserWindow): void {
-  const store = new ConfigStore()
+/**
+ * `store` is passed in rather than made here: main/index.ts reads the saved
+ * window size out of it before `new BrowserWindow`, so by the time this runs the
+ * one store already exists and is loaded. Two instances would be two caches over
+ * one file, each overwriting the other's writes.
+ */
+export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   const docker = new DockerService()
   const emit = (channel: string, payload: unknown): void => {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
