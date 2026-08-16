@@ -170,6 +170,16 @@ export function ChatView({
   const contentRef = React.useRef<HTMLDivElement>(null)
   const overlayRef = React.useRef<HTMLDivElement>(null)
   const pinned = React.useRef(true)
+  /**
+   * `pinned`, mirrored into state so the jump control can render off it.
+   *
+   * The ref stays the authority: it is read inside a ResizeObserver and a scroll
+   * handler, neither of which may wait for a render. This is written **only on a
+   * transition** — a scroll event lands on every wheel notch and on every row a
+   * streaming turn grows, and a setState per event would repaint the whole log,
+   * which is the exact cost `LogRow`'s memo exists to avoid.
+   */
+  const [atTail, setAtTail] = React.useState(true)
   /** when the last Esc landed, for the pair that opens the revert picker */
   const escAt = React.useRef(0)
   const zoom = useStore((s) => s.chatZoom)
@@ -232,6 +242,11 @@ export function ChatView({
    */
   const stickToBottom = React.useCallback((): void => {
     pinned.current = true
+    // Set here as well as from the scroll handler: assigning `scrollTop` to a
+    // value it already holds fires no scroll event, so a re-arm that does not
+    // move the log would otherwise leave the control on screen saying there is
+    // something below when there is not.
+    setAtTail(true)
     const el = logRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [])
@@ -1028,12 +1043,24 @@ export function ChatView({
           `min-height: auto` refuses to shrink below its content, which in a
           scroller means the composer gets pushed off the bottom of the window. */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      {/* The scroller and the jump control, in a box of their own so the control
+          is centred over the *log* rather than over the log plus the outline
+          rail. It cannot live inside the scroller: an absolutely positioned
+          child of a scroll container still scrolls with the content, and this
+          one has to stay put. */}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
       <div
         ref={logRef}
         className="vchat-scroll"
         onScroll={(e) => {
           const el = e.currentTarget
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+          const tail = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+          pinned.current = tail
+          // The same 40px, deliberately: the control means "tail-follow is off",
+          // so it has to appear at the instant following stops and not a pixel
+          // either side of it. A second threshold would make it lie for the gap
+          // between them.
+          setAtTail((v) => (v === tail ? v : tail))
         }}
         // The one place the zoom chords are written down. Same argument as the
         // terminal's menu, which is where Ctrl+F and Ctrl+± are taught: a chord
@@ -1163,6 +1190,54 @@ export function ChatView({
             />
           )}
         </div>
+      </div>
+      {/* Jump to latest. The log stops following the tail the moment you scroll
+          away — right for reading history while a turn is still writing, but it
+          left the way back as "scroll by hand until it catches", which in a long
+          transcript is a long way. Shown whenever the pin is off, not only when
+          something new has landed: the pin is off either way, and a control that
+          appeared halfway through reading would be its own interruption.
+
+          `stickToBottom` is the click, unchanged — this is the same gesture as
+          sending a message, and re-arming the pin is the half that matters. */}
+      {!atTail && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 10,
+            display: 'flex',
+            justifyContent: 'center',
+            // The strip spans the log so the button can centre in it; only the
+            // button itself may take a click, or this would swallow the text
+            // selection and the context menu of the last rows underneath.
+            pointerEvents: 'none'
+          }}
+        >
+          <button
+            onClick={stickToBottom}
+            title="Scroll to the newest message"
+            style={{
+              pointerEvents: 'auto',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: MONO,
+              fontSize: TYPE.gutter,
+              padding: '4px 12px',
+              color: CHAT.dim2,
+              background: CHAT.composer,
+              border: `1px solid ${CHAT.borderComposer}`,
+              boxShadow: '0 6px 20px -10px var(--shadow)',
+              cursor: 'pointer'
+            }}
+          >
+            <Chevron size={11} style={{ transform: 'rotate(90deg)' }} />
+            latest
+          </button>
+        </div>
+      )}
       </div>
         {outline && (
           <Outline
