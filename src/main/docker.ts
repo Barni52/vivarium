@@ -2,7 +2,6 @@ import { spawn, execFile } from 'child_process'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { app } from 'electron'
 import type {
   ClaudeVersionInfo,
   ContainerState,
@@ -22,7 +21,7 @@ import {
   fullDockerfile
 } from './dockerfiles'
 import { bridgeDir, ensureBridgeFiles } from './bridge'
-import { pruneClips } from './clipboard'
+import { clipDir, pruneClips } from './clipboard'
 
 export type LineSink = (chunk: string) => void
 
@@ -484,10 +483,6 @@ export class DockerService {
     return project.image === 'full' ? FULL_IMAGE : SLIM_IMAGE
   }
 
-  private clipDir(project: Project): string {
-    return join(app.getPath('userData'), 'clip', project.id)
-  }
-
   // ---- shadow mounts (ref 553-566) ---------------------------------------
   // Overlay container-local named volumes on top of build-output dirs so
   // in-container installs/builds are fast and never touch the Windows checkout.
@@ -649,7 +644,7 @@ export class DockerService {
     }
 
     // Clip dir for image-paste (host-managed bind mount).
-    args.push('--mount', `type=bind,source=${this.clipDir(project)},target=/clip`)
+    args.push('--mount', `type=bind,source=${clipDir(project.id)},target=/clip`)
 
     // Hook bridge: Claude Code hook settings + event log (see bridge.ts).
     args.push('--mount', `type=bind,source=${bridgeDir(project.id)},target=/vivarium`)
@@ -805,7 +800,7 @@ export class DockerService {
     // Ensure the host-side clip dir (and shared output folder, if set) exist
     // before binding them — a missing bind source fails `docker run`.
     await import('fs').then(async ({ promises }) => {
-      await promises.mkdir(this.clipDir(project), { recursive: true })
+      await promises.mkdir(clipDir(project.id), { recursive: true })
       if (this.sharedOutput) {
         await promises.mkdir(this.sharedOutput, { recursive: true }).catch(() => {})
       }

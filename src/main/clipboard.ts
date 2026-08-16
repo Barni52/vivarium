@@ -10,8 +10,13 @@ import { join, relative } from 'path'
 
 let counter = 0
 
-/** `%APPDATA%/vivarium/clip/<projectId>` — the host side of the /clip mount. */
-function clipDir(projectId: string): string {
+/**
+ * `%APPDATA%/vivarium/clip/<projectId>` — the host side of the /clip mount, and
+ * the **one** spelling of it. `docker.ts` binds this path and creates it before
+ * `docker run`; the module that writes into it is the one that gets to say where
+ * it is, the same arrangement `bridgeDir` already has with the hook bridge.
+ */
+export function clipDir(projectId: string): string {
   return join(app.getPath('userData'), 'clip', projectId)
 }
 
