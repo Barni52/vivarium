@@ -1,5 +1,5 @@
 import { spawn, execFile } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, promises as fsp } from 'fs'
 import { join, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import type {
@@ -799,12 +799,10 @@ export class DockerService {
 
     // Ensure the host-side clip dir (and shared output folder, if set) exist
     // before binding them — a missing bind source fails `docker run`.
-    await import('fs').then(async ({ promises }) => {
-      await promises.mkdir(clipDir(project.id), { recursive: true })
-      if (this.sharedOutput) {
-        await promises.mkdir(this.sharedOutput, { recursive: true }).catch(() => {})
-      }
-    })
+    await fsp.mkdir(clipDir(project.id), { recursive: true })
+    if (this.sharedOutput) {
+      await fsp.mkdir(this.sharedOutput, { recursive: true }).catch(() => {})
+    }
 
     sink(`\r\n==> Creating container ${name} (${this.imageName(project)})\r\n`)
     const args = await this.buildRunArgs(project)
