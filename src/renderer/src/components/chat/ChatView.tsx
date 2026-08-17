@@ -1047,8 +1047,20 @@ export function ChatView({
           is centred over the *log* rather than over the log plus the outline
           rail. It cannot live inside the scroller: an absolutely positioned
           child of a scroll container still scrolls with the content, and this
-          one has to stay put. */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
+          one has to stay put.
+
+          **`minWidth: 0` is what keeps the log the width of the window**, and it
+          is not optional here. A flex item's `min-width: auto` is its content's
+          minimum size, and this box is the one link in the chain that is not
+          itself a scroller — the log below *is* one, so its own automatic minimum
+          is zero and the row above it used to hold this box's job. Without it the
+          widest unbreakable thing in the conversation (a `white-space: pre` diff
+          row, a long line in a fenced block) became the floor for this box, the
+          log stretched to match, and every paragraph in the window then wrapped
+          at a column wider than the window — text cut off at the right edge with
+          nothing to scroll, because the overflow is up here where nothing
+          scrolls, not inside the log. */}
+      <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, position: 'relative' }}>
       <div
         ref={logRef}
         className="vchat-scroll"
