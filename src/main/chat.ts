@@ -20,6 +20,7 @@ import type {
   Project,
   Session
 } from '@shared/types'
+import { sameModel } from '@shared/models'
 import type { DockerService } from './docker'
 import {
   ATTACH_CLOSE,
@@ -475,6 +476,18 @@ const STREAM_FLUSH_MS = 40
 const COMMAND_SCAN_MS = 10_000
 
 /**
+ * How long a `set_model` sent to hold a chat on its model may take to be acked
+ * (see holdModel).
+ *
+ * Shorter than `request`'s own default because nothing waits on it: the request
+ * is already on the wire ahead of the turn's message and the CLI applies it in
+ * read order, so this budget only bounds how long the *reply* is worth keeping a
+ * waiter for. Ten seconds is generous for a request the CLI answers by assigning
+ * a variable, and expiring it is not a failure worth a row.
+ */
+const SET_MODEL_MS = 10_000
+
+/**
  * What the picker offers when `list_models` answers with nothing — an old CLI,
  * a control request it does not implement, or a timed-out round trip.
  *
@@ -575,7 +588,23 @@ interface Live {
   /** lines that would not parse, counted per turn and surfaced only on a stop row */
   malformed: number
   silence: ReturnType<typeof setTimeout> | null
-  model: string | null
+  /**
+   * The last model the **process** named — an `init` frame, or an assistant line
+   * in a settled turn.
+   *
+   * Not "the model this chat is on", which is `Session.model`: a turn whose slash
+   * command, skill or agent definition pins a model of its own **runs on that
+   * model**, and the CLI goes back to the session's model at the next turn all by
+   * itself (measured on 2.1.233: a `/command` with `model: sonnet` in its
+   * frontmatter reported sonnet for its own turn and haiku again for the next
+   * one). So this routinely names a model the conversation only *visited*.
+   *
+   * Keeping it as the reading is what put a chat back on Opus for the rest of its
+   * life after one such turn. `reading()` decides what to show from this and the
+   * pick together; `holdModel` uses the disagreement between them as the signal
+   * that the process needs putting back.
+   */
+  reported: string | null
   commands: string[]
   /** when the on-disk command scan last ran, for its throttle */
   commandsAt: number
@@ -756,7 +785,7 @@ export class ChatService {
       reqSeq: 0,
       malformed: 0,
       silence: null,
-      model: session.model ?? null,
+      reported: null,
       commands: project.slashCommands ?? [],
       commandsAt: 0,
       context: null,
@@ -821,11 +850,44 @@ export class ChatService {
       total: l.entries.length,
       todos: [...l.todos.values()],
       mode: l.session.mode ?? 'bypassPermissions',
-      model: l.model,
+      model: this.reading(l),
       commands: l.commands,
       context: l.context,
       blocking: [...l.pending.values()][0] ?? null
     }
+  }
+
+  /**
+   * What the header chip says this chat is on.
+   *
+   * **The pick is the authority, and the process's report is only the spelling
+   * of it.** `Session.model` is what `--model` was given at spawn and what every
+   * `set_model` since has asked for, so it is the one fact about a chat's model
+   * that somebody actually chose. A reported id that names the same model is
+   * preferred over it only because it is the *fuller* spelling — the alias
+   * `fable` reads as "Fable" in the chip where the resolved id reads "Fable 5" —
+   * and a reported id naming a *different* model is not adopted at all, because
+   * the only thing that produces one is a turn the CLI ran on a model of its own
+   * choosing and has already left behind (see `Live.reported`).
+   *
+   * The visited model is not hidden by this: the log draws a
+   * `model · Fable 5 → Opus 5` divider inside that turn, which is where a fact
+   * about one turn belongs. What it stops is a chip that keeps claiming the
+   * visited model for the rest of the conversation.
+   */
+  private reading(l: Live): string | null {
+    const chosen = l.session.model ?? null
+    if (!chosen) return l.reported
+    if (!l.reported) return chosen
+    if (sameModel(chosen, l.reported)) return l.reported
+    // Disagreement: the pick stands, but spelled as fully as this app can spell
+    // it. `Session.model` is an alias, and an alias has no generation in it — so
+    // handing the chip `haiku` where it had been reading `Haiku 4.5` would flip
+    // the *number* off the header for the length of a visited turn, which is the
+    // reading `@shared/models` exists to stop. The picker's own resolution knows
+    // the number whenever the menu has ever been opened on this project, and the
+    // alias remains the honest fallback when it has not.
+    return this.resolvedName(l, chosen, null)
   }
 
   /** Clip tool bodies on the way out, keeping the full text for `chat:body`. */
@@ -887,7 +949,13 @@ export class ChatService {
     l.bodies = mapper.bodies
     this.keepImages(l, mapper.images)
     l.todos = mapper.todos
-    l.model = mapper.model ?? l.model
+    // The last model the conversation was answered on. At open it is the *only*
+    // report there is — nothing is emitted on the wire until the first user
+    // message — so this is what puts a generation on the chip before turn one,
+    // and it is subject to the same rule as any other report: the pick wins if
+    // the two disagree, because a conversation whose last turn happened to run on
+    // a pinned model is not a conversation that is set to it (see `reading`).
+    l.reported = mapper.model ?? l.reported
     // A history turn is turn 0; live turns start at 1 so a settle can never
     // replace history it did not map.
     l.turn = 0
@@ -925,6 +993,14 @@ export class ChatService {
     const { lines, bytes } = takeTurn(complete)
     this.accounted(l, from + bytes)
     const mapper = new ChatMapper(turn)
+    // Seeded with the reading, exactly as `mapperFor` seeds the live one — a
+    // divider is derived from consecutive models disagreeing, and a mapper that
+    // starts at `null` cannot draw the *first* one. Without this the settle
+    // replaced a turn's rows with a set that had lost its `model · a → b`
+    // divider, so a turn the CLI ran on a pinned model lost the one row saying
+    // so a second after it arrived, and got it back only on a reopen (where
+    // `readHistory` walks the whole file and does see the change).
+    mapper.model = this.reading(l)
     // Same reason as `mapperFor`: a background agent launched in an earlier turn
     // reports into this one, and the row it completes belongs to that turn.
     mapper.adoptTasks(l.entries)
@@ -996,7 +1072,7 @@ export class ChatService {
     for (const [id, t] of mapper.todos) l.todos.set(id, t)
     for (const [id, body] of mapper.bodies) l.bodies.set(id, body)
     this.keepImages(l, mapper.images)
-    if (mapper.model) l.model = mapper.model
+    if (mapper.model) l.reported = mapper.model
 
     // Keep the turn's clock row: it is the only row in a turn that the transcript
     // cannot reproduce until `system/turn_duration` lands, and dropping it would
@@ -1319,7 +1395,7 @@ export class ChatService {
   private mapperFor(l: Live): ChatMapper {
     if (!l.mapper) {
       l.mapper = new ChatMapper(activeTurn(l))
-      l.mapper.model = l.model
+      l.mapper.model = this.reading(l)
       // This mapper is dropped at every `result`, and a background agent is not:
       // one launched two turns ago reports into *this* one. Its row is handed
       // forward by reference so the notification completes the row on screen
@@ -1331,7 +1407,11 @@ export class ChatService {
 
   private init(l: Live, f: Json): void {
     const model = str(f.model)
-    if (model) l.model = model
+    // The model this turn is running on, which is not necessarily the chat's:
+    // this frame is emitted at the *start* of a turn, and a turn whose command or
+    // skill pins a model reports that one here (see `Live.reported`). So it is
+    // recorded as a report and `reading` decides what the chip is told.
+    if (model) l.reported = model
     const commands = [
       ...arr(f.slash_commands).map((c) => str(c)),
       ...arr(f.skills).map((s) => {
@@ -1357,7 +1437,7 @@ export class ChatService {
     this.emit({
       kind: 'meta',
       sessionId: l.session.id,
-      model: model || undefined,
+      model: model ? this.reading(l) ?? undefined : undefined,
       mode: mode === 'plan' || mode === 'bypassPermissions' ? mode : undefined,
       commands: commands.length ? commands : undefined
     })
@@ -1866,6 +1946,11 @@ export class ChatService {
     const prose = `${text}${trailer}`
     const isCommand = text.trimStart().startsWith('/')
 
+    // Before this turn's message reaches the pipe, not after: a turn is the only
+    // thing that can be running on the wrong model, and this is the last moment
+    // at which the right one can still be in force for it.
+    this.holdModel(l)
+
     // Queued behind a turn that is still running, or the only one in flight?
     // Everything below that resets *per-turn* state has to know, because a
     // queued send must not reach into the turn that is currently executing —
@@ -2239,20 +2324,31 @@ export class ChatService {
     const l = this.live.get(sessionId)
     if (!l) return true // persisted anyway; it applies as --model at the next spawn
     const r = await this.request(l, { subtype: 'set_model', model })
-    if (!r.ok) return false
+    if (!r.ok) {
+      // **Never swallowed**, the same rule `setMode` follows and for the same
+      // reason: the renderer painted the pick the moment it was clicked, so a
+      // refusal that returns quietly leaves the chip naming a model the process
+      // was never put on — and the caller persists `Session.model` on the
+      // strength of this answer, which would make the lie survive a restart. The
+      // reading goes back to what the process is actually on, and `false` stops
+      // the write (see the chatSetModel handler).
+      this.emit({ kind: 'meta', sessionId, model: this.reading(l) ?? undefined })
+      return false
+    }
 
+    // The pick, on the same snapshot `setMode` writes the mode to. This is what
+    // `reading` treats as the authority and what `holdModel` re-asserts, so it
+    // has to land here rather than only in config: `l.session` is a snapshot from
+    // open time, and a live process would otherwise go on being measured against
+    // the model it was launched with.
+    l.session = { ...l.session, model }
     // What the picker sends is an *alias* (`opus`), because that is what the CLI
     // accepts back. What the header must show is the model that alias resolves
     // to, or picking "Opus" reads as `Opus` with no generation on it — which is
     // half of the complaint the naming fix answers. The response knows, and
     // `list_models` knew already, so either source will do.
-    const resolved =
-      str(r.response?.model) ||
-      str(r.response?.resolvedModel) ||
-      this.models.get(l.project.id)?.find((m) => m.value === model)?.detail ||
-      model
-    l.model = resolved
-    this.emit({ kind: 'meta', sessionId, model: resolved })
+    l.reported = this.resolvedName(l, model, r.response)
+    this.emit({ kind: 'meta', sessionId, model: this.reading(l) ?? undefined })
 
     // The context window is a property of the model, and until now the meter
     // kept the previous one's ceiling until the next turn happened to refresh
@@ -2261,6 +2357,65 @@ export class ChatService {
     // for it, so changing the model has to ask.
     void this.refreshContext(l)
     return true
+  }
+
+  /**
+   * The resolved id behind an alias, for the header.
+   *
+   * Three sources in preference order, because `set_model` acks with nothing at
+   * all on the versions measured (2.1.42 and 2.1.233 both answer a bare
+   * `{subtype:'success'}`), and the alias itself is the last resort — a chip
+   * reading "Fable" rather than "Fable 5" is a worse answer than the id, but
+   * still a true one.
+   */
+  private resolvedName(l: Live, model: string, response: Json | null): string {
+    return (
+      str(response?.model) ||
+      str(response?.resolvedModel) ||
+      this.models.get(l.project.id)?.find((m) => m.value === model)?.detail ||
+      model
+    )
+  }
+
+  /**
+   * Put the process back on the model this chat is set to, if it has wandered.
+   *
+   * The wandering is not a fault to be prevented — it is how Claude Code works.
+   * A slash command, a skill or an agent definition may pin a model, and a turn
+   * that expands one **runs on that model**; the CLI then returns to the
+   * session's model by itself at the next turn. What was missing was anything on
+   * this side that held the user's choice, so the *other* ways a process can end
+   * up off it — a `set_model` that never landed, a fallback the CLI took under
+   * load — were permanent, and the picker was a request that could quietly stop
+   * being honoured mid-conversation.
+   *
+   * Written **before** the turn's own message rather than awaited: the CLI reads
+   * one line at a time and applies a control request as it reads it, so a
+   * `set_model` on the line above is in force for the message below it — which
+   * gets this turn, not the one after, and costs the composer nothing. Nothing
+   * here can hold up a send; if the request is refused or times out, the log's
+   * `model · a → b` divider is left to say so and the next turn asks again.
+   *
+   * The CLI answers a `set_model` with a `Set model to …` echo on the message
+   * stream — the same one the picker has always produced — so this turn shows
+   * that card until the settle replaces the turn's rows with the transcript's,
+   * which does not contain it. Left alone deliberately: the row is true, it says
+   * exactly what the app just did, and suppressing it would mean matching the
+   * CLI's wording, which is the one way of recognising a line this file refuses.
+   */
+  private holdModel(l: Live): void {
+    const chosen = l.session.model
+    // Only on a real disagreement. `sameModel` is what keeps this from firing on
+    // every turn of every chat: the pick is an alias and the report is a resolved
+    // id, so `fable` and `claude-fable-5-…` have to count as agreement.
+    if (!chosen || !l.reported || sameModel(chosen, l.reported)) return
+    void this.request(l, { subtype: 'set_model', model: chosen }, SET_MODEL_MS).then((r) => {
+      // The session may have been closed or reopened while this was in flight,
+      // and a stale `Live` must not write into the current one's reading.
+      if (!r.ok || this.live.get(l.session.id) !== l) return
+      l.reported = this.resolvedName(l, chosen, r.response)
+      this.emit({ kind: 'meta', sessionId: l.session.id, model: this.reading(l) ?? undefined })
+    })
   }
 
   /**

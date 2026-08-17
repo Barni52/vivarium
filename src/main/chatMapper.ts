@@ -10,7 +10,7 @@ import type {
   ChatToolBody,
   ChatToolStatus
 } from '@shared/types'
-import { modelName } from '@shared/models'
+import { modelName, sameModel } from '@shared/models'
 
 // The chat log's one mapper: Claude Code's own JSON → the rows the window draws.
 //
@@ -785,7 +785,14 @@ export class ChatMapper {
     // Derived, not clicked: the row marks where the model actually changed.
     const model = str(message.model)
     if (model) {
-      if (this.model && this.model !== model) {
+      // `sameModel`, never `!==`: the two sides are routinely different
+      // *spellings* of one model, because what this mapper is seeded with is
+      // whatever the chat is set to — an alias like `fable`, which is what
+      // `--model` and `set_model` take — while a transcript line always carries
+      // the resolved `claude-fable-5-…`. A string comparison drew
+      // `model · Fable → Fable 5` on the first turn of every chat opened on an
+      // alias, which is a divider for a change that did not happen.
+      if (this.model && !sameModel(this.model, model)) {
         this.push({
           id: this.id('model'),
           role: 'claude',

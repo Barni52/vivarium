@@ -912,7 +912,13 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   })
 
   ipcMain.handle(CH.chatSetModel, async (_e, sessionId: string, model: string): Promise<Config> => {
-    await chat.setModel(sessionId, model)
+    // Persisted only if the process actually took it. `Session.model` is what
+    // `--model` gets at the next spawn *and* what ChatService holds a live chat to
+    // (see holdModel), so writing it on a refusal would record a preference the
+    // CLI has already rejected and then keep asserting it every turn. The refusal
+    // is not silent either way: ChatService emits the reading that is really in
+    // force, which corrects the chip the renderer painted optimistically.
+    if (!(await chat.setModel(sessionId, model))) return store.get()
     return store.mutate((cfg) => {
       for (const p of cfg.projects) {
         const s = p.sessions.find((x) => x.id === sessionId)

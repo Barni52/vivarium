@@ -320,6 +320,19 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
 - **The context meter is only as fresh as the last thing that asked for it**, so `set_model` asks
   too — the ceiling is a property of the model. `setModel` adopts the *resolved* id for display
   while `Session.model` keeps the **alias**, which is what `--model` needs at the next spawn.
+- **`Session.model` is what the chat is on; what the process reports is only which model answered
+  a turn.** A slash command, skill or agent definition may pin a model, and a turn that expands one
+  *runs on it* — the CLI reports it in that turn's `init` and returns to the session's model by
+  itself at the next turn. Adopting that report as the chat's model is what left a chat on Opus for
+  good after one such turn, so `reading()` prefers the pick and takes a report only as a **fuller
+  spelling** of it (`fable` → `claude-fable-5-…`), never as a different model; the visited model
+  stays visible as the turn's own `model · a → b` divider, which is why the settle's mapper is
+  seeded like the live one. `holdModel` re-asserts the pick when the two disagree, written on the
+  line *above* the turn's message — the CLI applies a control request as it reads it, so that gets
+  this turn rather than the next. Same-model comparisons are `sameModel` in `@shared/models`, never
+  `!==`: the pick is an alias and every report is resolved. And a refused `set_model` is **never
+  swallowed** — `setModel` re-emits the reading actually in force and the ipc handler does not
+  persist, or the picker would record a preference the CLI rejected and then assert it every turn.
 - **The turn clock's token reading steps per API message and is never estimated between them.**
   Only `output` is on screen (the whole context is re-sent every message, so a summed input reads
   as a cost the turn did not incur), and subagent tokens are excluded because `result.usage`

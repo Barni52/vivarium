@@ -22,14 +22,23 @@
 const FAMILIES = ['opus', 'sonnet', 'haiku', 'fable', 'instant'] as const
 
 /**
- * Parse an id into its display name, or `null` when it is not a model id at
- * all. The null is load-bearing: the picker feeds this both resolved ids and
- * free prose (`FALLBACK_MODELS` carries "whatever the CLI is configured for" as
- * a subtitle), and a parser that answers something for every input would put
- * that sentence in the chip.
+ * The family and generation an id names, or `null` when it names neither.
+ *
+ * Split out of `parse` because two questions are asked of one id and both have
+ * to be answered by the same reading of it: what to *call* it, and whether it is
+ * the same model as some other spelling (see `sameModel`). A second tokeniser
+ * would let the header and the "has this drifted?" test disagree about `fable`
+ * and `claude-fable-5-20260101`, which is the disagreement this file exists to
+ * prevent.
  */
-function parse(id: string): string | null {
-  const cleaned = id
+interface ModelKey {
+  family: string
+  /** `5`, `4.5`, or empty for an alias that genuinely carries no generation */
+  version: string
+}
+
+function key(id: string | null | undefined): ModelKey | null {
+  const cleaned = (id ?? '')
     .trim()
     .toLowerCase()
     // The vendor prefix, the release date and a `-latest`/`-v2:0` pin are not
@@ -46,8 +55,52 @@ function parse(id: string): string | null {
   // Digits on whichever side of the family word carries them.
   const trailing = digitRun(tokens, at + 1, 1)
   const version = trailing.length ? trailing : digitRun(tokens, at - 1, -1)
-  const family = tokens[at][0].toUpperCase() + tokens[at].slice(1)
-  return version.length ? `${family} ${version.join('.')}` : family
+  return { family: tokens[at], version: version.join('.') }
+}
+
+/**
+ * Parse an id into its display name, or `null` when it is not a model id at
+ * all. The null is load-bearing: the picker feeds this both resolved ids and
+ * free prose (`FALLBACK_MODELS` carries "whatever the CLI is configured for" as
+ * a subtitle), and a parser that answers something for every input would put
+ * that sentence in the chip.
+ */
+function parse(id: string): string | null {
+  const k = key(id)
+  if (!k) return null
+  const family = k.family[0].toUpperCase() + k.family.slice(1)
+  return k.version ? `${family} ${k.version}` : family
+}
+
+/**
+ * Do these two spellings name the same model?
+ *
+ * The question is asked of an *alias* against a *resolved id* — `fable` against
+ * `claude-fable-5-20260101` — because the two halves of a chat's model come from
+ * different places: what `--model` and `set_model` are given (an alias, which is
+ * what the CLI accepts back) against what the process reports (always resolved).
+ * A raw `!==` between those is what made a model change look like it happened on
+ * every turn.
+ *
+ * Two answers are deliberately "yes":
+ *
+ * - **An alias with no generation matches every generation of its family.**
+ *   `opus` *means* the latest Opus, so `opus` against `Opus 4.5` is agreement,
+ *   not drift — and treating it as drift would have the app re-sending
+ *   `set_model opus` before every turn forever.
+ * - **Anything unreadable matches.** `default`, empty, and an id with no family
+ *   word in it (a Bedrock ARN, a name this app has never heard of) return `null`
+ *   from `key`, and the honest answer for "is this the same model?" when neither
+ *   side can be read is that we do not know. Callers act on a `false`, so an
+ *   unknown must never produce one.
+ */
+export function sameModel(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = key(a)
+  const y = key(b)
+  if (!x || !y) return true
+  if (x.family !== y.family) return false
+  if (!x.version || !y.version) return true
+  return x.version === y.version
 }
 
 /**
