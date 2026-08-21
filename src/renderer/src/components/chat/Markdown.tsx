@@ -379,10 +379,16 @@ function blocks(lines: string[], ctx: Ctx, keyBase = 'b'): React.ReactNode[] {
     // fenced code
     const fence = FENCE.exec(line)
     if (fence) {
-      const close = fence[1][0].repeat(3)
+      // A closing fence is *at least* as long as the opening one, which is the
+      // only way to fence a block that itself holds a three-backtick line --
+      // and that is exactly what four backticks are opened for whenever an
+      // answer shows what markdown looks like. Matching a fixed three closed
+      // such a block on its nested fence and spilled the rest of the answer
+      // out as loose prose.
+      const close = new RegExp(`^${fence[1][0]}{${fence[1].length},}`)
       const body: string[] = []
       i++
-      while (i < lines.length && !lines[i].trimStart().startsWith(close)) body.push(lines[i++])
+      while (i < lines.length && !close.test(lines[i].trimStart())) body.push(lines[i++])
       i++
       push(<CodeBlock lang={fence[2]} body={body.join('\n')} />)
       continue
