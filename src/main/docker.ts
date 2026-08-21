@@ -68,6 +68,26 @@ function sanitize(name: string): string {
 }
 
 /**
+ * One `--mount` value, with any field that needs it CSV-quoted.
+ *
+ * docker parses the whole flag value as a **single CSV record**, so a comma
+ * inside a value ends that field early: a folder named `Acme, Inc` (an
+ * ordinary name for a client folder in a corporate tool) becomes a bogus
+ * extra field, and `docker run` dies with `invalid option 'Inc'` -- an error
+ * that never names the folder that caused it. Quoting the field is the only
+ * escape docker offers, and it does work: verified against docker 29.5.3
+ * through the same `spawn` these args go out on. A Windows path cannot hold a
+ * `"`, but doubling one is what CSV means by an escaped quote and spelling it
+ * costs nothing.
+ *
+ * This is the same shape of hole as the drive-letter colon that `--mount` was
+ * adopted for (see the run-arg builder): a delimiter turning up inside a value.
+ */
+function mountSpec(...fields: string[]): string {
+  return fields.map((f) => (/[",]/.test(f) ? `"${f.replace(/"/g, '""')}"` : f)).join(',')
+}
+
+/**
  * Shadow-volume suffix → what it overlays. Read by shadowMounts (which builds
  * the names) *and* by listVolumes (which explains them back to the user), so
  * the two can't drift apart — a suffix that isn't in here won't compile.
@@ -676,19 +696,23 @@ export class DockerService {
     // Bind mounts use --mount (not -v): a Windows source like `C:\foo` contains
     // a drive-letter colon, and docker's -v parser mis-splits it into a bogus
     // third "mode" segment ("invalid mode: /workspace/..."). --mount is
-    // comma/key=value delimited, so the colon is unambiguous.
+    // comma/key=value delimited, so the colon is unambiguous -- and the comma
+    // that delimiting leaves exposed is what mountSpec quotes away.
     for (const { hostPath, target, shared } of this.mountTargets(project)) {
-      args.push('--mount', `type=bind,source=${hostPath},target=${target}`)
+      args.push('--mount', mountSpec('type=bind', `source=${hostPath}`, `target=${target}`))
       // The shared output folder is one folder for every project; it gets no
       // per-project shadow volumes.
       if (!shared) args.push(...this.shadowMounts(hostPath, target, shadowPrefix(hostPath)))
     }
 
     // Clip dir for image-paste (host-managed bind mount).
-    args.push('--mount', `type=bind,source=${clipDir(project.id)},target=/clip`)
+    args.push('--mount', mountSpec('type=bind', `source=${clipDir(project.id)}`, 'target=/clip'))
 
     // Hook bridge: Claude Code hook settings + event log (see bridge.ts).
-    args.push('--mount', `type=bind,source=${bridgeDir(project.id)},target=/vivarium`)
+    args.push(
+      '--mount',
+      mountSpec('type=bind', `source=${bridgeDir(project.id)}`, 'target=/vivarium')
+    )
 
     args.push('-w', '/workspace')
     args.push(this.imageName(project))
