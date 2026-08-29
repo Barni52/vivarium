@@ -889,7 +889,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   openTranscriptHit: (hit) => {
-    if (!hit.sessionId) return
+    // An archived hit names a conversation this app cannot show. `/clear` retires
+    // a uuid onto `previousClaudeSessionIds` and every read path — `readHistory`,
+    // `settleTurn`, `earlier`, `rewind` — reads `Session.claudeSessionId` and only
+    // that, so opening the session would land on its *current* conversation with a
+    // term that provably cannot match, and the find bar would sit at 0/0 with
+    // nothing to say. The row says so instead of coming here (see
+    // TranscriptSearch's `openable`); this is the second half of the same rule, so
+    // no other caller can make the promise either.
+    if (!hit.sessionId || hit.archived) return
     // The term rides along so the conversation opens with the find bar already
     // on it — global search says *which* conversation, find-in-chat says where
     // in it, and picking a result should not make you type the term twice.

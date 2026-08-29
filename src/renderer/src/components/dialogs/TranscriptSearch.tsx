@@ -19,18 +19,27 @@ import { MONO } from '../../theme'
 // each half-solving the other's problem.
 //
 // Three kinds of row, because a uuid maps three ways. A session's current
-// conversation is the ordinary case. An **archived** one was retired by a
-// `/clear` — its session has moved on, and this is the only place in the app
-// that surfaces those at all. A **foreign** one belongs to nothing in
-// config.json: the volume is shared with the user's claude-box setup on purpose,
-// and a deleted session's transcript may still be sitting there awaiting a
-// drain. Foreign rows are shown and not clickable, because "9 matches somewhere
-// outside Vivarium" is a true answer and hiding it would make the totals lie.
+// conversation is the ordinary case, and the only one that can be opened. An
+// **archived** one was retired by a `/clear` — its session has moved on, and this
+// is the only place in the app that surfaces those at all. A **foreign** one
+// belongs to nothing in config.json: the volume is shared with the user's
+// claude-box setup on purpose, and a deleted session's transcript may still be
+// sitting there awaiting a drain.
+//
+// Neither of those two is clickable, and for the same reason: "9 matches somewhere
+// outside Vivarium" and "11 matches in a conversation this chat has since cleared"
+// are both true answers, and hiding them would make the totals lie — but neither
+// is somewhere the app can take you. Nothing reads a retired uuid: every chat read
+// path goes to `Session.claudeSessionId`, so opening an archived row would select
+// the session's *current*, unrelated conversation and arm a find term that cannot
+// match a line of it. The snippet is what such a row has to give, and it gives it.
 
 function Row({ hit }: { hit: TranscriptHit }): React.ReactElement {
   const openTranscriptHit = useStore((s) => s.openTranscriptHit)
   const [hover, setHover] = React.useState(false)
-  const reachable = !hit.foreign && !!hit.sessionId
+  // What `openTranscriptHit` will actually act on — it refuses the same two,
+  // so a row can never promise a jump the store then declines to make.
+  const openable = !hit.foreign && !hit.archived && !!hit.sessionId
 
   const title = hit.foreign
     ? 'Outside Vivarium'
@@ -38,17 +47,17 @@ function Row({ hit }: { hit: TranscriptHit }): React.ReactElement {
   const detail = hit.foreign
     ? 'a claude-box conversation, or one whose session was deleted'
     : hit.archived
-      ? 'an earlier conversation in this chat, retired by /clear'
+      ? 'an earlier conversation in this chat, retired by /clear — it can no longer be opened'
       : 'this chat’s current conversation'
 
   return (
     <div
-      onClick={() => reachable && openTranscriptHit(hit)}
+      onClick={() => openable && openTranscriptHit(hit)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      {...(reachable ? { 'data-click': true, role: 'button', tabIndex: 0 } : {})}
+      {...(openable ? { 'data-click': true, role: 'button', tabIndex: 0 } : {})}
       onKeyDown={(e) => {
-        if (!reachable) return
+        if (!openable) return
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           openTranscriptHit(hit)
@@ -60,12 +69,12 @@ function Row({ hit }: { hit: TranscriptHit }): React.ReactElement {
         gap: 12,
         padding: '9px 12px',
         borderBottom: '1px solid var(--border)',
-        background: reachable && hover ? 'var(--sel)' : 'transparent',
-        cursor: reachable ? 'pointer' : 'default',
-        opacity: reachable ? 1 : 0.66
+        background: openable && hover ? 'var(--sel)' : 'transparent',
+        cursor: openable ? 'pointer' : 'default',
+        opacity: openable ? 1 : 0.66
       }}
     >
-      <span style={{ display: 'flex', flex: 'none', color: reachable ? 'var(--accent2)' : 'var(--dim)' }}>
+      <span style={{ display: 'flex', flex: 'none', color: openable ? 'var(--accent2)' : 'var(--dim)' }}>
         <ChatBubble size={14} />
       </span>
       <div style={{ minWidth: 0, flex: 1 }}>
@@ -145,8 +154,12 @@ export function TranscriptSearch(): React.ReactElement {
   const run = useStore((s) => s.runTranscriptSearch)
   const close = useStore((s) => s.closeDialog)
 
-  const reachable = (hits ?? []).filter((h) => !h.foreign)
+  const inVivarium = (hits ?? []).filter((h) => !h.foreign)
   const foreign = (hits ?? []).filter((h) => h.foreign)
+  // The footer promises a jump, so it is spoken only when there is a row that can
+  // actually make it — a search that found nothing but cleared conversations has
+  // results worth reading and nowhere to go.
+  const openable = inVivarium.filter((h) => !h.archived && !!h.sessionId)
 
   return (
     <Overlay onClose={close}>
@@ -227,7 +240,7 @@ export function TranscriptSearch(): React.ReactElement {
                 background: 'var(--card2)'
               }}
             >
-              {reachable.map((h) => (
+              {inVivarium.map((h) => (
                 <Row key={h.uuid} hit={h} />
               ))}
               {foreign.length > 0 && (
@@ -257,7 +270,7 @@ export function TranscriptSearch(): React.ReactElement {
             </div>
           )}
 
-          {hits !== null && reachable.length > 0 && (
+          {hits !== null && openable.length > 0 && (
             <div style={{ fontSize: 11.5, color: 'var(--dim)' }}>
               Pick one to open it with the find bar already on this term.
             </div>
