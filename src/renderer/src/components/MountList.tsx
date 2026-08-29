@@ -1,5 +1,7 @@
 import React from 'react'
 import { Folder, Plus, Close, Lock, Check } from './Icons'
+import { mountTargets } from '@shared/mounts'
+import { useStore } from '../state/store'
 import { leaf, relLabel, samePath, splitEntries } from '../paths'
 import { MONO } from '../theme'
 
@@ -32,6 +34,17 @@ export function MountList({
     const names = splitEntries(draft ?? '')
     if (names.length && onAdd) onAdd(names)
   }
+
+  // Where each of these folders actually lands, computed by the same rule
+  // `docker.ts` builds its `--mount` targets with (`@shared/mounts`) rather than
+  // from the folder's own name. It has to be the whole list at once: the leaf is
+  // sanitized, the shared output folder reserves `/workspace/output` ahead of
+  // everything, and a leaf already claimed by a mount above it gets a hash
+  // suffix — so a mount's target is a fact about the list, not about the mount.
+  // The shared entry is dropped again: this dialog lists the project's own
+  // folders, and what is left lines up with `mounts` one for one.
+  const sharedOutput = useStore((s) => s.config.sharedOutputFolder)
+  const targets = mountTargets(mounts, sharedOutput).filter((t) => !t.shared)
 
   // The base folder's immediate subfolders, offered as one-click chips. This is
   // the quick path for the case the dialog is actually for — a new project whose
@@ -305,7 +318,7 @@ export function MountList({
                 {relLabel(basePath, m)}
               </span>
               <span style={{ fontSize: 11.5, color: 'var(--dim)', fontFamily: MONO }}>
-                → /workspace/{leaf(m)}
+                → {targets[i]?.target}
               </span>
               {editable && onRemove && (
                 <button

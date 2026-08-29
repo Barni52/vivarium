@@ -35,12 +35,17 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 `src/preload/index.ts` — the typed `window.vivarium`. The renderer never touches `ipcRenderer`.
 
 `src/shared/` — `ipc.ts` (`CH`, channel names), `types.ts` (all cross-process types), `models.ts`,
-`theme.ts`. `models.ts` is the only *logic* in `@shared` and earns it: both processes name models,
-so a second copy of the rule would let two surfaces disagree about what is answering you. It
-returns anything it does not recognise **unchanged** — inventing a name is how a chip ends up
-lying. `theme.ts` is the two-value sliver of the palette that main also needs: `ThemeName` and
-`THEME_BG`, because `BrowserWindow.backgroundColor` paints under the document and main has neither
-CSS nor the renderer's `localStorage`.
+`mounts.ts`, `theme.ts`. `models.ts` and `mounts.ts` are the only *logic* in `@shared` and earn it
+the same way: both processes name models, and both processes name the container path a mounted
+folder lands on — so a second copy of either rule would let two surfaces disagree about what is
+answering you, or send you to a `/workspace/…` path docker never created. `models.ts` returns
+anything it does not recognise **unchanged** — inventing a name is how a chip ends up lying.
+`mounts.ts` carries its own SHA-1 because the renderer has no `node:crypto` and an async digest
+cannot be read during a render; it is byte-exact with node's, which it must be — those eight hex
+digits are in the names of containers and volumes that already exist. `theme.ts` is the two-value
+sliver of the palette that main also needs: `ThemeName` and `THEME_BG`, because
+`BrowserWindow.backgroundColor` paints under the document and main has neither CSS nor the
+renderer's `localStorage`.
 
 `src/renderer/src/` — React + zustand + xterm; `state/store.ts` is the single store for UI state.
 

@@ -1,7 +1,7 @@
 import { spawn, execFile } from 'child_process'
 import { existsSync, promises as fsp } from 'fs'
-import { join, basename } from 'path'
-import { createHash, randomUUID } from 'crypto'
+import { join } from 'path'
+import { randomUUID } from 'crypto'
 import type {
   ClaudeVersionInfo,
   ContainerState,
@@ -20,6 +20,8 @@ import {
   slimDockerfile,
   fullDockerfile
 } from './dockerfiles'
+import type { MountTarget } from '@shared/mounts'
+import { mountTargets, sanitize, shortHash } from '@shared/mounts'
 import { bridgeDir, ensureBridgeFiles } from './bridge'
 import { clipDir, pruneClips } from './clipboard'
 
@@ -56,15 +58,6 @@ function isOlderVersion(a: string, b: string): boolean {
     if (d !== 0) return d < 0
   }
   return false
-}
-
-/** short 4-byte SHA1 hex of a string (ref: 8-char hash suffix in claude-box.ps1). */
-function shortHash(input: string): string {
-  return createHash('sha1').update(input, 'utf8').digest('hex').slice(0, 8)
-}
-
-function sanitize(name: string): string {
-  return name.replace(/[^A-Za-z0-9._-]/g, '_')
 }
 
 /**
@@ -579,25 +572,12 @@ export class DockerService {
    * *container* installed rather than the one you dragged, and showing the
    * translated path means you can see what you actually got.
    */
-  mountTargets(project: Project): Array<{ hostPath: string; target: string; shared?: true }> {
-    const out: Array<{ hostPath: string; target: string; shared?: true }> = []
-    const usedNames = new Set<string>()
-    // Shared output folder: always mounted (read-write) at /workspace/output so
-    // agents in every project drop artifacts to the same place. Reserve the
-    // "output" leaf first so a project folder literally named "output" gets a
-    // hash-suffixed target instead of colliding with this one.
-    if (this.sharedOutput) {
-      usedNames.add('output')
-      out.push({ hostPath: this.sharedOutput, target: '/workspace/output', shared: true })
-    }
-    for (const abs of project.mounts) {
-      const leafRaw = sanitize(basename(abs))
-      let leaf = leafRaw
-      if (usedNames.has(leaf)) leaf = `${leafRaw}-${shortHash(abs)}`
-      usedNames.add(leaf)
-      out.push({ hostPath: abs, target: `/workspace/${leaf}` })
-    }
-    return out
+  mountTargets(project: Project): MountTarget[] {
+    // The rule itself lives in `@shared/mounts`, because the mount dialog has to
+    // print the same targets this hands to docker (see the note there). What is
+    // main's alone is the shared output folder — a setting the renderer reads
+    // from config, not something the rule can look up.
+    return mountTargets(project.mounts, this.sharedOutput)
   }
 
   /**
