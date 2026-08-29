@@ -144,7 +144,6 @@ export class ConfigStore {
   }
 
   private async write(config: Config): Promise<void> {
-    this.cache = config
     await fs.mkdir(dirname(this.path), { recursive: true })
     // One version back, refreshed before each save. Best-effort: a failed copy
     // costs the *next* recovery, never this write, and on the very first save
@@ -160,6 +159,17 @@ export class ConfigStore {
       // over the real one, so a crash mid-write leaves config.json untouched.
       await fs.writeFile(tmp, JSON.stringify(config, null, 2), 'utf-8')
       await fs.rename(tmp, this.path)
+      // **After** the rename, never before it. The cache is what every later
+      // `get`, `getProject` and `mutate` clone reads, so adopting a config the
+      // disk refused — a locked file (OneDrive or antivirus holding config.json
+      // open is routine on Windows), a permission error, a full disk — leaves
+      // the process reporting state that exists nowhere else. Five of the
+      // mutate call sites are fire-and-forget `void store.mutate(...)`, so
+      // nothing would notice at the time, and the next launch would read back a
+      // config missing changes the UI had already treated as saved. Failing
+      // means the change is lost now, loudly and to the caller, rather than
+      // quietly at the next start.
+      this.cache = config
     } catch (err) {
       // A temp file left behind would never be cleaned up by anything else, and
       // it sits next to the config in the user's own AppData folder.
