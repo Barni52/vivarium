@@ -314,6 +314,14 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   ipcMain.handle(CH.updateProject, async (_e, input: UpdateProjectInput): Promise<Config> => {
     const project = store.getProject(input.id)
     const running = project ? await docker.isRunning(project) : false
+    // A container is named after its project, so the rename has to reach docker
+    // *before* it reaches config.json: once the new name is persisted, `project`
+    // no longer names the container that exists and every later command —
+    // including the recreate the renderer fires when the container was running —
+    // silently addresses a name nothing has ever answered to, stranding the real
+    // container under the old one. Ordered before the mutate for exactly that
+    // reason; a no-op when the name did not change (see renameContainer).
+    if (project) await docker.renameContainer(project, input.name.trim() || project.name)
     return store.mutate((cfg) => {
       const p = cfg.projects.find((x) => x.id === input.id)
       if (!p) return cfg

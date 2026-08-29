@@ -951,6 +951,37 @@ export class DockerService {
     return this.start(project, sink)
   }
 
+  /**
+   * Follow a project rename onto its container.
+   *
+   * `containerName` is derived from `project.name`, so the instant a rename is
+   * persisted every command in this file — start, stop, recreate, remove, and
+   * the `containerStates` poll — is aimed at a name no container has ever worn.
+   * The container that actually exists keeps its old name: still running, still
+   * holding its mounts, and unreachable from the app, since nothing here matches
+   * on anything but the current name (see `containerStates`' own note on why).
+   * That is why this must run *before* the new name reaches config, while
+   * `project` can still spell the container that is really there.
+   *
+   * `docker rename`, not `rm -f`: renaming is a metadata change, so a stopped
+   * container survives it intact and a running one goes on running — the caller
+   * decides separately whether a settings change warrants a recreate. A failed
+   * rename is the one case that would leak, so it falls back to removing the old
+   * container: losing a container costs the writable layer only (everything
+   * durable lives in the named home/creds/shadow volumes), whereas an orphan has
+   * no route back at all.
+   */
+  async renameContainer(project: Project, nextProjectName: string): Promise<void> {
+    const from = this.containerName(project)
+    const to = this.containerName({ ...project, name: nextProjectName })
+    // Sanitising collapses characters, so plenty of renames leave the container
+    // name untouched ('My Project' -> 'My_Project'); those are already correct.
+    if (from === to) return
+    if (!(await this.containerExists(project))) return
+    const r = await this.exec(['rename', from, to])
+    if (r.code !== 0) await this.exec(['rm', '-f', from])
+  }
+
   // ---- Claude Code version (manual updates, see main/claude.ts) -----------
   /**
    * Read the Claude Code version installed inside a project's container.
