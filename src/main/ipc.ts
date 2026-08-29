@@ -36,7 +36,7 @@ import type {
 } from '@shared/types'
 import { ConfigStore } from './config'
 import { DockerService } from './docker'
-import { BridgeWatcher, bridgeDir } from './bridge'
+import { BridgeWatcher, bridgeDir, removeBridge } from './bridge'
 import { ChatService } from './chat'
 import { gitBranch, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
@@ -364,6 +364,11 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       return cfg
     })
     syncBridgeWatchers()
+    // Ordered after that sync, which is what closes this project's watcher: the
+    // hook bridge is a host directory keyed by a project id that has just left
+    // config.json, so nothing will ever name it again and nothing else reclaims
+    // it — the same cascade the container, the clips and the transcripts get.
+    await removeBridge(id)
     void drainTranscriptDeletes()
     return cfg
   })

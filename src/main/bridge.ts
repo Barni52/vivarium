@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { watch, type FSWatcher } from 'node:fs'
-import { mkdir, open, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, open, rm, stat, writeFile } from 'node:fs/promises'
+import { join, relative } from 'node:path'
 import type { AgentActivityEvent, AgentHookKind } from '@shared/types'
 
 // The "bridge" is how agent lifecycle events get out of the container: a small
@@ -137,6 +137,30 @@ export async function ensureBridgeFiles(projectId: string): Promise<void> {
   await writeFile(join(dir, 'hooks.json'), HOOKS_JSON, 'utf8')
   await writeFile(join(dir, 'hook.sh'), HOOK_SH, 'utf8')
   await writeFile(join(dir, EVENTS_FILE), '', 'utf8')
+}
+
+/**
+ * Drop a deleted project's bridge dir — hooks.json, hook.sh and events.log.
+ *
+ * The same cascade `removeClips` performs, for the same reason: nothing else will
+ * ever name this directory again, since it is keyed by a project id that is about
+ * to leave config.json, and there is no dialog or sweep that could reclaim it
+ * later. `syncBridgeWatchers` only drops the in-memory `BridgeWatcher`, so without
+ * this every deleted project left a folder behind for the life of the install.
+ *
+ * **Call it after the watcher is gone.** fs.watch holds a handle on this very
+ * directory, and on Windows a directory with an open handle does not always
+ * remove — so this belongs after the `syncBridgeWatchers()` that follows the
+ * config write, not beside the container removal that precedes it.
+ *
+ * The guard is the one `removeClips` uses: `projectId` arrives over IPC, and only a
+ * direct child of the bridge root is ever removed, so a value carrying a separator or
+ * `..` resolves elsewhere and is refused rather than followed.
+ */
+export async function removeBridge(projectId: string): Promise<void> {
+  const root = join(app.getPath('userData'), 'bridge')
+  if (!projectId || relative(root, bridgeDir(projectId)) !== projectId) return
+  await rm(bridgeDir(projectId), { recursive: true, force: true }).catch(() => {})
 }
 
 /**
