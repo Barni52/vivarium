@@ -615,6 +615,11 @@ export class DockerService {
         // Slim never publishes, so a port left in config must not count as a
         // difference — it changes nothing about the container.
         port: project.image === 'full' ? (project.publishedPort ?? null) : null,
+        // The host-forward list is baked in as an env at `docker run`, so an
+        // edit to BACKEND_PORTS reaches an existing container only through a
+        // recreate — exactly the silently-never-applied route this label exists
+        // to close. Including it here recreates every container once per edit.
+        fwd: BACKEND_PORTS,
         mounts: this.mountTargets(project).map((m) => [m.hostPath, m.target])
       })
     )

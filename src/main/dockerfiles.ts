@@ -17,7 +17,7 @@ export const CREDS_VOLUME = 'claude-box-creds' // shared: /home/node/.claude
 export const HOME_VOLUME = 'claude-box-home' //  shared: all of /home/node
 
 // Host services the container must reach at localhost:PORT (ported from ref 66-70).
-export const BACKEND_PORTS = ['9980', '8080'] // Tomcat, Keycloak
+export const BACKEND_PORTS = ['9980', '8080', '9090'] // Tomcat, Keycloak, 9090 backend
 
 export function slimDockerfile(): string {
   return `FROM node:22-bookworm-slim
