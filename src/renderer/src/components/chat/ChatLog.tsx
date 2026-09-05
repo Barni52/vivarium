@@ -278,6 +278,28 @@ export const LogRow = React.memo(function LogRow({
                 )}
               </div>
             )}
+            {entry.queued && (
+              /*
+               * A message that has not been written into the CLI yet. It sits
+               * under the text rather than beside the timestamp because it is a
+               * fact about *this* message and it stops being true — the tag is
+               * removed by an upsert on the same row the moment the turn opens.
+               *
+               * Deliberately not a clock: nothing is being spent while a
+               * message waits, and a second number counting next to the running
+               * turn's is exactly the reading this whole change removes.
+               */
+              <div
+                style={{
+                  marginTop: 8,
+                  fontFamily: MONO,
+                  fontSize: TYPE.gutter,
+                  color: entry.queued === 'unsent' ? CHAT.danger : CHAT.dim3
+                }}
+              >
+                {entry.queued === 'unsent' ? '⊘ not sent' : '◷ queued'}
+              </div>
+            )}
           </Line>
         )
       }

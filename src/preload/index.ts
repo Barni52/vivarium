@@ -9,6 +9,7 @@ import type {
   ChatEntry,
   ChatEvent,
   ChatMode,
+  ChatEffort,
   ChatModelOption,
   ChatOpenResult,
   ChatRewindResult,
@@ -166,6 +167,8 @@ const api = {
     ipcRenderer.invoke(CH.chatSetMode, sessionId, mode),
   chatSetModel: (sessionId: string, model: string): Promise<Config> =>
     ipcRenderer.invoke(CH.chatSetModel, sessionId, model),
+  chatSetEffort: (sessionId: string, effort: ChatEffort): Promise<Config> =>
+    ipcRenderer.invoke(CH.chatSetEffort, sessionId, effort),
   chatModels: (sessionId: string): Promise<ChatModelOption[]> =>
     ipcRenderer.invoke(CH.chatModels, sessionId),
   chatClose: (sessionId: string): void => ipcRenderer.send(CH.chatClose, sessionId),

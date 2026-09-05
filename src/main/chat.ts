@@ -7,6 +7,7 @@ import type {
   ChatBlockingCard,
   ChatChip,
   ChatContextUsage,
+  ChatEffort,
   ChatEntry,
   ChatEvent,
   ChatMode,
@@ -20,7 +21,7 @@ import type {
   Project,
   Session
 } from '@shared/types'
-import { sameModel } from '@shared/models'
+import { DEFAULT_EFFORT, isEffort, sameModel } from '@shared/models'
 import type { DockerService } from './docker'
 import {
   ATTACH_CLOSE,
@@ -31,6 +32,7 @@ import {
   parseQuestions,
   takeTurn,
   textBlockId,
+  typedText,
   truncateBody,
   walkTranscript
 } from './chatMapper'
@@ -527,6 +529,20 @@ interface Streaming {
   dirty: Set<number>
 }
 
+/**
+ * A message typed while a turn was running, waiting for its own turn.
+ *
+ * It is everything `startTurn` needs and nothing else: the CLI is not told
+ * about it until the running turn's `result` lands (see `send` for what
+ * happens when it is told sooner).
+ */
+interface QueuedSend {
+  /** claimed at send, because the row painted for it is already keyed off it */
+  turn: number
+  text: string
+  attachments: ChatAttachment[]
+}
+
 interface Live {
   session: Session
   project: Project
@@ -640,8 +656,19 @@ interface Live {
    *
    * Results arrive in send order, so shifting the head is the whole
    * correspondence — no ids to match, nothing to reconcile.
+   *
+   * It stays an array although only one message is ever written into the
+   * process at a time now (see `send`): `result` shifting a head is the
+   * statement that a result belongs to the *oldest* unanswered turn, and the
+   * queue below is what a follow-up waits in instead.
    */
   inFlight: number[]
+  /**
+   * Messages typed while a turn was running, oldest first — held here rather
+   * than written into the process, and started one at a time as each turn ends
+   * (see `send`, `startNext`).
+   */
+  queue: QueuedSend[]
   /**
    * This turn has emitted at least one frame, so the CLI is provably alive and
    * a later silence means "busy" rather than "broken" (see SILENCE_BUSY_MS).
@@ -794,6 +821,7 @@ export class ChatService {
       usage: new Map(),
       turnRunning: false,
       inFlight: [],
+      queue: [],
       spoke: false,
       slowTurn: false,
       interrupted: false,
@@ -851,6 +879,11 @@ export class ChatService {
       todos: [...l.todos.values()],
       mode: l.session.mode ?? 'bypassPermissions',
       model: this.reading(l),
+      // Always a level, and no `reading()`-style reconciliation, because there
+      // is nothing to reconcile against: the CLI reports the effort nowhere.
+      // The same fallback `execArgs` launches with, which is what makes this a
+      // report rather than a guess — the process really was given this.
+      effort: isEffort(l.session.effort) ? l.session.effort : DEFAULT_EFFORT,
       commands: l.commands,
       context: l.context,
       blocking: [...l.pending.values()][0] ?? null
@@ -1184,11 +1217,13 @@ export class ChatService {
           retry: true
         }
       ])
-      // Every clock, not just the executing turn's: the process is gone, so a
-      // turn still queued behind it is never going to run either, and its row
-      // would otherwise be left counting for the rest of the session.
+      // The running turn's clock goes with it — a crashed turn has nothing to
+      // freeze to, and the row would otherwise be left counting for the rest of
+      // the session.
       for (const t of l.inFlight) this.dropTurnClock(l, t)
       l.inFlight = []
+      // And a message waiting behind it is never going to be written now.
+      this.dropQueue(l)
       this.setActivity(l, 'idle', true)
       l.turnRunning = false
     }
@@ -1263,10 +1298,11 @@ export class ChatService {
         retry: true
       }
     ])
-    // The whole queue: a CLI that has answered nothing is not going to work
-    // through the messages stacked behind the one it is stuck on.
     for (const t of l.inFlight) this.dropTurnClock(l, t)
     l.inFlight = []
+    // A CLI that has answered nothing is not going to work through the messages
+    // stacked behind the one it is stuck on either.
+    this.dropQueue(l)
     this.setActivity(l, 'idle', true)
     this.emit({
       kind: 'error',
@@ -1631,19 +1667,20 @@ export class ChatService {
       this.freezeTurnClock(l, turn, num(f.duration_ms), obj(f.usage))
     }
 
-    // Only once the queue is empty. A turn finishing with another still queued
-    // has not ended the agent's work, and reporting idle there flickers the
-    // sidebar and raises an attention flag for a session that is still going.
-    if (l.inFlight.length === 0) {
+    // Only once nothing is left to run. A turn finishing with another waiting
+    // behind it has not ended the agent's work, and reporting idle there
+    // flickers the sidebar and raises an attention flag for a session that is
+    // still going.
+    if (l.inFlight.length === 0 && l.queue.length === 0) {
       // Suppressed at the same branch that reads terminal_reason for the stop
       // row: you ended it, and being told it ended is noise.
       this.setActivity(l, 'idle', aborted || l.interrupted)
     }
     l.interrupted = false
     l.mapper = null
-    // The next queued turn counts from zero; this one's total is frozen onto its
-    // own row above. Cleared here rather than at send, which is too early when a
-    // message is queued into a turn that is still counting.
+    // The next turn counts from zero; this one's total is frozen onto its own
+    // row above. `startTurn` clears it again on the way in — this is the clear
+    // that covers a turn with nothing behind it.
     l.usage.clear()
 
     // The degradation path that lost the vote survives as exactly that: when
@@ -1658,6 +1695,14 @@ export class ChatService {
     // stamp them with the next turn's number, duplicating the whole cut turn.
     else void this.skipTurn(l, from)
     l.malformed = 0
+
+    // **Last, and only now.** This is the first moment the CLI is provably
+    // free: a message written any earlier is steered into the turn that was
+    // still running, and the second clock that produced is the whole bug (see
+    // `send`). The turn it opens writes into the same transcript this turn's
+    // settle is about to read, which is the case `takeTurn` already exists for
+    // — one turn per settle, from an offset this turn's `from` captured above.
+    if (l.inFlight.length === 0) this.startNext(l)
   }
 
   /**
@@ -1811,7 +1856,11 @@ export class ChatService {
     l.subagents.clear()
     l.subagentsRead.clear()
     l.offset = 0
-    // The conversation those turns belonged to is gone.
+    // The conversation those turns belonged to is gone — including anything
+    // still waiting to be sent into it. The rows are already cleared above, so
+    // this drops the messages rather than re-tagging them: there is nothing
+    // left on screen to tag.
+    this.dropQueue(l)
     l.inFlight = []
     if (l.streamTimer) clearTimeout(l.streamTimer)
     l.streamTimer = null
@@ -1922,7 +1971,33 @@ export class ChatService {
 
   // ---- the public surface -------------------------------------------------
   /**
-   * Send a turn.
+   * Send a turn — or queue it behind the one that is still running.
+   *
+   * **A follow-up is held here, never written into a running turn.** Claude
+   * Code's own composer offers `⏎ queue` and the TUI queues it client-side;
+   * over stream-json there is no such queue, and what the CLI does with a
+   * message that arrives mid-turn depends entirely on *when* it lands. All
+   * three behaviours were read off 2.1.261 rather than guessed:
+   *
+   *   - Written into a turn that is genuinely busy — mid tool call, which is
+   *     every turn anyone would want to queue behind — it is **steered into
+   *     that turn**. The agent answers both prompts in one message and the CLI
+   *     emits exactly **one** `result`.
+   *   - Written into the sliver between the last tool call and the turn's end
+   *     it does start a turn of its own, with its own `init` and its own
+   *     `result` — which is why queueing looked like it worked.
+   *   - Written while a `can_use_tool` is outstanding it does **nothing at
+   *     all**: the CLI is parked on that request and reads no further stdin
+   *     until it is answered, so the composer's "type to redirect" was a
+   *     promise nothing kept.
+   *
+   * Everything downstream of `result` counts one result per message sent, so
+   * the steered case left a *second* clock counting `working` against a turn
+   * the CLI had already answered inside the first one — until the silence
+   * timeout cut it ten minutes later with "no response for 10m". That is the
+   * reported bug, and holding the message until the running turn's `result` is
+   * what makes the count true again. It is also exactly what the TUI does: a
+   * queued message is a turn of its own, sent when the one before it ends.
    *
    * String content and block-array content are different mechanisms: with
    * `content` as a string the *CLI* expands a leading slash command, while in a
@@ -1936,6 +2011,72 @@ export class ChatService {
     const l = this.live.get(sessionId)
     if (!l?.proc) return false
 
+    // The number is taken now whether or not the turn starts now: it is what
+    // this message's row id is built from, and turns run in the order they were
+    // typed, so a queued turn's number is the number of the turn it becomes.
+    l.turn += 1
+    const turn = l.turn
+    const queued = l.inFlight.length > 0
+
+    // The row the user just wrote is painted either way, in the place they typed
+    // it. A queued one is tagged as queued and nothing else — no clock, because
+    // nothing is working on it yet, which was the whole of the double reading.
+    const at = Date.now()
+    this.appendEntries(l, [
+      {
+        id: `you:${turn}`,
+        role: 'you',
+        at,
+        turn,
+        kind: 'text',
+        md: text,
+        queued: queued ? 'waiting' : undefined,
+        // The picture is on screen from the moment you press Enter, not from the
+        // settle a turn later: the bytes are right here in the attachment, so
+        // they go into the same store the transcript's copy will land in. The
+        // two get different ids — this one is keyed off the optimistic row, the
+        // settled one off the transcript uuid — and both resolve, because the
+        // settle adds rather than replaces.
+        chips: attachments.length
+          ? attachments.map((a, i) => this.chipFor(l, a, `you:${turn}#img#${i}`))
+          : undefined
+      }
+    ])
+    // Beat one of the naming (see the naming section): a chat still called
+    // `chat-4` takes its name from what you just typed, right now, and arms the
+    // real title for this turn's settle. Only from the counter name — a chat
+    // already carrying a generated title is not re-sliced every turn, or the
+    // sidebar would flicker through your prompts. Never reached by a queued
+    // message, which by definition is not the first one in the conversation.
+    if (this.mayRename(l.session) && isDefaultName(l.session.name)) {
+      const slice = provisionalTitle(text)
+      if (slice) this.rename(l, slice)
+      l.titleWanted = true
+    }
+
+    if (queued) {
+      l.queue.push({ turn, text, attachments })
+      return true
+    }
+    this.startTurn(l, { turn, text, attachments })
+    return true
+  }
+
+  /**
+   * Write one message into the process and open its turn.
+   *
+   * The single place a user message reaches stdin, which makes it the single
+   * place every *per-turn* reading is reset — the mapper, the token
+   * accumulator, `spoke`'s silence budget. Those resets used to be conditional
+   * on whether the send was queued, because a queued send wrote into the turn
+   * that was executing and must not reach into its state. Nothing is written
+   * into a running turn any more, so a turn always starts from zero here — and
+   * the second of two messages now gets the same 60s liveness test as the
+   * first, where a queued turn used to inherit `spoke` and start straight on
+   * the ten-minute budget.
+   */
+  private startTurn(l: Live, item: QueuedSend): void {
+    const { turn, text, attachments } = item
     const paths = attachments.filter((a) => a.kind === 'path')
     const inline = attachments.filter((a) => a.kind !== 'path')
     // Path chips need no split — they are text, and they land in $ARGUMENTS,
@@ -1948,33 +2089,25 @@ export class ChatService {
 
     // Before this turn's message reaches the pipe, not after: a turn is the only
     // thing that can be running on the wrong model, and this is the last moment
-    // at which the right one can still be in force for it.
+    // at which the right one can still be in force for it. Here rather than in
+    // `send` for the same reason it exists at all — the CLI applies a control
+    // request as it reads it, so one written while another turn was running
+    // would have changed the model *that* turn was already answering on.
     this.holdModel(l)
 
-    // Queued behind a turn that is still running, or the only one in flight?
-    // Everything below that resets *per-turn* state has to know, because a
-    // queued send must not reach into the turn that is currently executing —
-    // dropping its mapper mid-turn would unpair its tool calls, and clearing its
-    // token accumulator would restart the reading it is in the middle of.
-    const queued = l.inFlight.length > 0
-    l.turn += 1
-    l.inFlight.push(l.turn)
+    l.inFlight.push(turn)
     l.turnRunning = true
     l.interrupted = false
-    if (!queued) {
-      l.malformed = 0
-      l.mapper = null
-      l.spoke = false
-      l.streaming = null
-      // The reading is per turn, so the messages of the last one are not this one's.
-      l.usage.clear()
-    }
+    l.malformed = 0
+    l.mapper = null
+    l.spoke = false
+    l.streaming = null
+    // The reading is per turn, so the messages of the last one are not this one's.
+    l.usage.clear()
     // `/compact` is the one message that reliably goes quiet for minutes before
     // it says anything, so this turn starts on the wide budget instead of
-    // earning it with a first frame that will not come in time. OR-ed when
-    // queued: a compaction anywhere in the queue keeps the budget wide.
-    const slow = SLOW_COMMANDS.has(leadingCommand(text) ?? '')
-    l.slowTurn = queued ? l.slowTurn || slow : slow
+    // earning it with a first frame that will not come in time.
+    l.slowTurn = SLOW_COMMANDS.has(leadingCommand(text) ?? '')
 
     if (inline.length > 0) {
       const blocks = inline.map((a) => inlineBlock(a))
@@ -2007,43 +2140,64 @@ export class ChatService {
       })
     }
 
-    // Paint the turn optimistically: the row the user just wrote, and the clock.
+    // A queued message stops being queued the moment it is written, and the tag
+    // comes off the row it was painted on — upserted by id, so it is the same
+    // row and it stays where it was typed rather than jumping to the tail.
+    const row = l.entries.find((e) => e.id === `you:${turn}`)
+    if (row?.kind === 'text' && row.queued) {
+      row.queued = undefined
+      this.upsert(l, [row])
+    }
+    // The clock is appended when the turn actually opens, so `working · 4s` is
+    // always a reading about work that is happening.
     const at = Date.now()
     this.appendEntries(l, [
-      {
-        id: `you:${l.turn}`,
-        role: 'you',
-        at,
-        turn: l.turn,
-        kind: 'text',
-        md: text,
-        // The picture is on screen from the moment you press Enter, not from the
-        // settle a turn later: the bytes are right here in the attachment, so
-        // they go into the same store the transcript's copy will land in. The
-        // two get different ids — this one is keyed off the optimistic row, the
-        // settled one off the transcript uuid — and both resolve, because the
-        // settle adds rather than replaces.
-        chips: attachments.length
-          ? attachments.map((a, i) => this.chipFor(l, a, `you:${l.turn}#img#${i}`))
-          : undefined
-      },
-      { id: `clock:${l.turn}`, role: 'run', at, turn: l.turn, kind: 'turn', startedAt: at }
+      { id: `clock:${turn}`, role: 'run', at, turn, kind: 'turn', startedAt: at }
     ])
-    // Beat one of the naming (see the naming section): a chat still called
-    // `chat-4` takes its name from what you just typed, right now, and arms the
-    // real title for this turn's settle. Only from the counter name — a chat
-    // already carrying a generated title is not re-sliced every turn, or the
-    // sidebar would flicker through your prompts.
-    if (this.mayRename(l.session) && isDefaultName(l.session.name)) {
-      const slice = provisionalTitle(text)
-      if (slice) this.rename(l, slice)
-      l.titleWanted = true
-    }
     // main knows exactly when it wrote a user message into the process, where the
     // hook only ever knew that a prompt was submitted.
     this.setActivity(l, 'working', false, true)
     this.armSilence(l)
+  }
+
+  /**
+   * Open the next queued turn, if there is one. Called from `result`, which is
+   * the only moment the CLI is provably free.
+   *
+   * **An aborted turn flushes the queue too.** Esc means "stop what you are
+   * doing", and the usual reason to have a message waiting behind a turn is
+   * that it says what to do instead — typing the correction and *then* cutting
+   * the turn short is a way of asking for it sooner, not of withdrawing it. A
+   * second Esc stops the follow-up as well and costs nothing, where dropping it
+   * is text the user has to type again.
+   */
+  private startNext(l: Live): boolean {
+    const next = l.queue.shift()
+    if (!next) return false
+    this.startTurn(l, next)
     return true
+  }
+
+  /**
+   * Give up on everything still queued — the process is gone, or the
+   * conversation they were queued against is.
+   *
+   * The rows stay and are re-tagged `unsent`. They are messages the user wrote
+   * and will never get an answer to, and a row that quietly disappears takes the
+   * text with it, where one that says so can still be read and copied back out.
+   */
+  private dropQueue(l: Live): void {
+    if (l.queue.length === 0) return
+    const rows: ChatEntry[] = []
+    for (const q of l.queue) {
+      const row = l.entries.find((e) => e.id === `you:${q.turn}`)
+      if (row?.kind === 'text') {
+        row.queued = 'unsent'
+        rows.push(row)
+      }
+    }
+    l.queue = []
+    if (rows.length) this.upsert(l, rows)
   }
 
   /**
@@ -2152,7 +2306,16 @@ export class ChatService {
       if (r.ok && res?.rewound === true) {
         popped += 1
         landed = users[i].uuid
-        prefill = str(res.prefillText) || null
+        // The CLI hands the line back **as it is stored**, which for a slash
+        // command or a skill is its markup: reverting to `/foo-bar` put
+        // `<command-message>foo-bar</command-message>` in the composer, where
+        // the log row for that same line has always read `/foo-bar`. One rule
+        // now spells both (see `typedText`).
+        //
+        // Only the last pop's value survives, and that is the target's — the
+        // pops above it are the newer messages being cleared out of the way,
+        // and their text is not what the composer is being handed back.
+        prefill = typedText(str(res.prefillText)) || null
         continue
       }
       const why = str(res?.error) || r.error || 'the CLI refused'
@@ -2192,6 +2355,8 @@ export class ChatService {
     l.mapper = null
     l.turnRunning = false
     l.inFlight = []
+    // Aimed at a branch of the conversation that no longer exists.
+    this.dropQueue(l)
 
     // Then re-derive the whole log from the transcript, exactly as opening the
     // session would — which is the point, and worth the second read.
@@ -2378,6 +2543,49 @@ export class ChatService {
   }
 
   /**
+   * Set how hard the model thinks.
+   *
+   * **There is no control request for this**, which is the fact the whole
+   * design turns on. `set_effort` does not exist ("Unsupported control request
+   * subtype"), `set_model` accepts an `effort` key only by ignoring it, and
+   * `init` never reports a level — so unlike the model, the effort can be
+   * neither set nor read on the channel the header's other controls ride.
+   *
+   * What Claude Code does have is `/effort <level>`, a **local** command: it
+   * spends no tokens at all (`result.usage` comes back zeroed) and answers
+   * "Set effort level to high (this session only)". So a live chat is changed
+   * by sending exactly that, as an ordinary turn through `send` — which is not
+   * a workaround dressed up as a feature but the only mechanism there is, and
+   * it buys the queueing, the interrupt and the transcript record for free. A
+   * menu pick therefore shows up in the log as the command it is, in the same
+   * way `set_model` leaves a `Set model to …` line between turns.
+   *
+   * Writing the command straight into the pipe instead — no `you` row, no clock
+   * — was rejected and must stay rejected: the CLI answers it with a full
+   * init/assistant/result, and a `result` arriving with nothing in flight is
+   * read as the *previous* turn's (see `result`), which would re-freeze that
+   * turn's clock on a 3 ms reading and re-settle its bytes.
+   *
+   * With no process there is nothing to tell: the level is persisted by the
+   * caller and applied as `--effort` at the next spawn, exactly as `setModel`
+   * treats a chat that is not open.
+   */
+  async setEffort(sessionId: string, effort: ChatEffort): Promise<boolean> {
+    if (!isEffort(effort)) return false
+    const l = this.live.get(sessionId)
+    if (!l) return true
+    // On the same snapshot `setModel` writes the model to, and before the send:
+    // `l.session` is a snapshot from open time, and it is what a later spawn and
+    // `stateOf` read the level out of.
+    l.session = { ...l.session, effort }
+    if (!l.proc) return true
+    // A turn, so a change asked for mid-turn queues behind it rather than being
+    // steered into it — the CLI applies `/effort` when it reads it, and the turn
+    // it would land in is one that has already been costed at the old level.
+    return this.send(sessionId, `/effort ${effort}`, [])
+  }
+
+  /**
    * Put the process back on the model this chat is set to, if it has wandered.
    *
    * The wandering is not a fault to be prevented — it is how Claude Code works.
@@ -2455,10 +2663,20 @@ export class ChatService {
       if (!value) continue
       const label = str(o.displayName) || str(o.display_name) || str(o.name) || value
       const resolved = str(o.resolvedModel) || str(o.resolved_model)
+      // What effort this model takes, from the CLI rather than from a table
+      // here: `supportsEffort` is the gate and `supportedEffortLevels` the list,
+      // and a model that reports neither simply offers none. Filtered through
+      // `isEffort` for the reason ChatEffort documents — the level has to
+      // survive a round trip through `--effort` at the next spawn, and the two
+      // vocabularies are not the same set.
+      const levels = arr(o.supportedEffortLevels)
+        .map((x) => str(x))
+        .filter(isEffort)
       options.push({
         value,
         label,
-        detail: resolved && resolved !== label ? resolved : value !== label ? value : undefined
+        detail: resolved && resolved !== label ? resolved : value !== label ? value : undefined,
+        effortLevels: o.supportsEffort !== false && levels.length ? levels : undefined
       })
     }
     // Cached only when the CLI actually answered. The fallback is a guess and

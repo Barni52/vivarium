@@ -5,6 +5,7 @@ import type {
   ChatContextUsage,
   ChatEntry,
   ChatMode,
+  ChatEffort,
   ChatModelOption,
   ChatQuestion,
   ChatTodo,
@@ -12,7 +13,7 @@ import type {
   Project,
   Session
 } from '@shared/types'
-import { modelName, modelOptionLabel } from '@shared/models'
+import { DEFAULT_EFFORT, EFFORT_LEVELS, modelName, modelOptionLabel } from '@shared/models'
 import { useStore } from '../../state/store'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
@@ -32,6 +33,7 @@ import { LogRow, type LogHandlers } from './ChatLog'
 import { FindContext, matcherFor, searchTextOf, type FindQuery } from './find'
 import { Preview, clock as clockOf } from './Markdown'
 import { chipForNode, flattenTree, routeFile, type PendingChip } from './attach'
+import { selectionMarkdown } from './copy'
 
 // The chat window, built to `docs/redisign/Chat Terminal.html`: a 34px header of
 // readings, a log that fills the window, and a composer that is a raised panel
@@ -109,6 +111,7 @@ export function ChatView({
   const answerChat = useStore((s) => s.answerChat)
   const setChatMode = useStore((s) => s.setChatMode)
   const setChatModel = useStore((s) => s.setChatModel)
+  const setChatEffort = useStore((s) => s.setChatEffort)
   const loadEarlier = useStore((s) => s.loadEarlier)
   const loadBody = useStore((s) => s.loadBody)
   const loadSubagent = useStore((s) => s.loadSubagent)
@@ -387,8 +390,19 @@ export function ChatView({
    */
   const rows = React.useMemo(() => {
     const running = (e: ChatEntry): boolean => e.kind === 'turn' && e.durationMs === undefined
-    if (!entries.some(running)) return entries
-    return [...entries.filter((e) => !running(e)), ...entries.filter(running)]
+    // A message typed while a turn was running, still waiting to be sent. It
+    // goes *under* the clock for the same reason the clock goes under the work
+    // it times: the bottom of the log is now, and "what happens next" is the
+    // last thing there — which is also where Claude Code's own composer stacks
+    // its queued messages. The tag comes off the row when its turn opens, at
+    // which point it stops being hoisted and stays exactly where it landed.
+    const waiting = (e: ChatEntry): boolean => e.kind === 'text' && e.queued === 'waiting'
+    if (!entries.some((e) => running(e) || waiting(e))) return entries
+    return [
+      ...entries.filter((e) => !running(e) && !waiting(e)),
+      ...entries.filter(running),
+      ...entries.filter(waiting)
+    ]
   }, [entries])
 
   /**
@@ -484,9 +498,11 @@ export function ChatView({
   /**
    * The ids of the rows the term appears in, in log order.
    *
-   * Computed over `entries` rather than `rows` on purpose: `rows` hoists a
-   * *running* turn clock to the bottom, and a clock has no text to match, so the
-   * two orders only ever differ by a row that can never be a hit.
+   * Computed over `entries` rather than `rows` on purpose: what `rows` hoists
+   * is the running clock, which has no text to match, and a message still
+   * queued behind it — which is the newest thing you have typed and is at the
+   * bottom of the log under either order. So stepping through hits walks them
+   * in the order they were written, which is the order that reads.
    */
   const hits = React.useMemo(() => {
     if (!matcher) return []
@@ -974,9 +990,17 @@ export function ChatView({
         onCloseModelMenu={() => setModelMenu(false)}
         modelMenu={modelMenu}
         models={models}
+        effort={chat?.effort ?? DEFAULT_EFFORT}
         onPickModel={(m) => {
           setModelMenu(false)
           void setChatModel(session.id, m)
+        }}
+        onPickEffort={(e) => {
+          // The menu stays open. Picking an effort is a second decision about
+          // the same thing, routinely made right after the model — and on a live
+          // chat it sends a `/effort` turn, so closing would hide the one row
+          // that says it happened.
+          void setChatEffort(session.id, e)
         }}
       />
 
@@ -1074,6 +1098,16 @@ export function ChatView({
           // between them.
           setAtTail((v) => (v === tail ? v : tail))
         }}
+        // Ctrl+C and the menu's Copy answer with the *markdown*, not the text
+        // the log rendered — see `selectionMarkdown`. Returning null there
+        // means it had nothing better than the default, so the event is left
+        // alone rather than re-implemented.
+        onCopy={(e) => {
+          const md = selectionMarkdown(e.currentTarget)
+          if (md === null) return
+          e.preventDefault()
+          e.clipboardData.setData('text/plain', md)
+        }}
         // The one place the zoom chords are written down. Same argument as the
         // terminal's menu, which is where Ctrl+F and Ctrl+± are taught: a chord
         // nothing on screen mentions may as well not exist.
@@ -1081,13 +1115,14 @@ export function ChatView({
           e.preventDefault()
           const z = useStore.getState()
           const selection = window.getSelection()?.toString() ?? ''
+          const copyText = selectionMarkdown(e.currentTarget) ?? selection
           z.openContextMenu(e.clientX, e.clientY, [
             {
               label: 'Copy',
               icon: <Copy size={14} />,
               hint: 'Ctrl+C',
               disabled: !selection,
-              onSelect: () => void window.vivarium.clipboardWriteText(selection)
+              onSelect: () => void window.vivarium.clipboardWriteText(copyText)
             },
             { label: '---' },
             {
@@ -1565,7 +1600,19 @@ function tok(n: number): string {
 }
 
 /** A turn is in flight while its clock row has no frozen duration yet. */
+/**
+ * Is there work outstanding — a turn running, or one waiting to start?
+ *
+ * The clock answers the first half: the last one in the list is the newest, and
+ * a running one has no duration. The queued half matters for one frame and is
+ * worth the line anyway: a turn's freeze and the next turn's clock are two
+ * events, so between them the newest clock is frozen while the CLI is already
+ * being written to. Reading `working` as false there flickers the composer's
+ * hint from "esc interrupt" to "⏎ send" and back, and it is not even true — a
+ * queued message is work this session owes. A dropped one (`unsent`) is not.
+ */
 function isWorking(entries: ChatEntry[]): boolean {
+  if (entries.some((e) => e.kind === 'text' && e.queued === 'waiting')) return true
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
     if (e.kind === 'turn') return e.durationMs === undefined
@@ -1573,10 +1620,18 @@ function isWorking(entries: ChatEntry[]): boolean {
   return false
 }
 
-/** The placeholder is the only thing that follows the stage. */
+/**
+ * The placeholder is the only thing that follows the stage.
+ *
+ * The blocking one used to promise a redirect. It never worked and could not:
+ * a CLI parked on a `can_use_tool` reads no further stdin until the request is
+ * answered, so the message went nowhere (verified on 2.1.261). It queues now,
+ * like every other message typed into a turn that is already running, and it
+ * says so.
+ */
 function placeholderFor(open: boolean, blocking: boolean, working: boolean): string {
   if (!open) return 'Connecting…'
-  if (blocking) return 'Answer above, or type to redirect…'
+  if (blocking) return 'Answer above, or queue a follow-up…'
   if (working) return 'Type to queue a follow-up…'
   return 'Ask, or paste an image with Ctrl+V…'
 }
@@ -1612,7 +1667,9 @@ function Header({
   onCloseModelMenu,
   modelMenu,
   models,
-  onPickModel
+  effort,
+  onPickModel,
+  onPickEffort
 }: {
   session: Session
   project: Project
@@ -1626,8 +1683,34 @@ function Header({
   onCloseModelMenu: () => void
   modelMenu: boolean
   models: ChatModelOption[] | null
+  /** the level this chat is set to — always one, never "whatever the CLI does" */
+  effort: ChatEffort
   onPickModel: (m: string) => void
+  onPickEffort: (e: ChatEffort) => void
 }): React.ReactElement {
+  /**
+   * The effort levels the model in force takes, weakest first.
+   *
+   * Matched the same way the tick in the list is matched — on the alias *or* on
+   * the resolved id, because the chip shows whichever the CLI last reported.
+   * When nothing matches it falls back to the union of what the models offer,
+   * and that is not a guess dressed up as a reading: it is the case of a chat
+   * that has not run a turn yet, where `model` is still null and the levels are
+   * the same five for every model the CLI lists. Showing "not supported" there
+   * would be the invention.
+   *
+   * Ordered by `EFFORT_LEVELS` rather than by arrival, so the row always reads
+   * low → max whatever order the CLI listed them in.
+   */
+  const effortLevels = React.useMemo<ChatEffort[]>(() => {
+    if (!models) return []
+    const picked = models.find((m) => model !== null && (m.value === model || m.detail === model))
+    const found = new Set<ChatEffort>(
+      picked ? (picked.effortLevels ?? []) : models.flatMap((m) => m.effortLevels ?? [])
+    )
+    return EFFORT_LEVELS.filter((l) => found.has(l))
+  }, [models, model])
+
   const pct = context?.percentage ?? null
   const contextTitle = context
     ? `${tok(context.totalTokens)} / ${tok(context.maxTokens)} tokens · ${context.percentage}% of the context window${context.approximate ? ' (approximate — derived from the turn’s usage)' : ''}`
@@ -1826,6 +1909,12 @@ function Header({
               }}
             />
             <span>{modelName(model)}</span>
+            {/* Always shown, because there is always a level: a chat nobody
+                has set one on is still *launched* with `--effort`, so this
+                names what the process was given rather than a guess at what
+                the CLI would have done (see DEFAULT_EFFORT). Dimmer than the
+                model, because it qualifies it rather than competing. */}
+            <span style={{ color: CHAT.dim3 }}>· {effort}</span>
             <span style={{ color: CHAT.dim3, fontSize: 9 }}>{modelMenu ? '▲' : '▼'}</span>
           </button>
 
@@ -1845,65 +1934,137 @@ function Header({
                   borderRadius: CHAT.radiusCard,
                   boxShadow: '0 18px 44px -16px var(--shadow)',
                   minWidth: 232,
-                  maxHeight: 300,
-                  overflowY: 'auto',
+                  // The list scrolls; the popover does not. The effort row below
+                  // it is a footer and has to stay put — scrolling it away with
+                  // the models is how a control ends up unreachable on a CLI
+                  // that reports a dozen of them.
+                  maxHeight: 340,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
                   animation: 'vpop .12s ease-out'
                 }}
               >
-                {models === null && (
-                  <div style={{ padding: '9px 12px', fontSize: 11.5, fontFamily: MONO, color: CHAT.dim3 }}>
-                    loading…
+                <div style={{ overflowY: 'auto', minHeight: 0 }}>
+                  {models === null && (
+                    <div style={{ padding: '9px 12px', fontSize: 11.5, fontFamily: MONO, color: CHAT.dim3 }}>
+                      loading…
+                    </div>
+                  )}
+                  {models?.map((m) => {
+                    // The chip shows whatever the CLI last reported, which is a
+                    // resolved id; the list offers aliases. Matching on either keeps
+                    // the tick honest instead of never lighting up.
+                    const on = model !== null && (m.value === model || m.detail === model)
+                    return (
+                      <button
+                        key={m.value}
+                        onClick={() => onPickModel(m.value)}
+                        title={m.detail ?? m.value}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'baseline',
+                          gap: 9,
+                          width: '100%',
+                          textAlign: 'left',
+                          border: 0,
+                          borderLeft: `2px solid ${on ? CHAT.model : 'transparent'}`,
+                          background: on ? CHAT.hover : 'transparent',
+                          color: on ? CHAT.text : CHAT.prose,
+                          fontSize: 12.5,
+                          padding: '8px 12px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        {/* Derived from the *resolved* id where there is one:
+                            `list_models` labels the aliases `Opus` / `Sonnet`,
+                            which names the family and hides the generation — the
+                            one thing you open this menu to choose between. */}
+                        <span style={{ flex: 'none' }}>
+                          {modelOptionLabel(m.value, m.label, m.detail)}
+                        </span>
+                        {m.detail && (
+                          <span
+                            style={{
+                              fontFamily: MONO,
+                              fontSize: 11.5,
+                              color: CHAT.dim3,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}
+                          >
+                            {m.detail}
+                          </span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+                {/* Effort, under the models and inside the same popover, because
+                    it is a property *of* the model rather than a fourth chip in
+                    a 34px header — and because the CLI pairs them the same way,
+                    reporting the levels a model takes as a field of that model.
+                    Only the picked model's levels are offered: `list_models` is
+                    the authority on which take one at all, so a model that
+                    reports none shows the line that says so instead of five
+                    buttons that would do nothing. */}
+                {models !== null && (
+                  <div
+                    style={{
+                      flex: 'none',
+                      borderTop: `1px solid ${CHAT.border}`,
+                      padding: '8px 12px 9px'
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontFamily: MONO,
+                        fontSize: 11.5,
+                        color: CHAT.dim3,
+                        marginBottom: 6
+                      }}
+                      title="How hard the model thinks. Applied with --effort at the next launch, and with a /effort turn on a chat that is already running."
+                    >
+                      effort
+                    </div>
+                    {effortLevels.length === 0 ? (
+                      <div style={{ fontFamily: MONO, fontSize: 11.5, color: CHAT.dim4 }}>
+                        not supported by this model
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {effortLevels.map((lvl) => {
+                          const on = effort === lvl
+                          return (
+                            <button
+                              key={lvl}
+                              onClick={() => onPickEffort(lvl)}
+                              // Drawn as the two mode chips are drawn, and for
+                              // the reason written there: outlined, never
+                              // filled, so the state differs by hue, weight and
+                              // edge at once rather than by reading the word.
+                              style={{
+                                padding: '2px 8px',
+                                border: `1px solid ${on ? CHAT.model : CHAT.border}`,
+                                borderRadius: CHAT.radius,
+                                background: 'transparent',
+                                color: on ? CHAT.text : CHAT.dim2,
+                                fontFamily: MONO,
+                                fontSize: TYPE.gutter,
+                                fontWeight: on ? 500 : 400,
+                                cursor: 'pointer',
+                                transition: '.14s'
+                              }}
+                            >
+                              {lvl}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
-                {models?.map((m) => {
-                  // The chip shows whatever the CLI last reported, which is a
-                  // resolved id; the list offers aliases. Matching on either keeps
-                  // the tick honest instead of never lighting up.
-                  const on = model !== null && (m.value === model || m.detail === model)
-                  return (
-                    <button
-                      key={m.value}
-                      onClick={() => onPickModel(m.value)}
-                      title={m.detail ?? m.value}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'baseline',
-                        gap: 9,
-                        width: '100%',
-                        textAlign: 'left',
-                        border: 0,
-                        borderLeft: `2px solid ${on ? CHAT.model : 'transparent'}`,
-                        background: on ? CHAT.hover : 'transparent',
-                        color: on ? CHAT.text : CHAT.prose,
-                        fontSize: 12.5,
-                        padding: '8px 12px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      {/* Derived from the *resolved* id where there is one:
-                          `list_models` labels the aliases `Opus` / `Sonnet`,
-                          which names the family and hides the generation — the
-                          one thing you open this menu to choose between. */}
-                      <span style={{ flex: 'none' }}>
-                        {modelOptionLabel(m.value, m.label, m.detail)}
-                      </span>
-                      {m.detail && (
-                        <span
-                          style={{
-                            fontFamily: MONO,
-                            fontSize: 11.5,
-                            color: CHAT.dim3,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap'
-                          }}
-                        >
-                          {m.detail}
-                        </span>
-                      )}
-                    </button>
-                  )
-                })}
               </div>
             </>
           )}

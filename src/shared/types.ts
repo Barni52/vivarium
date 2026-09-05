@@ -15,6 +15,20 @@ export type SessionType = 'agent' | 'chat' | 'container-shell' | 'host-shell'
  */
 export type ChatMode = 'plan' | 'bypassPermissions'
 
+/**
+ * How hard the model is asked to think, Claude Code's own `--effort` /
+ * `/effort` setting.
+ *
+ * These five and no more, although `/effort` also accepts `auto` and
+ * `ultracode`: `supportedEffortLevels` in `list_models` reports exactly these
+ * per model, and the picker only ever offers what that list holds. The two
+ * extras are a *command* vocabulary, not a model capability — `--effort auto`
+ * is rejected at spawn with a warning and silently runs at the default, which
+ * is a level the header would then be naming wrongly for the rest of the
+ * session (verified on 2.1.261).
+ */
+export type ChatEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface Session {
   id: string
   name: string
@@ -47,6 +61,24 @@ export interface Session {
   mode?: ChatMode
   /** chat only. Same exception, same argument; applied as `--model` at spawn. */
   model?: string
+  /**
+   * chat only. How hard to think — the seventh deliberate exception, and on the
+   * same argument as `model` above with one thing more: the effort is not only
+   * unqueryable from Docker, it is unqueryable from **Claude Code**. `init`
+   * never reports it and there is no control request that asks, so what the
+   * user picked is the only record there is that it was picked. Undefined means
+   * "whatever the CLI defaults to", which is a different statement from any of
+   * the five levels and is why this is optional rather than defaulted.
+   *
+   * Applied as `--effort` at spawn and as a `/effort <level>` turn on a chat
+   * that is already live (see ChatService.setEffort).
+   *
+   * Undefined is not "the CLI's default": a session with nothing here is still
+   * spawned with an explicit `--effort DEFAULT_EFFORT`, which is what lets the
+   * header name a level at all (see DEFAULT_EFFORT). It stays optional only so
+   * that chats written before this existed need no migration.
+   */
+  effort?: ChatEffort
   /**
    * chat only. This name was written by the app, not by you — so the app may
    * write it again.
@@ -603,7 +635,20 @@ interface ChatEntryBase {
 }
 
 export type ChatEntry =
-  | (ChatEntryBase & { kind: 'text'; md: string; chips?: ChatChip[] })
+  /**
+   * `queued` is only ever set on a `you` row main painted optimistically, and
+   * says the message has **not been written into the CLI yet**: `waiting` for
+   * one held behind a running turn, `unsent` for one the process died or the
+   * conversation was cleared underneath. It is absent the moment the message
+   * goes into the pipe, and no transcript-derived row ever carries it — a row
+   * in the file is by definition one that was sent.
+   */
+  | (ChatEntryBase & {
+      kind: 'text'
+      md: string
+      chips?: ChatChip[]
+      queued?: 'waiting' | 'unsent'
+    })
   /** collapsed to its first line with a `▸ show` */
   | (ChatEntryBase & { kind: 'thinking'; md: string })
   | (ChatEntryBase & {
@@ -782,6 +827,13 @@ export interface ChatModelOption {
   value: string
   label: string
   detail?: string
+  /**
+   * The effort levels this model takes, straight from the CLI's own
+   * `supportedEffortLevels`. Absent when the model reports no effort support at
+   * all — the picker then offers nothing rather than guessing, on the same
+   * terms as every other reading in this app.
+   */
+  effortLevels?: ChatEffort[]
 }
 
 /** Everything a freshly-opened chat needs to paint itself. */
@@ -793,6 +845,8 @@ export interface ChatState {
   todos: ChatTodo[]
   mode: ChatMode
   model: string | null
+  /** always a level — an unset session is launched at `DEFAULT_EFFORT` */
+  effort: ChatEffort
   commands: string[]
   context: ChatContextUsage | null
   blocking: ChatBlockingCard | null

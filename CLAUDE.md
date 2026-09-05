@@ -135,11 +135,13 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   kinds write the same container-side transcript — so only the in-flight turn is lost.
 - Runtime state (container running, live ptys) is **queried live, never persisted**. `config.json`
   holds projects/mounts/sessions/settings and is written through `ConfigStore.mutate` (atomic
-  temp-file + rename). Six deliberate exceptions, all user preferences or facts that *cannot* be
-  queried: `Session.mode`, `Session.model`, `Config.chatZoom`,
+  temp-file + rename). Seven deliberate exceptions, all user preferences or facts that *cannot* be
+  queried: `Session.mode`, `Session.model`, `Session.effort`, `Config.chatZoom`,
   `Session.previousClaudeSessionIds` + `Config.pendingTranscriptDeletes`, `Session.rewound`, and
   `Session.autoName` (*who* last named a chat — nothing can be asked once both answers are just a
-  string in `name`).
+  string in `name`). `Session.effort` is the strongest case of the lot: the CLI reports the effort
+  level **nowhere** — not in `init`, and there is no control request that asks — so the pick is the
+  only record that a pick was made.
   Not persisted, for contrast: the `list_models` result, the composer draft, `terminalFontSize`.
   `Project.slashCommands` is cached as a **hint, never authority** — the CLI always decides, so a
   stale entry can only mis-suggest, never mis-execute.
@@ -255,8 +257,11 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   *appends* a `last-prompt` branch pointer rather than truncating. So the abandoned byte range is
   recorded on `Session.rewound` and subtracted by every later whole-file read. **Do not "fix" this
   by following the branch pointer instead** — that was tried and fails on compaction, with the
-  failure mode of blanking history on conversations nobody reverted. File restore is deliberately
-  absent.
+  failure mode of blanking history on conversations nobody reverted. Its `prefillText` is the line
+  **as stored**, so it goes through `typedText` before it reaches the composer: a slash command or
+  skill is stored as `<command-name>` markup and used to come back into the box as that, where the
+  log row for the same line has always read `/foo-bar`. One rule spells both (`commandLine`).
+  File restore is deliberately absent.
 - **`isSidechain` is never filtered on.** A transcript written by `claude -p` marks *every* line
   true, main conversation included — the exact inverse of a TUI transcript. Filtering blanks the
   entire log for exactly the sessions this feature creates.
@@ -298,6 +303,19 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   `ChatService.refreshCommands` scans the container's four canonical directories and **merges**:
   init's names first, the scan may only add, which keeps the built-ins and plugin skills it cannot
   see. An `init` **replaces** and re-arms the throttle.
+- **A follow-up typed while a turn is running is queued in main, never written into the pipe.**
+  There is no CLI-side queue over stream-json: a message that lands mid-tool-call is *steered into
+  the running turn* (both prompts answered in one message, **one** `result`), one that lands in the
+  sliver before the turn ends starts a turn of its own, and one written while a `can_use_tool` is
+  outstanding does nothing at all — the CLI reads no further stdin until it is answered. Since
+  everything downstream of `result` counts one result per message, the steered case left a second
+  clock counting `working` against an already-answered turn until the silence timeout cut it ten
+  minutes later. `ChatService.queue` holds it and `startNext` opens it at `result`, which is the
+  only moment the CLI is provably free — so exactly one clock exists at a time, and a queued
+  message is a turn of its own, as it is in the TUI. Its row is painted where it was typed and
+  tagged `queued`; the tag comes off when the turn opens, and becomes `not sent` if the process
+  dies or the conversation is cleared under it. An **aborted** turn still flushes the queue: the
+  usual reason to have a message waiting is that it says what to do instead.
 - **The chat has no terminal states, and nothing retries itself.** Every failure recovers by the
   same single act — respawn and re-read the transcript. Detection is a **60s silence timeout on
   *any* frame**: killing the in-container `claude` is completely silent, and a broken credential
@@ -322,6 +340,26 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   as well as config (`manualRename`), because `l.session` is a snapshot from open time and a title
   generated against a stale copy would land on top of the name just typed. Every failure — no
   model, a timeout, a paragraph instead of a name — keeps the name it has and says nothing.
+- **Effort is set two ways because the CLI offers no third.** There is no `set_effort` control
+  request (2.1.261 answers "Unsupported control request subtype"), `set_model` takes an `effort`
+  key only by ignoring it, and no frame ever reports the level — so `Session.effort` is applied as
+  `--effort` at spawn and, on a chat that is already live, by sending Claude Code's own
+  `/effort <level>`: a **local** command that spends no tokens (`result.usage` comes back zeroed)
+  and answers "Set effort level to high (this session only)". It goes through `send` as an
+  ordinary turn, which is what makes it queue behind a running one instead of being steered into
+  a turn already costed at the old level. Writing it straight into the pipe is the thing not to
+  do: the CLI answers with a full init/assistant/result, and a `result` with nothing in flight is
+  read as the *previous* turn's. The picker offers exactly `list_models`' own
+  `supportedEffortLevels` for the picked model, narrowed to the five in `EFFORT_LEVELS` — `/effort`
+  also takes `auto` and `ultracode`, but `--effort auto` is **warned about and ignored**, which
+  would leave the header naming a level the next launch is not on.
+  **`--effort` is passed on every chat spawn, picked or not** (`DEFAULT_EFFORT`, `high`). That is
+  what makes the header's reading a report rather than a guess: with nothing passed the session
+  would run at a default the CLI states nowhere and is free to move, so there is deliberately no
+  "CLI default" option in the picker — it is the one setting the app could not report. An
+  unrecognised level in config falls back to `DEFAULT_EFFORT` rather than being forwarded, because
+  the CLI does not refuse one, it warns on stderr (unread here) and quietly uses its own. Terminal `agent` sessions get
+  no effort for the same reason they get no `--model`: the TUI has its own `/effort`.
 - **The context meter is only as fresh as the last thing that asked for it**, so `set_model` asks
   too — the ceiling is a property of the model. `setModel` adopts the *resolved* id for display
   while `Session.model` keeps the **alias**, which is what `--model` needs at the next spawn.
@@ -373,6 +411,22 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   the window is the measure. Both share `CHAT_EDGE` and must keep sharing it, or the log and the
   box you answer in stop lining up. `chatZoom` is persisted and shared by every chat; the chords
   are Ctrl +/-/0 and Ctrl+wheel, written down in the log's context menu.
+- **Copying out of the log answers with markdown, and the unit is a block, never a character.**
+  Each rendered block carries the source lines it came from (`data-md-from`/`-to`; `Md`'s container
+  holds the lines in a `WeakMap`, not in a `data-` attribute, which would stamp every message's
+  full text into the DOM a second time). A block the selection covers *completely* is replaced by
+  exactly those lines — a table pastes back as `| a | b |`, a fenced block keeps its fences. A
+  block covered only in part has no honest markdown answer, so it contributes the text that was
+  actually highlighted, and the stretches between blocks go through `Range.toString()` rather than
+  a hand-rolled text walk: the browser already knows where a rendered selection breaks lines, and
+  re-deriving that from `display` values is a second renderer nobody asked for.
+  `selectionMarkdown` returns **null** when it has nothing better than the default, which is what
+  lets `onCopy` leave the event alone instead of reimplementing the browser's copy — the other
+  clipboard flavours survive. **Only the top-level `blocks()` call tags**: a nested one indexes
+  into a *derived* array — a dedented list item, a quote with its `>` stripped — so its indices
+  name lines the message does not contain, and tagging them would hand back confidently wrong
+  bytes. `CodeBlock`'s own copy button is unaffected and still yields the bare code, which is the
+  other thing a reader means by "copy" and the reason both exist.
 
 ## Commands
 

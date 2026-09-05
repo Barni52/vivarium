@@ -79,6 +79,7 @@ export const CH = {
   chatAnswer: 'chat:answer',
   chatSetMode: 'chat:set-mode',
   chatSetModel: 'chat:set-model',
+  chatSetEffort: 'chat:set-effort',
   chatModels: 'chat:models',
   chatClose: 'chat:close',
   chatBody: 'chat:body',

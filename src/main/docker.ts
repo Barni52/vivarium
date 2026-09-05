@@ -10,6 +10,7 @@ import type {
   VolumeRemoveResult,
   VolumeReport
 } from '@shared/types'
+import { DEFAULT_EFFORT, isEffort } from '@shared/models'
 import {
   IMAGE_VERSION,
   SLIM_IMAGE,
@@ -1196,6 +1197,16 @@ export class DockerService {
       // actually spawned on the CLI's configured default is a reading that lies
       // about a live fact, in a header made entirely of readings.
       if (session?.model) args.push('--model', session.model)
+      // How hard to think. **Always passed, even when nothing was picked** —
+      // that is what makes the header's reading true rather than a guess at the
+      // CLI's own default, which is reported nowhere and could move under us
+      // (see DEFAULT_EFFORT). An unrecognised value in config falls back rather
+      // than being forwarded: an unknown level is *not* an error the CLI
+      // refuses, it warns on stderr (which nothing here reads) and silently
+      // runs at its default, which is the one outcome the chip could not
+      // describe. `/effort` changes it on a chat that is already live; this is
+      // the launch half.
+      args.push('--effort', isEffort(session?.effort) ? session.effort : DEFAULT_EFFORT)
       // Deliberately absent: --settings /vivarium/hooks.json and
       // VIVARIUM_SESSION_ID. The hook bridge stays for pty agents only; a chat
       // derives its own activity from this stream, and double-emitting would give

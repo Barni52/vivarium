@@ -19,6 +19,8 @@
 // inventing a name for a model this app has never heard of is how a chip ends
 // up lying about what is answering.
 
+import type { ChatEffort } from './types'
+
 const FAMILIES = ['opus', 'sonnet', 'haiku', 'fable', 'instant'] as const
 
 /**
@@ -151,4 +153,45 @@ export function modelOptionLabel(value: string, label?: string, detail?: string)
   if (numbered) return numbered
   if (named) return named[0].toUpperCase() + named.slice(1)
   return parse(value) ?? value
+}
+
+/**
+ * The effort levels, weakest first — the order the picker draws them in, which
+ * is the only reason an order is written down at all.
+ *
+ * Here rather than in the renderer because both processes handle the value:
+ * main gates what reaches `--effort` on it, and the renderer draws the row. It
+ * is a *gate*, not a menu — what the menu offers is whatever `list_models`
+ * reported for the picked model (`ChatModelOption.effortLevels`), and this only
+ * decides what may be believed if that list ever names something else. An
+ * unknown level does not fail a spawn: `--effort banana` warns on stderr, which
+ * this app does not read, and runs at the default — so the damage is a header
+ * naming a level the session is not on, which is exactly the class of lie the
+ * model chip's rules exist to prevent.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * The level a chat runs at when nothing has been picked.
+ *
+ * **It is a launch flag, not a display fallback.** The CLI reports the effort
+ * nowhere, so a header that merely *assumed* a level would be guessing at the
+ * CLI's own default and would go on guessing wrongly the day that default
+ * moves. Instead every chat is spawned with an explicit `--effort` — this one
+ * when `Session.effort` is unset, which covers both a brand-new chat and every
+ * chat that existed before the setting did — so what the chip names is what the
+ * process was actually given. That is also why there is no "CLI default"
+ * option in the picker: it would be the one setting the app could not report.
+ *
+ * `high` rather than the CLI's own choice because this app's chats are long
+ * agentic sessions in a container, which is the case the higher levels are for.
+ *
+ * In `@shared` for the usual reason: main puts it on the command line
+ * (`execArgs`) and answers with it (`stateOf`), and the renderer draws it.
+ */
+export const DEFAULT_EFFORT: ChatEffort = 'high'
+
+/** Is this one of the five? Narrows a string off the wire or out of config. */
+export function isEffort(v: string | null | undefined): v is ChatEffort {
+  return !!v && (EFFORT_LEVELS as readonly string[]).includes(v)
 }

@@ -352,15 +352,74 @@ interface Ctx {
 }
 
 /**
+ * Attribute names carrying a block's source line range.
+ *
+ * Read back off the DOM at copy time rather than held in a parallel structure,
+ * because the selection **is** a DOM range: anything else would need a second
+ * mapping from nodes to blocks, and that mapping could drift out of step with
+ * the tree the user actually pointed at.
+ */
+const SRC_FROM = 'data-md-from'
+const SRC_TO = 'data-md-to'
+
+/**
+ * Rendered container → the lines it was built from.
+ *
+ * A `WeakMap` rather than a `data-` attribute, because the attribute would
+ * stamp every message's full source into the DOM a second time — doubling the
+ * text held for a long log to buy nothing. Keyed on the element, so an entry
+ * dies with the node it describes and no unmount hook has to remember it.
+ */
+const SOURCES = new WeakMap<HTMLElement, string[]>()
+
+/**
+ * The markdown a rendered block was produced from — `null` when this element is
+ * not a tagged block, or its container has since been unmounted.
+ */
+export function blockSource(el: HTMLElement): string | null {
+  const from = Number(el.getAttribute(SRC_FROM))
+  const to = Number(el.getAttribute(SRC_TO))
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return null
+  const root = el.closest('[data-md-root]')
+  const lines = root instanceof HTMLElement ? SOURCES.get(root) : undefined
+  if (!lines) return null
+  const slice = lines.slice(from, to)
+  // The gap to the next block belongs to this range; it is not part of the block.
+  while (slice.length > 0 && slice[slice.length - 1].trim() === '') slice.pop()
+  return slice.length > 0 ? slice.join('\n') : null
+}
+
+/**
  * A block sequence → React nodes. Recursive: a list item, a blockquote and a
  * table cell all run their contents back through here, which is what makes
  * nesting work at any depth instead of at exactly one level.
  */
-function blocks(lines: string[], ctx: Ctx, keyBase = 'b'): React.ReactNode[] {
+function blocks(
+  lines: string[],
+  ctx: Ctx,
+  keyBase = 'b',
+  /**
+   * Record which lines each block came from, so a copy can hand back the
+   * markdown that *produced* a block rather than the text it renders to.
+   *
+   * Only the top-level call passes this. A nested `blocks()` indexes into a
+   * **derived** array — a list item's dedented body, a quote with its `>`
+   * markers stripped — so its indices name lines that do not exist in the
+   * message being copied. Tagging those would return confidently wrong bytes,
+   * which is worse than returning none and letting the selection speak.
+   */
+  tagSource = false
+): React.ReactNode[] {
   const out: React.ReactNode[] = []
+  /** First line of each pushed block, parallel to `out`. */
+  const starts: number[] = []
   let i = 0
   let k = 0
+  /** Where the block being parsed began — set once per iteration, before any
+   * branch, because the branches disagree about when they advance `i`. */
+  let start = 0
   const push = (node: React.ReactNode): void => {
+    starts.push(start)
     out.push(
       <div key={`${keyBase}${k++}`} style={{ marginBottom: BLOCK_GAP }}>
         {node}
@@ -370,6 +429,7 @@ function blocks(lines: string[], ctx: Ctx, keyBase = 'b'): React.ReactNode[] {
 
   while (i < lines.length) {
     const line = lines[i]
+    start = i
 
     if (line.trim() === '') {
       i++
@@ -496,6 +556,21 @@ function blocks(lines: string[], ctx: Ctx, keyBase = 'b'): React.ReactNode[] {
       continue
     }
     if (para.length) push(<Paragraph lines={para} ctx={ctx} />)
+  }
+
+  // Source ranges for copy. A block ends where the next one begins: the blank
+  // lines that separated them fall inside the earlier range and are trimmed off
+  // at the slice, which is exact and needs no second cursor chasing each
+  // branch's idea of where it left `i`.
+  if (tagSource) {
+    for (let n = 0; n < out.length; n++) {
+      const block = out[n]
+      if (!React.isValidElement(block)) continue
+      out[n] = React.cloneElement(block as React.ReactElement<Record<string, unknown>>, {
+        [SRC_FROM]: starts[n],
+        [SRC_TO]: n + 1 < starts.length ? starts[n + 1] : lines.length
+      })
+    }
   }
 
   // The last block owns no trailing margin: the row's own padding is the gap to
@@ -881,15 +956,27 @@ export function Md({
   color?: string
   size?: number
 }): React.ReactElement {
-  const nodes = React.useMemo(
-    () => blocks(src.replace(/\r\n?/g, '\n').split('\n'), { color, size }),
-    [src, color, size]
-  )
+  const lines = React.useMemo(() => src.replace(/\r\n?/g, '\n').split('\n'), [src])
+  const nodes = React.useMemo(() => blocks(lines, { color, size }, 'b', true), [lines, color, size])
   // No find handling here: the highlight is applied by `inlineNodes`, where text
   // becomes nodes (see the note on `flush` there). That also keeps this memo
   // honest — the parse depends on the source and nothing else, so typing in the
   // find bar never re-parses a row; only the `Hi` leaves re-render.
-  return <div style={{ fontSize: size, wordBreak: 'break-word' }}>{nodes}</div>
+  const ref = React.useRef<HTMLDivElement>(null)
+  // Re-registered whenever the source changes under the same node: a streaming
+  // row grows on every reveal tick, and a copy taken mid-turn has to slice the
+  // source that is actually on screen rather than the one the row opened with.
+  React.useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    SOURCES.set(el, lines)
+    return () => void SOURCES.delete(el)
+  }, [lines])
+  return (
+    <div ref={ref} data-md-root="" style={{ fontSize: size, wordBreak: 'break-word' }}>
+      {nodes}
+    </div>
+  )
 }
 
 /** hh:mm — the only timestamp format the log uses. */

@@ -10,6 +10,7 @@ import type {
   ChatEntry,
   ChatErrorInfo,
   ChatEvent,
+  ChatEffort,
   ChatMode,
   ChatRewindResult,
   ChatTodo,
@@ -28,6 +29,7 @@ import type {
   VolumeInfo
 } from '@shared/types'
 import { behindIds } from '../claude'
+import { DEFAULT_EFFORT } from '@shared/models'
 import {
   ADD_SESSION_POPOVER,
   MONO,
@@ -174,6 +176,8 @@ export interface ChatSessionState {
   context: ChatContextUsage | null
   commands: string[]
   model: string | null
+  /** how hard the model thinks — always a level, never "whatever the CLI does" */
+  effort: ChatEffort
   mode: ChatMode
   /** the process is up and the log is real */
   open: boolean
@@ -204,6 +208,10 @@ const emptyChat = (): ChatSessionState => ({
   context: null,
   commands: [],
   model: null,
+  // Before `chat:open` answers, this is what the header names — and it is the
+  // level the process is about to be launched at, so the first paint is already
+  // right rather than a placeholder that changes under the user.
+  effort: DEFAULT_EFFORT,
   mode: 'bypassPermissions',
   open: false,
   opening: false,
@@ -475,6 +483,7 @@ interface AppState {
   answerChat: (sessionId: string, requestId: string, answer: ChatAnswer) => Promise<void>
   setChatMode: (sessionId: string, mode: ChatMode) => Promise<void>
   setChatModel: (sessionId: string, model: string) => Promise<void>
+  setChatEffort: (sessionId: string, effort: ChatEffort) => Promise<void>
   loadEarlier: (sessionId: string) => Promise<void>
   loadBody: (sessionId: string, entryId: string) => Promise<void>
   /** fetch the picture behind an image chip, once */
@@ -1294,6 +1303,7 @@ export const useStore = create<AppState>((set, get) => ({
             context: st.context,
             commands: st.commands,
             model: st.model,
+            effort: st.effort,
             mode: st.mode,
             open: true,
             opening: false,
@@ -1361,6 +1371,20 @@ export const useStore = create<AppState>((set, get) => ({
       return c ? { chats: { ...s.chats, [sessionId]: { ...c, model } } } : {}
     })
     const config = await window.vivarium.chatSetModel(sessionId, model)
+    set({ config })
+  },
+
+  // Painted optimistically like the model, and corrected the same way: main
+  // returns the config it actually wrote, so a level it refused never becomes
+  // the one on screen after the round trip. Unlike the model there is no `meta`
+  // event to put the chip back — the CLI reports no effort at all — so the
+  // config is the whole correction.
+  setChatEffort: async (sessionId, effort) => {
+    set((s) => {
+      const c = s.chats[sessionId]
+      return c ? { chats: { ...s.chats, [sessionId]: { ...c, effort } } } : {}
+    })
+    const config = await window.vivarium.chatSetEffort(sessionId, effort)
     set({ config })
   },
 

@@ -13,6 +13,7 @@ import type {
   ChatEntry,
   ChatEvent,
   ChatMode,
+  ChatEffort,
   ChatModelOption,
   ChatOpenResult,
   ChatRewindResult,
@@ -34,6 +35,7 @@ import type {
   VolumeRemoveResult,
   VolumeReport
 } from '@shared/types'
+import { DEFAULT_EFFORT } from '@shared/models'
 import { ConfigStore } from './config'
 import { DockerService } from './docker'
 import { BridgeWatcher, bridgeDir, removeBridge } from './bridge'
@@ -399,7 +401,12 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
             // for a terminal agent — that one is `--model`-less on purpose and
             // takes its model from the CLI's own config and its own `/model` —
             // so writing one there would be a stored preference with no effect.
-            model: type === 'chat' ? DEFAULT_CHAT_MODEL : undefined
+            model: type === 'chat' ? DEFAULT_CHAT_MODEL : undefined,
+            // Written out rather than left to the fallback, on the same terms as
+            // the model above: this seeds, and the picker overwrites it. A chat
+            // that predates the setting has nothing here and is launched at the
+            // same level anyway (see DEFAULT_EFFORT), so the two agree.
+            effort: type === 'chat' ? DEFAULT_EFFORT : undefined
           })
         }
         return cfg
@@ -940,6 +947,25 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       return cfg
     })
   })
+
+  ipcMain.handle(
+    CH.chatSetEffort,
+    async (_e, sessionId: string, effort: ChatEffort): Promise<Config> => {
+      // Persisted only if it was actually applied, the same rule the model
+      // follows: `Session.effort` is what `--effort` gets at the next spawn, and
+      // recording a level the process never took would put it in the header for
+      // good. A chat with no process returns true — there is nothing to tell and
+      // the launch flag is the whole mechanism there.
+      if (!(await chat.setEffort(sessionId, effort))) return store.get()
+      return store.mutate((cfg) => {
+        for (const p of cfg.projects) {
+          const s = p.sessions.find((x) => x.id === sessionId)
+          if (s) s.effort = effort
+        }
+        return cfg
+      })
+    }
+  )
 
   // The owning project is resolved here rather than in ChatService, which has no
   // view of config: the model list is a property of the *container's* Claude

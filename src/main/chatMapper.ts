@@ -69,6 +69,44 @@ const COMMAND_NAME_RE = /<command-name>([\s\S]*?)<\/command-name>/
 const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/
 
 /**
+ * That markup as the `/name args` it was typed as, or null when the line is not
+ * a command at all.
+ *
+ * One spelling, because two surfaces render the same stored line: the log row
+ * below, and the composer a **revert** prefills — `rewind_conversation` hands
+ * back `prefillText` exactly as the line sits in the transcript, so reverting
+ * to `/foo-bar` used to put `<command-message>foo-bar</command-message>` in the
+ * box. `<command-message>` is deliberately not read: it is the command's
+ * *description*, not what was typed, and it is `<command-name>` that carries
+ * the leading slash.
+ */
+export function commandLine(text: string): string | null {
+  const name = COMMAND_NAME_RE.exec(text)
+  if (!name) return null
+  const args = (COMMAND_ARGS_RE.exec(text)?.[1] ?? '').trim()
+  return `${name[1].trim()}${args ? ` ${args}` : ''}`
+}
+
+/**
+ * A stored user line as the words that were typed to produce it — what belongs
+ * in a composer, not in a log row.
+ *
+ * Used by one caller: the prefill a **revert** hands back. The CLI returns the
+ * line verbatim, and three kinds of markup can be in it, none of which the user
+ * wrote. An injected `<system-reminder>` and a slash command's expansion are
+ * stripped and unwrapped by the rules the log already uses. The third is this
+ * app's own: an attachment trailer, which is dropped rather than kept as text —
+ * a draft is a string and cannot carry chips back, so leaving
+ * `<vivarium-attached>` in the box would put markup in the message that the
+ * *next* send would then re-wrap. The prose is what the user came back to edit;
+ * the attachment is re-attached by attaching it.
+ */
+export function typedText(raw: string): string {
+  const text = raw.replace(STRIP_TAGS, '').trim()
+  return commandLine(text) ?? text.replace(ATTACH_RE, '').trim()
+}
+
+/**
  * A local command's own output. It arrives as an ordinary **user** line — often
  * in the same line as the command that produced it — which is why it has to be
  * recognised here and not only in the `system/local_command` branch below.
@@ -717,18 +755,17 @@ export class ChatMapper {
     // `you` row is a lie in the same way the interrupt marker above is: the
     // shipped version printed the raw `<local-command-stdout>…` tags inside the
     // tinted bubble, as though the user had typed the markup.
-    const name = COMMAND_NAME_RE.exec(text)
+    const cmd = commandLine(text)
     const stdout = LOCAL_STDOUT_RE.exec(text)
-    if (name || stdout) {
-      if (name) {
-        const args = (COMMAND_ARGS_RE.exec(text)?.[1] ?? '').trim()
+    if (cmd !== null || stdout) {
+      if (cmd !== null) {
         this.push({
           id,
           role: 'you',
           at,
           turn: this.turn,
           kind: 'text',
-          md: `${name[1].trim()}${args ? ` ${args}` : ''}`,
+          md: cmd,
           chips: chips.length ? chips : undefined
         })
       }
@@ -736,7 +773,7 @@ export class ChatMapper {
         const md = stripAnsi(stdout[1]).trim()
         // Its own row when the command echo took `id`, so the two never collide
         // and the log keeps reading command-then-answer.
-        const outId = name ? `${id}#out` : id
+        const outId = cmd !== null ? `${id}#out` : id
         if (md) {
           this.bodies.set(outId, md)
           this.push({
