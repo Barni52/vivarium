@@ -3,6 +3,11 @@
 A minimal Windows desktop session manager that runs **Claude Code** agents in isolated
 Docker containers with **selective folder mounts**, and groups terminal sessions by project.
 
+[![Vivarium, a 24-second tour. Click to play.](docs/brag.jpg)](docs/brag.mp4)
+
+<sub>24-second tour, with sound. Music: "Happy Beats / Business Moves" by
+[ende.app](https://ende.app/en), CC BY 4.0.</sub>
+
 Built to replace juggling Windows Terminal tabs when working on monorepos where the AI agent
 should only see *some* folders (e.g. `frontend` + `frontend-dep`, never `backend`/`.git`).
 Isolation is physical: only the folders you select are bind-mounted into the container.
