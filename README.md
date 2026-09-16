@@ -3,8 +3,6 @@
 A minimal Windows desktop session manager that runs **Claude Code** agents in isolated
 Docker containers with **selective folder mounts**, and groups terminal sessions by project.
 
-[![Vivarium, a 24-second tour. Click to play.](docs/brag.jpg)](docs/brag.mp4)
-
 <sub>24-second tour, with sound. Music: "Happy Beats / Business Moves" by
 [ende.app](https://ende.app/en), CC BY 4.0.</sub>
 
