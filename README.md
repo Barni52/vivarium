@@ -3,6 +3,10 @@
 A minimal Windows desktop session manager that runs **Claude Code** agents in isolated
 Docker containers with **selective folder mounts**, and groups terminal sessions by project.
 
+
+https://github.com/user-attachments/assets/69d2c91e-1407-4a89-9815-5c3b8d28be3e
+
+
 <sub>24-second tour, with sound. Music: "Happy Beats / Business Moves" by
 [ende.app](https://ende.app/en), CC BY 4.0.</sub>
 
