@@ -786,6 +786,16 @@ export const GLOBAL_CSS = `${APP_CSS}
      bar sits at the very edge of it, so it is inset rather than flush. */
   .vchat-scroll::-webkit-scrollbar-thumb{background:${CHAT.border};border:3px solid ${CHAT.bg};background-clip:padding-box}
   .vchat-scroll::-webkit-scrollbar-thumb:hover{background:${CHAT.dim3}}
+  /* The log has no native scrollbar, because ScrollRail *is* its scrollbar —
+     and two bars down one column are two answers to "where am I". The rail
+     drags, takes a click on its track and forwards the wheel, so nothing is
+     lost by turning this one off; what is gained is that the remaining bar can
+     also mark every message you sent. Width 0 on the webkit pseudo-element
+     rather than the standard scrollbar-width property: this sheet is a template
+     literal, and more to the point the element keeps overflow-y:auto either
+     way, so the content box stays the full width of the column and no row
+     reflows when a conversation grows past one screen. */
+  .vchat-log::-webkit-scrollbar{width:0;height:0}
 `
 
 /**

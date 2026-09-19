@@ -254,6 +254,20 @@ export function ChatView({
     if (el) el.scrollTop = el.scrollHeight
   }, [])
 
+  /**
+   * Scroll a row into view, from the outline rail or from the scroll rail.
+   *
+   * Drops the tail pin, exactly as the find bar's jump does and for the same
+   * reason: you have deliberately gone somewhere in the log, and the next
+   * streamed token would otherwise drag you straight back to the bottom.
+   */
+  const jumpToRow = React.useCallback((id: string): void => {
+    const el = logRef.current?.querySelector(`[data-row="${CSS.escape(id)}"]`)
+    if (!el) return
+    pinned.current = false
+    el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [])
+
   // Becoming visible is not a resize (the view is hidden with `visibility`, so
   // it keeps its layout the whole time), and a chat that was at the bottom when
   // you left it should be at the bottom when you come back.
@@ -1087,7 +1101,7 @@ export function ChatView({
       <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, position: 'relative' }}>
       <div
         ref={logRef}
-        className="vchat-scroll"
+        className="vchat-scroll vchat-log"
         onScroll={(e) => {
           const el = e.currentTarget
           const tail = el.scrollHeight - el.scrollTop - el.clientHeight < 40
@@ -1238,6 +1252,13 @@ export function ChatView({
           )}
         </div>
       </div>
+      {/* The log's scrollbar, over its right gutter — see ScrollRail for why it
+          may not be a flex item beside the log. It is a sibling of the scroller
+          rather than a child of it because an absolutely positioned child of a
+          scroll container scrolls with the content, and a scrollbar has to stay
+          put. Same reasoning as the jump control below. */}
+      <ScrollRail logRef={logRef} contentRef={contentRef} />
+
       {/* Jump to latest. The log stops following the tail the moment you scroll
           away — right for reading history while a turn is still writing, but it
           left the way back as "scroll by hand until it catches", which in a long
@@ -1292,15 +1313,7 @@ export function ChatView({
             clocks={turnClocks}
             activeId={activeHit}
             zoom={zoom}
-            onPick={(id) => {
-              const el = logRef.current?.querySelector(`[data-row="${CSS.escape(id)}"]`)
-              if (!el) return
-              // Same reasoning as the find bar's jump: deliberately going
-              // somewhere in the log drops the tail pin, or the next streamed
-              // token drags you straight back to the bottom.
-              pinned.current = false
-              el.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            }}
+            onPick={jumpToRow}
             onClose={() => setOutline(false)}
           />
         )}
@@ -3476,6 +3489,207 @@ function FindBtn({
     </button>
   )
 }
+
+/**
+ * The log's scrollbar.
+ *
+ * **There is exactly one scrollbar on the log and this is it.** The native one
+ * is turned off (`vchat-log` in GLOBAL_CSS) rather than left alongside, because
+ * two bars down one column are two answers to "where am I". So this takes the
+ * whole job: the thumb drags, the track is clickable, and the wheel over it
+ * scrolls the log underneath.
+ *
+ * It carried a mark per message and per compaction for a while, as a map of the
+ * conversation. That is gone: eight pixels of notches down the edge of a reading
+ * column is visual noise on every row, and the thing it was for — finding what
+ * you asked and getting back to it — is what the `Outline` rail already does,
+ * with room for the words themselves. A scrollbar only has to say where you are.
+ *
+ * **An overlay, never a flex item.** The log and the composer share `CHAT_EDGE`
+ * so a message and the box you answer in line up; a rail that took layout width
+ * would move one of those edges and not the other. It sits over the log's own
+ * right gutter, which at every zoom the app allows is wider than it is — the
+ * right edge because that is where a scrollbar belongs and where the hand
+ * already goes. It is a sibling of the scroller rather than a child, because an
+ * absolutely positioned child of a scroll container scrolls away with the
+ * content.
+ *
+ * **Nothing here re-renders.** The thumb is sized and positioned straight onto
+ * the DOM from a rAF-coalesced ResizeObserver and scroll listener — a streaming
+ * turn grows the log ~25 times a second, and a `setState` per observation would
+ * repaint this on every one of them. Its props are refs, so the memo holds.
+ */
+const ScrollRail = React.memo(function ScrollRail({
+  logRef,
+  contentRef
+}: {
+  logRef: React.RefObject<HTMLDivElement>
+  /** watched, not measured: only its *growth* tells the thumb to resize */
+  contentRef: React.RefObject<HTMLDivElement>
+}): React.ReactElement {
+  const railRef = React.useRef<HTMLDivElement>(null)
+  const thumbRef = React.useRef<HTMLDivElement>(null)
+  /** Drag and hover only change the thumb's paint, so they are the one bit of
+   *  state here — and they change nothing that has a height. */
+  const [active, setActive] = React.useState(false)
+  const [hover, setHover] = React.useState(false)
+
+  React.useEffect(() => {
+    const log = logRef.current
+    const content = contentRef.current
+    const rail = railRef.current
+    if (!log || !content || !rail) return
+
+    let queued = 0
+    const layout = (): void => {
+      queued = 0
+      const railH = rail.clientHeight
+      const thumb = thumbRef.current
+      if (railH <= 0 || !thumb) return
+      const range = log.scrollHeight
+      const over = range - log.clientHeight
+      // Nothing to scroll: no thumb, and the strip stops taking the pointer so
+      // it cannot swallow a text selection that runs to the very right edge.
+      // This is the native bar's own behaviour, restated.
+      rail.style.pointerEvents = over > 1 ? 'auto' : 'none'
+      if (over <= 1) {
+        thumb.style.display = 'none'
+        return
+      }
+      thumb.style.display = 'block'
+      // A floor, or a very long conversation's viewport is a sub-pixel sliver.
+      const h = Math.max(24, Math.round((log.clientHeight / range) * railH))
+      thumb.style.height = `${h}px`
+      thumb.style.top = `${Math.round((log.scrollTop / over) * (railH - h))}px`
+    }
+
+    // Coalesced to a frame: a streaming turn grows the content on every token
+    // and the observer fires for each, and there is no point measuring a layout
+    // twice before it is painted once.
+    const schedule = (): void => {
+      if (queued) return
+      queued = requestAnimationFrame(layout)
+    }
+
+    const ro = new ResizeObserver(schedule)
+    ro.observe(content)
+    ro.observe(log)
+    log.addEventListener('scroll', schedule, { passive: true })
+    schedule()
+    return () => {
+      if (queued) cancelAnimationFrame(queued)
+      ro.disconnect()
+      log.removeEventListener('scroll', schedule)
+    }
+  }, [logRef, contentRef])
+
+  /**
+   * Drag the thumb, or click the track to send it there.
+   *
+   * One handler for both: a click on the track is a drag that began with the
+   * thumb centred under the cursor, which is what makes "click, then keep
+   * moving" work the way it does on a real scrollbar. The grab offset is kept
+   * so the thumb does not jump under the pointer when a drag starts on its edge.
+   *
+   * Nothing here touches the tail pin directly — assigning `scrollTop` fires the
+   * log's own scroll handler, which is the one place that decides whether the
+   * log is following the tail.
+   */
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    const rail = railRef.current
+    const log = logRef.current
+    const thumb = thumbRef.current
+    if (!rail || !log || !thumb || thumb.style.display === 'none') return
+    e.preventDefault()
+    const rect = rail.getBoundingClientRect()
+    const thumbH = thumb.offsetHeight
+    const within = e.clientY - rect.top - thumb.offsetTop
+    const grab = within >= 0 && within <= thumbH ? within : thumbH / 2
+
+    const to = (clientY: number): void => {
+      const travel = rect.height - thumbH
+      if (travel <= 0) return
+      const f = Math.min(1, Math.max(0, (clientY - rect.top - grab) / travel))
+      log.scrollTop = f * (log.scrollHeight - log.clientHeight)
+    }
+    to(e.clientY)
+    setActive(true)
+
+    const move = (ev: PointerEvent): void => to(ev.clientY)
+    const up = (): void => {
+      setActive(false)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    // On `window`, not on the element: a drag that leaves the 10px strip — which
+    // is every drag — must keep scrolling, and must end wherever it is released.
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  return (
+    <div
+      ref={railRef}
+      onPointerDown={onPointerDown}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      // The rail lies over the log rather than beside it, so a wheel on it would
+      // otherwise land on nothing. Forwarded rather than swallowed: this is the
+      // scrollbar, and scrolling is the least surprising thing it can do.
+      onWheel={(e) => {
+        const log = logRef.current
+        if (log) log.scrollTop += e.deltaY
+      }}
+      style={{
+        position: 'absolute',
+        // The right edge, where a scrollbar belongs and where the hand already
+        // goes. It was on the left only because it began life as an index of
+        // the conversation rather than as the bar itself.
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: RAIL_W,
+        // Toggled to `none` by `layout` while there is nothing to scroll.
+        pointerEvents: 'auto',
+        // The track appears under the pointer and is invisible otherwise. A
+        // permanent line down the edge of a reading column is one more rule the
+        // eye has to ignore on every row; a scrollbar only has to be *findable*.
+        background: hover || active ? CHAT.hover : 'transparent',
+        transition: 'background 120ms linear',
+        cursor: 'default',
+        zIndex: 1
+      }}
+    >
+      <div
+        ref={thumbRef}
+        style={{
+          position: 'absolute',
+          // The full width of the rail. An inset thumb in a strip this narrow
+          // reads as a tick sitting in a channel rather than as the bar itself.
+          right: 0,
+          width: RAIL_W,
+          borderRadius: RAIL_W / 2,
+          // Three states, quietest first — this sits in the corner of the eye
+          // for the whole session and is only ever aimed at deliberately.
+          background: active ? CHAT.dim3 : hover ? CHAT.dim4 : CHAT.border,
+          transition: 'background 120ms linear'
+        }}
+      />
+    </div>
+  )
+})
+
+/**
+ * The rail's width.
+ *
+ * Narrower than the log's own gutter at every zoom the app allows: the column is
+ * inset by `CHAT_EDGE` and `CHAT_EDGE` is 14, so even at 0.7× the rail still
+ * clears the widest row's edge — by 2px, which is the margin, so this does not
+ * grow without re-checking that zoom. It is also about as narrow as a pointer
+ * target can honestly be, which is why the thumb has a 24px floor and the track
+ * takes a click.
+ */
+const RAIL_W = 8
 
 /**
  * The turn outline: what you asked, in order, as a rail you can jump from.

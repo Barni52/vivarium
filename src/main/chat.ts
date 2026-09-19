@@ -933,6 +933,13 @@ export class ChatService {
       if (e.kind === 'cmd' && e.md.split('\n').length > 60) {
         return { ...e, md: e.md.split('\n').slice(0, 60).join('\n'), truncated: true }
       }
+      // A compaction summary runs to hundreds of lines and the row is collapsed,
+      // so the wire carries a peek and `chat:body` serves the rest — the same
+      // bargain a tool body makes, and for a bigger payoff: this one is attached
+      // to a row nobody opens most of the time.
+      if (e.kind === 'compact' && e.summary.split('\n').length > 60) {
+        return { ...e, summary: e.summary.split('\n').slice(0, 60).join('\n'), truncated: true }
+      }
       return e
     })
   }
@@ -1370,9 +1377,17 @@ export class ChatService {
       // doing anything: the conversation has outgrown its own context, so the
       // opening prompt the title came from is now the *smallest* part of it —
       // and it is the CLI telling us so, rather than a turn count we invented.
-      // Read here and still passed on: the mapper draws the divider, this arms
+      // Read here and still passed on: the mapper draws the row, this arms
       // the retitle for the settle at the end of whatever turn it lands in.
-      if (subtype === 'compact_boundary') l.titleWanted = true
+      if (subtype === 'compact_boundary') {
+        l.titleWanted = true
+        // The compaction is over — whatever the turn does from here is ordinary
+        // work, and the clock should stop claiming otherwise. (The row is
+        // replaced wholesale at the settle anyway; this is for the seconds in
+        // between, which on a `/compact` that then answers a question is the
+        // only reading on screen.)
+        this.clearPhase(l)
+      }
       // compact_boundary / turn_duration fall through to the mapper.
     }
 
@@ -2150,9 +2165,24 @@ export class ChatService {
     }
     // The clock is appended when the turn actually opens, so `working · 4s` is
     // always a reading about work that is happening.
+    //
+    // `slowTurn` does double duty here. It is set above because `/compact` goes
+    // quiet for minutes and needs the wide silence budget; it is read again here
+    // because that same fact is the only advance warning the app ever gets that
+    // a compaction is running, and a clock that says "compacting context" for
+    // two minutes is the difference between a slow turn and an app that looks
+    // wedged. Anything else silent for that long is genuinely just thinking.
     const at = Date.now()
     this.appendEntries(l, [
-      { id: `clock:${turn}`, role: 'run', at, turn, kind: 'turn', startedAt: at }
+      {
+        id: `clock:${turn}`,
+        role: 'run',
+        at,
+        turn,
+        kind: 'turn',
+        startedAt: at,
+        phase: l.slowTurn ? 'compacting' : undefined
+      }
     ])
     // main knows exactly when it wrote a user message into the process, where the
     // hook only ever knew that a prompt was submitted.
@@ -2902,6 +2932,22 @@ export class ChatService {
   private dropTurnClock(l: Live, turn: number): void {
     const i = l.entries.findIndex((e) => e.turn === turn && e.kind === 'turn')
     if (i >= 0) l.entries.splice(i, 1)
+  }
+
+  /**
+   * Take `compacting` off the running clock once the boundary has landed.
+   *
+   * Aimed at the *running* turn rather than at a turn number, because an
+   * auto-compaction lands inside a turn nobody labelled and a manual one lands
+   * in the turn that asked for it — and in both cases the row to correct is the
+   * only one still counting. Silent when there is nothing to change: `upsert`
+   * would otherwise push an entries event per boundary for no visible reason.
+   */
+  private clearPhase(l: Live): void {
+    const entry = l.entries.find((e) => e.kind === 'turn' && e.durationMs === undefined)
+    if (entry?.kind !== 'turn' || !entry.phase) return
+    entry.phase = undefined
+    this.upsert(l, [entry])
   }
 
   /**

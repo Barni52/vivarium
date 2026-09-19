@@ -694,8 +694,43 @@ export type ChatEntry =
    * did, so it stays muted; a crash is not.
    */
   | (ChatEntryBase & { kind: 'stop'; text: string; tone: 'muted' | 'alert'; retry?: boolean })
-  /** full-width `compacted · 144k → 11k` / `model · sonnet → opus` */
+  /** full-width `model · sonnet → opus` */
   | (ChatEntryBase & { kind: 'divider'; text: string })
+  /**
+   * A compaction: the conversation above this row is a summary now.
+   *
+   * **Its own kind rather than a `divider`, because it is not a label — it is
+   * the one row that owns a body.** Claude Code writes a compaction as *two*
+   * transcript lines: a `system`/`compact_boundary` carrying `compactMetadata`,
+   * and then an ordinary **`user` line with `isCompactSummary: true`** holding
+   * the summary the next turn is actually fed. That second line is the reason
+   * this kind exists: mapped as the user line it looks like, it renders in the
+   * tinted `you` bubble as though the user had typed "This session is being
+   * continued from a previous conversation…" — the same lie the interrupt
+   * marker, a slash command's stdout and a task notification each get caught
+   * for, and this is the fourth. The two lines are folded into this one row.
+   *
+   * `summary` is **collapsed by default**: it is written for the model, it runs
+   * to hundreds of lines, and it is the least interesting thing at the point in
+   * the log where it appears — but it is what the agent now believes about
+   * everything above, so it has to be reachable. `truncated` says main clipped
+   * it on the way out and `chat:body` serves the rest, exactly as a tool body.
+   *
+   * Every metadata field is nullable because only `preTokens`/`postTokens` have
+   * been seen on every CLI version, and a summary line can arrive with no
+   * boundary before it at all — the log's window starts where it starts.
+   */
+  | (ChatEntryBase & {
+      kind: 'compact'
+      /** `manual` for `/compact`, `auto` when the window filled on its own */
+      trigger: 'manual' | 'auto' | null
+      preTokens: number | null
+      postTokens: number | null
+      /** what the compaction itself cost, from `compactMetadata.durationMs` */
+      durationMs: number | null
+      summary: string
+      truncated: boolean
+    })
   /**
    * The turn clock, in the log rather than the header (#5 enumerated the
    * header's three items without it). Live while the turn runs, frozen at
@@ -710,6 +745,21 @@ export type ChatEntry =
       durationMs?: number
       /** what the turn has spent so far, or its total once frozen */
       tokens?: ChatTurnTokens
+      /**
+       * What the turn is doing, when that is something other than answering.
+       *
+       * Only `compacting` today, and only for a **manual** `/compact`: that is
+       * the one turn whose silence is known in advance rather than guessed at,
+       * because the message itself says so (`SLOW_COMMANDS` in `chat.ts` starts
+       * it on the wide silence budget for exactly the same reason, off exactly
+       * the same test). An *auto*-compaction strikes mid-turn with no warning
+       * and is indistinguishable from thinking until its boundary lands, so it
+       * is deliberately not guessed at here — the row it produces is the report.
+       *
+       * Cleared when the boundary arrives, so the tail of the turn reads as the
+       * ordinary work it is.
+       */
+      phase?: 'compacting'
     })
 
 /**

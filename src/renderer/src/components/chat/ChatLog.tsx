@@ -53,6 +53,16 @@ const ROW_PAD = '6px 10px'
 const META_GAP = 3
 
 /**
+ * The air above a `you` bubble — the visual start of a turn.
+ *
+ * 14 rather than the 12 two stacked rows already get, because this gap is doing
+ * a different job from the one ROW_PAD does: that one keeps two rows of the same
+ * turn apart, this one says a new turn begins. Larger was tried and reads as a
+ * document with section breaks rather than as a conversation.
+ */
+const BAND_GAP = 14
+
+/**
  * How far a subagent's sub-log is inset from the row that spawned it.
  *
  * It used to be the gutter's width plus a bit — the rail sat under the boundary
@@ -104,7 +114,25 @@ function Line({
         background: band ? CHAT.band : undefined,
         // Only the bubble has an edge to round; every other row is a transparent
         // block on the page and a radius on it would draw nothing.
-        borderRadius: band ? CHAT.radiusCard : undefined
+        borderRadius: band ? CHAT.radiusCard : undefined,
+        // **The three things that make a `you` row findable when scrolling.**
+        // The surface alone was not enough: `--card` over `--bg` is one step,
+        // and a step is hard to see in a log that is mostly prose with bordered
+        // cards in it — the bubble read as one more card.
+        //
+        // The rail is the same left-edge idiom the sidebar's active item and the
+        // find bar's current hit already use, in the same `you` hue as the role
+        // word, so the colour naming a message and the colour marking one agree.
+        // (When a `you` row *is* the current find hit the two rails meet and read
+        // as one 4px edge — which is the right emphasis for it, so it is left.)
+        //
+        // The gap above is the other half: a turn starts here, and what separates
+        // it from the tool cards of the turn before should be air rather than one
+        // more hairline. Margin, not padding — padding is inside the bubble and
+        // would only make it taller. It cannot collapse anywhere awkward: the log
+        // column has top padding, so it does not escape through the top.
+        borderLeft: band ? `2px solid ${CHAT.you}` : undefined,
+        marginTop: band ? BAND_GAP : undefined
       }}
     >
       <div
@@ -312,30 +340,8 @@ export const LogRow = React.memo(function LogRow({
       return <ToolCard entry={entry} handlers={handlers} />
 
     case 'cmd':
-      // A Skill's body (`/name`) is markdown the model wrote; a *local* command's
-      // stdout has no title and is terminal output — `/context` draws an ASCII
-      // meter, and reflowing that into a paragraph is how it used to render.
-      return (
-        <Line at={entry.at} role="cmd" color={CHAT.dim2}>
-          {entry.title ? (
-            <>
-              <Card>{entry.title}</Card>
-              <Md src={entry.md} />
-            </>
-          ) : (
-            <Card>
-              {/* Terminal output, so it keeps its own line breaks — but a
-                  `/context` meter or a `git log --oneline` line is routinely
-                  wider than the card, and `pre-wrap` alone would carry it out
-                  through the border. */}
-              <span style={{ minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                <Hi>{entry.md}</Hi>
-              </span>
-            </Card>
-          )}
-          {entry.truncated && <div style={{ ...mono, color: CHAT.dim3, marginTop: 4 }}>…</div>}
-        </Line>
-      )
+      return <CmdRow entry={entry} handlers={handlers} />
+
 
     case 'ask':
       // Once answered the chosen option keeps a tick while the rest go grey: the
@@ -564,7 +570,27 @@ export const LogRow = React.memo(function LogRow({
         </div>
       )
 
+    case 'compact':
+      return <CompactRow entry={entry} handlers={handlers} />
+
     case 'turn':
+      // A compaction in progress replaces the clock with the *same band* the
+      // finished compaction draws. That is the whole design: "compacting" and
+      // "compacted" are one object in two states, in one place in the log, so
+      // the thing you watched happen is the thing you scroll back to. A generic
+      // `working · 2m` said nothing about the two minutes it was counting.
+      if (entry.durationMs === undefined && entry.phase === 'compacting') {
+        return (
+          <CompactBand tone={CHAT.hold} running>
+            <span aria-hidden style={{ opacity: 0.85 }}>⧉</span>
+            <span>compacting context</span>
+            <Dots color={CHAT.hold} />
+            <span style={{ color: CHAT.dim3, letterSpacing: 0 }}>
+              <Elapsed since={entry.startedAt} />
+            </span>
+          </CompactBand>
+        )
+      }
       // The turn clock, in the log where the eye already is — live while the turn
       // runs, frozen in place at `result`. Not a header chip: the header is three
       // readings and no fourth, and a separate activity lane was the thing an
@@ -820,6 +846,275 @@ function lineCount(text: string): number {
   let n = 1
   for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) n++
   return n
+}
+
+/**
+ * The chapter break a compaction draws — rules to the edges, a label centred.
+ *
+ * One component for both states on purpose. A compaction is the only event in
+ * the log that has a *before* and an *after* the user watches happen, and having
+ * the running form and the settled form drawn by the same shell is what makes
+ * the second read as the first having finished rather than as a new thing
+ * appearing somewhere else. It is also the only row allowed to centre itself and
+ * take the full width: everything else in the log is something somebody said,
+ * and this is a break in the conversation rather than a part of it.
+ *
+ * `running` only lights the border in the band's own hue. **It does not pulse,
+ * and nothing here may.** The chip already carries two moving things — the dots
+ * and a ticking clock — and a third, applied to the whole chip, is the one that
+ * reads as a flash: it fades the *text* along with the border, so the label you
+ * are trying to read dims and brightens under you. A border that is simply on
+ * says "this one is live" without moving at all, which is the whole job.
+ */
+function CompactBand({
+  tone,
+  running = false,
+  onClick,
+  title,
+  children,
+  below
+}: {
+  tone: string
+  running?: boolean
+  onClick?: () => void
+  title?: string
+  children: React.ReactNode
+  /** the summary panel, under the rules rather than inside them */
+  below?: React.ReactNode
+}): React.ReactElement {
+  return (
+    // Vertical padding only: the log column's own edge is the margin, and a
+    // break that inset itself further would stop reaching the edges it is
+    // supposed to span.
+    <div style={{ padding: '22px 0 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ flex: 1, height: 1, background: CHAT.border }} />
+        <span
+          onClick={onClick}
+          title={title}
+          data-click={onClick ? '' : undefined}
+          style={{
+            ...mono,
+            flex: 'none',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 9,
+            minWidth: 0,
+            color: tone,
+            // Small caps at a letterspacing is this app's label idiom — the
+            // outline rail's header, a question's category chip — and is what
+            // stops a break reading as something somebody said.
+            fontSize: TYPE.gutter,
+            letterSpacing: '.06em',
+            textTransform: 'uppercase',
+            padding: '4px 13px',
+            border: `1px solid ${running ? tone : CHAT.border}`,
+            borderRadius: CHAT.radius,
+            background: CHAT.inset,
+            cursor: onClick ? 'pointer' : undefined
+          }}
+        >
+          {children}
+        </span>
+        <span style={{ flex: 1, height: 1, background: CHAT.border }} />
+      </div>
+      {below}
+    </div>
+  )
+}
+
+/**
+ * A finished compaction: what it cost, and — behind a click — what it kept.
+ *
+ * **Collapsed by default, and that is the point of the row.** The summary is
+ * written *for the model*: hundreds of lines of "Primary Request and Intent",
+ * restating a conversation the reader has just scrolled through. Open, it is the
+ * largest thing in the log at the moment it is least worth reading. Closed, the
+ * row still says the one thing that matters at a glance — the history above it
+ * is a summary now — and the text is one click away, because it is also the
+ * exact thing the agent believes about everything above and the only way to see
+ * what a compaction dropped.
+ */
+function CompactRow({
+  entry,
+  handlers
+}: {
+  entry: Extract<ChatEntry, { kind: 'compact' }>
+  handlers: LogHandlers
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false)
+  const full = handlers.bodies[entry.id]
+  const text = full ?? entry.summary
+  const span =
+    entry.preTokens !== null && entry.postTokens !== null
+      ? `${tok(entry.preTokens)} → ${tok(entry.postTokens)}`
+      : null
+
+  const toggle = (): void => {
+    if (!entry.summary) return
+    // Main clipped it on the way out and still holds the rest — the same
+    // arrangement a tool body has, asked for the first time it is opened.
+    if (!open && entry.truncated) handlers.onExpand(entry.id)
+    setOpen(!open)
+  }
+
+  return (
+    <CompactBand
+      tone={CHAT.hold}
+      onClick={entry.summary ? toggle : undefined}
+      title={entry.summary ? 'What the compaction kept' : undefined}
+      below={
+        open && entry.summary ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '4px 15px 10px',
+              background: CHAT.inset,
+              border: `1px solid ${CHAT.borderCard}`,
+              // The one tie back to the band above it, which is otherwise a
+              // separate object by the time you have scrolled the summary.
+              borderLeft: `2px solid ${CHAT.hold}`,
+              borderRadius: CHAT.radiusCard
+            }}
+          >
+            <Md src={text} />
+            {entry.truncated && !full && (
+              <div style={{ ...mono, color: CHAT.dim3, marginTop: 4 }}>…</div>
+            )}
+          </div>
+        ) : null
+      }
+    >
+      {/* Two joined links: the conversation continues, but not intact. */}
+      <span aria-hidden style={{ opacity: 0.85 }}>⧉</span>
+      <Hi>context compacted</Hi>
+      {span && <span style={{ color: CHAT.dim3 }}>{span}</span>}
+      {/* Only when the CLI said which. A compaction the user asked for and one
+          the window forced are different events, and guessing between them is
+          worse than saying neither. */}
+      {entry.trigger && <span style={{ color: CHAT.dim3 }}>{entry.trigger}</span>}
+      {entry.summary && (
+        <span style={{ color: CHAT.dim3, letterSpacing: 0, textTransform: 'none' }}>
+          {open ? 'hide summary' : 'summary'}
+        </span>
+      )}
+    </CompactBand>
+  )
+}
+
+/**
+ * A slash command's row — and the one place in the log that is closed by default.
+ *
+ * Two different things arrive as `cmd` and they are told apart by `title`:
+ *
+ *   **A Skill** (`/brag`, `/release`) has one. Its "output" is the skill's own
+ *   SKILL.md, in full — hundreds of lines of instructions addressed to the model,
+ *   which the log rendered as markdown in place. That is the whole file dumped
+ *   into the conversation: it buries the message that invoked it and the answer
+ *   that follows, and none of it is something anybody said. So the row states
+ *   *what was loaded and how big it was* and keeps the text one click away. It is
+ *   still in the log — dropping it would make the transcript lie about what
+ *   entered the model's context — just not spread across two screens of it.
+ *
+ *   **A local command's stdout** (`/context`) has no title and is terminal
+ *   output, so it stays exactly as it was: open, and in a card that keeps its own
+ *   line breaks. It is short by construction (main clips at 60 lines), it is
+ *   addressed to *you*, and `/context` draws an ASCII meter that reflowing into a
+ *   paragraph destroys.
+ *
+ * The size rule is `AUTO_OPEN_LINES`, shared with the tool cards, so a one-line
+ * skill still opens and nothing new has to be learned to predict which do.
+ */
+function CmdRow({
+  entry,
+  handlers
+}: {
+  entry: Extract<ChatEntry, { kind: 'cmd' }>
+  handlers: LogHandlers
+}): React.ReactElement {
+  const full = handlers.bodies[entry.id]
+  const text = full ?? entry.md
+  const lines = lineCount(entry.md)
+  // Same deferred default as ToolCard, and for a weaker version of the same
+  // reason: a click has to survive the wholesale row replacement at the turn's
+  // settle, which a flag stored on the entry would not.
+  const [choice, setChoice] = React.useState<boolean | null>(null)
+  const open = choice ?? !(lines > AUTO_OPEN_LINES || entry.truncated)
+
+  if (!entry.title) {
+    return (
+      <Line at={entry.at} role="cmd" color={CHAT.dim2}>
+        <Card>
+          {/* Terminal output, so it keeps its own line breaks — but a `/context`
+              meter or a `git log --oneline` line is routinely wider than the
+              card, and `pre-wrap` alone would carry it out through the border. */}
+          <span style={{ minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+            <Hi>{entry.md}</Hi>
+          </span>
+        </Card>
+        {entry.truncated && <div style={{ ...mono, color: CHAT.dim3, marginTop: 4 }}>…</div>}
+      </Line>
+    )
+  }
+
+  const toggle = (): void => {
+    if (!entry.md) return
+    // Main clipped it on the way out and still holds the rest; ask for it the
+    // first time it is opened, exactly as a clipped tool body does.
+    if (!open && entry.truncated) handlers.onExpand(entry.id)
+    setChoice(!open)
+  }
+
+  return (
+    <Line at={entry.at} role="cmd" color={CHAT.cmd}>
+      <Card onClick={entry.md ? toggle : undefined}>
+        <span
+          style={{
+            color: CHAT.cmd,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <Hi>{entry.title}</Hi>
+        </span>
+        {entry.md && (
+          <>
+            {/* What the row is standing in for. `+` where main clipped it: this
+                counts what arrived, not what exists. */}
+            <span style={{ color: CHAT.dim3, flex: 'none' }}>
+              {lines}
+              {entry.truncated ? '+' : ''} {lines === 1 ? 'line' : 'lines'} loaded
+            </span>
+            <span
+              style={{ marginLeft: 'auto', flex: 'none', fontSize: TYPE.gutter, color: CHAT.dim3 }}
+            >
+              {open ? 'hide' : 'show'}
+            </span>
+          </>
+        )}
+      </Card>
+      {open && entry.md && (
+        // An inset panel rather than bare markdown on the page. What is in here
+        // is a file the model was handed, not prose addressed to you, and the
+        // page fill is reserved for the latter.
+        <div
+          style={{
+            marginTop: 6,
+            padding: '4px 15px 10px',
+            background: CHAT.inset,
+            border: `1px solid ${CHAT.borderCard}`,
+            borderRadius: CHAT.radiusCard
+          }}
+        >
+          <Md src={text} />
+          {entry.truncated && !full && (
+            <div style={{ ...mono, color: CHAT.dim3, marginTop: 4 }}>…</div>
+          )}
+        </div>
+      )}
+    </Line>
+  )
 }
 
 /**

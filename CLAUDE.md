@@ -393,6 +393,59 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   field, multi-select answers travel joined with `", "` as a string, and `updatedInput` is
   re-validated against the tool's schema (unknown keys tolerated). The settled row reads
   `toolUseResult`, never prose.
+- **A `you` row is a raised `--card` bubble *and* a `--role-you` left rail *and* a gap above it.**
+  The surface alone was one step over the page and read as one more tool card; the rail and the
+  gap are what make a turn findable when scrolling back through mostly machinery.
+- **The log has exactly one scrollbar and it is `ScrollRail`.** The native one is turned off
+  (`vchat-log` in `GLOBAL_CSS`), because two bars down one column are two answers to "where am I".
+  So the rail takes the whole job: the thumb drags, the track takes a click, and the wheel over it
+  is forwarded to the log. The thumb is the **full width** of the rail — an inset thumb in a strip
+  this narrow reads as a tick in a channel rather than as the bar. It is an **overlay over the
+  log's right gutter, never a flex item beside it**: the log and the composer share `CHAT_EDGE` so
+  a message and the box you answer in line up, and a rail that took layout width would move one of
+  those edges and not the other. It is a sibling of the scroller rather than a child, because an
+  absolutely positioned child of a scroll container scrolls with the content. **Nothing in it
+  re-renders**: the thumb is sized and positioned straight onto the DOM from a rAF-coalesced
+  ResizeObserver and scroll listener, because a streaming turn grows the log ~25 times a second and
+  a `setState` per observation would repaint it on every one. `RAIL_W` is 8 and clears the widest
+  row by **2px at 0.7× zoom**, so it does not grow without re-checking that. It is chrome and is
+  not zoomed.
+- **It carried a mark per message and per compaction, and that is deliberately gone.** Eight pixels
+  of notches down the edge of a reading column is noise on every row, and what they were for —
+  finding what you asked and getting back to it — is what the `Outline` rail already does, with
+  room for the words themselves. A scrollbar only has to say where you are. Do not re-add them.
+- **A compaction is its own entry kind, it owns a body, and its summary is never a `you` row.**
+  Claude Code writes one as *two* transcript lines: a `system`/`compact_boundary` carrying
+  `compactMetadata` (trigger, pre/post tokens, duration), then an ordinary **`user` line flagged
+  `isCompactSummary`** holding the summary the next turn is fed. Mapped as the user line it looks
+  like, that second one renders in the tinted bubble as though you had typed "This session is
+  being continued from a previous conversation…" — the same lie the interrupt marker, a slash
+  command's stdout and a task notification each get caught for, and this is the fourth. Worse than
+  a leak: a summary that *quotes* a slash command hits `COMMAND_NAME_RE`, which is unanchored, and
+  the whole thing became a phantom `you` row reading `/foo-bar` — a message the user never sent.
+  Both lines fold into one `kind: 'compact'` row, **collapsed by default** (the summary is written
+  for the model and is the largest thing in the log where it is least worth reading) with the full
+  text behind `chat:body` exactly as a tool body. A `model · a → b` `divider` stays a quiet label
+  on one rule; these are not the same kind of event and must not wear the same style.
+- **Compacting and compacted are one object in two states, drawn by one component.** `CompactBand`
+  renders both, so the thing you watched happen is the thing you scroll back to. The running form
+  is the turn clock replaced, off `turn.phase === 'compacting'`, which main sets from the **same
+  `SLOW_COMMANDS` test** that already starts a `/compact` turn on the wide silence budget — the one
+  turn whose silence is known in advance rather than guessed at. **The band does not pulse, and
+  nothing in it may**: the chip already carries dots and a ticking clock, and a third animation
+  applied to the whole chip fades the *label* along with the border, so the words dim and brighten
+  under the reader — which is exactly what reads as a flash. A border that is simply lit says
+  "this one is live" without moving. An **auto**-compaction strikes mid-turn and is
+  indistinguishable from thinking until its boundary lands, so it is deliberately never guessed
+  at; the row it produces is the report. `phase` is
+  cleared when the boundary arrives, so the tail of the turn reads as the ordinary work it is.
+- **A Skill's body is collapsed, and it is the one thing in the log that is closed by default.**
+  A `Skill` tool_result is the whole SKILL.md — instructions addressed to the model, which used to
+  render as markdown in place and bury the turn around it. The row states what was loaded and how
+  large it was; the text is one click away and still *in* the log, because dropping it would make
+  the transcript lie about what entered the model's context. A local command's stdout is the other
+  `cmd` row, told apart by having **no title**, and stays open: it is short, it is addressed to
+  you, and `/context` draws a meter that reflowing destroys.
 - **The log follows the tail on a ResizeObserver, not on the entry count** — a streaming turn
   grows the last row rather than adding one. `pinned` (within 40px of the bottom) keeps it from
   yanking a reader who scrolled up. **Corollary, binding the pinned bands and everything in the

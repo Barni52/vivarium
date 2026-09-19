@@ -652,6 +652,13 @@ export class ChatMapper {
 
   // ---- user lines ---------------------------------------------------------
   private user(line: Json, at: number, touched: ChatEntry[]): void {
+    // **A compaction's summary is a user line and is not something the user
+    // said.** Claude Code files it as `type: 'user'` with a plain string body,
+    // flagged `isCompactSummary`, so every other test here passes it straight
+    // through to a tinted `you` bubble reading "This session is being continued
+    // from a previous conversation…". Checked before `isMeta` because it is the
+    // flag that decides, not the shape.
+    if (line.isCompactSummary === true) return this.compactSummary(line, at)
     // `isMeta` covers a slash command's expanded prompt: the command itself is
     // already recorded as a plain user row, and rendering both would show the
     // machinery twice. (No isSidechain test — see the note at the top.)
@@ -712,6 +719,47 @@ export class ChatMapper {
       return
     }
     texts.forEach((t, i) => this.userText(t.text, t.id, at, i === 0 ? chips : [], touched))
+  }
+
+  /**
+   * Fold a compaction's summary into the row its boundary already made.
+   *
+   * The two lines are written back to back — `compact_boundary` then the
+   * summary — so the row is almost always the last one pushed. It is looked up
+   * by walking back for an unfilled `compact` row rather than by assuming that,
+   * because a settle reads from its turn's own start offset and can begin
+   * between the two lines; when it does, the summary arrives with no boundary in
+   * this read at all, and a row of its own still beats a `you` bubble.
+   */
+  private compactSummary(line: Json, at: number): void {
+    const content = obj(line.message)?.content
+    const md = (typeof content === 'string' ? content : resultText(content)).trim()
+    if (!md) return
+
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i]
+      if (e.kind !== 'compact') continue
+      if (e.summary) break
+      e.summary = md
+      this.bodies.set(e.id, md)
+      return
+    }
+
+    const id = str(line.uuid) || this.id('compact')
+    this.bodies.set(id, md)
+    this.push({
+      id,
+      role: 'claude',
+      at,
+      turn: this.turn,
+      kind: 'compact',
+      trigger: null,
+      preTokens: null,
+      postTokens: null,
+      durationMs: null,
+      summary: md,
+      truncated: false
+    })
   }
 
   private userText(
@@ -1153,17 +1201,22 @@ export class ChatMapper {
     if (subtype === 'compact_boundary') {
       // Not decoration: without it the log reads as continuous when it is not,
       // and the user is left wondering why the agent re-reads a file it read.
+      // The summary that belongs to this row arrives on the *next* line, as a
+      // user line — see `compactSummary`.
       const meta = obj(line.compactMetadata) ?? obj(line.compact_metadata) ?? line
-      const pre = num(meta.preTokens) ?? num(meta.pre_tokens)
-      const post = num(meta.postTokens) ?? num(meta.post_tokens)
-      const span = pre !== null && post !== null ? ` · ${tok(pre)} → ${tok(post)} tokens` : ''
+      const trigger = str(meta.trigger)
       this.push({
         id: str(line.uuid) || this.id('compact'),
         role: 'claude',
         at,
         turn: this.turn,
-        kind: 'divider',
-        text: `compacted${span}`
+        kind: 'compact',
+        trigger: trigger === 'manual' || trigger === 'auto' ? trigger : null,
+        preTokens: num(meta.preTokens) ?? num(meta.pre_tokens),
+        postTokens: num(meta.postTokens) ?? num(meta.post_tokens),
+        durationMs: num(meta.durationMs) ?? num(meta.duration_ms),
+        summary: '',
+        truncated: false
       })
       return
     }
@@ -1275,10 +1328,6 @@ export class ChatMapper {
       return
     }
   }
-}
-
-function tok(n: number): string {
-  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 }
 
 export { roleForTool, toolTitle }
