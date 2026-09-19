@@ -1,5 +1,6 @@
 import React from 'react'
 import type { SessionType } from '@shared/types'
+import { isHostProject, sessionTypesFor } from '@shared/projects'
 import { useStore, defaultSessionName } from '../../state/store'
 import {
   ADD_SESSION_POPOVER,
@@ -121,16 +122,22 @@ export function AddSessionPopover(): React.ReactElement | null {
 
   if (!draft) return null
 
+  // Only the types this project can hold — a host project's picker is the agent
+  // and the host terminal, in the same order and with the same headings.
+  const holds = sessionTypesFor(project)
+  const types = SESSION_TYPES.filter((t) => holds.includes(t.type))
+  const host = isHostProject(project)
+
   const pick = (type: SessionType): void => {
     setAddSession(named ? { type } : { type, name: defaultSessionName(project, type) })
   }
 
-  // ↑/↓ walk the three rows so the whole flow works from the keyboard: the
-  // popover opens with the last type preselected and the name field focused,
-  // which makes the common case a single Enter.
+  // ↑/↓ walk the rows so the whole flow works from the keyboard: the popover
+  // opens with the last type preselected and the name field focused, which
+  // makes the common case a single Enter.
   const step = (delta: number): void => {
-    const i = SESSION_TYPES.findIndex((t) => t.type === draft.type)
-    const next = SESSION_TYPES[(i + delta + SESSION_TYPES.length) % SESSION_TYPES.length]
+    const i = types.findIndex((t) => t.type === draft.type)
+    const next = types[(i + delta + types.length) % types.length]
     pick(next.type)
   }
 
@@ -149,8 +156,10 @@ export function AddSessionPopover(): React.ReactElement | null {
     const meta = SESSION_TYPES.find((t) => t.type === type)
     if (!meta) return null
     // The host row says *which folder* — "on Windows" is true but abstract, and
-    // the path is the thing you actually care about when you open a shell.
-    const where = type === 'host-shell' && project?.basePath ? project.basePath : meta.where
+    // the path is the thing you actually care about when you open a shell. In a
+    // host project the agent runs there too, so it says the same.
+    const inFolder = type === 'host-shell' || host
+    const where = inFolder && project?.basePath ? project.basePath : meta.where
     return (
       <>
         <span style={{ color: 'var(--muted)' }}>{meta.shell}</span>
@@ -200,11 +209,11 @@ export function AddSessionPopover(): React.ReactElement | null {
           </span>
         </div>
 
-        {SESSION_TYPES.map((meta, i) => (
+        {types.map((meta, i) => (
           <React.Fragment key={meta.type}>
             {/* group heading: carries the word "terminal" so the rows below it
                 don't have to, leaving one distinct word each */}
-            {meta.group && meta.group !== SESSION_TYPES[i - 1]?.group && (
+            {meta.group && meta.group !== types[i - 1]?.group && (
               <div
                 style={{
                   margin: '8px 0 0 0',

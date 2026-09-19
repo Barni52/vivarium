@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { watch, type FSWatcher } from 'node:fs'
-import { mkdir, open, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type { AgentActivityEvent, AgentHookKind } from '@shared/types'
 
@@ -18,6 +18,14 @@ import type { AgentActivityEvent, AgentHookKind } from '@shared/types'
 // /home/node/.claude/settings.json keeps claude-box.ps1 sessions and
 // manually-launched `claude` runs unaffected.
 //
+// A **host** project's agents use the same bridge dir and the same events.log,
+// just not through a mount: `claude.exe` is handed the Windows path of a
+// host-flavoured hooks.json (see ensureHostBridgeFiles), whose commands name the
+// script and the log by their Windows paths. Claude Code on Windows runs hook
+// commands in Git Bash (verified on 2.1.278: `$0` is /usr/bin/bash, `$VAR`
+// expands and `C:/…` paths redirect fine), so hook.sh itself is the same script.
+// BridgeWatcher cannot tell the two apart and does not need to.
+//
 // This bridge serves **pty `agent` sessions only**. A `chat` session is never
 // pointed at /vivarium/hooks.json and never gets a VIVARIUM_SESSION_ID: it
 // derives the same working/waiting/idle triple from its own stream-json output
@@ -33,7 +41,8 @@ const HOOK_KINDS: readonly AgentHookKind[] = [
   'Stop',
   'AskUserQuestion',
   'ExitPlanMode',
-  'Resumed'
+  'Resumed',
+  'Permission'
 ]
 
 function isHookKind(v: string): v is AgentHookKind {
@@ -50,6 +59,7 @@ function isHookKind(v: string): v is AgentHookKind {
  *
  * The mapping survives the collapse almost intact:
  *  - AskUserQuestion / ExitPlanMode  → waiting   (blocked on the user, mid-turn)
+ *  - Permission                      → waiting   (host agents only; see below)
  *  - Stop                            → idle
  *  - Resumed                         → working   (the store's setActivity already
  *    does the coming-back-from-a-wait arithmetic in its waitedFrom branch)
@@ -71,59 +81,83 @@ export function bridgeDir(projectId: string): string {
 
 const EVENTS_FILE = 'events.log'
 
-// Stop does NOT fire on a user esc-interrupt (documented behavior), so the
-// renderer additionally resets the activity indicator on Esc keypresses.
-const HOOKS_JSON = `${JSON.stringify(
-  {
-    hooks: {
-      UserPromptSubmit: [
-        { hooks: [{ type: 'command', command: 'sh /vivarium/hook.sh UserPromptSubmit' }] }
-      ],
-      Stop: [{ hooks: [{ type: 'command', command: 'sh /vivarium/hook.sh Stop' }] }],
-      // Neither blocking tool has a dedicated hook event; their "execution" IS
-      // the wait (showing the question UI / the plan for approval), so PreToolUse
-      // fires exactly when the agent starts waiting for the user. Two entries
-      // rather than one `AskUserQuestion|ExitPlanMode` matcher only so the log
-      // stays readable after the fact — the renderer treats them identically.
-      // Agents run with --dangerously-skip-permissions, so these are the only
-      // two things that can block a turn on a human.
-      PreToolUse: [
-        {
-          matcher: 'AskUserQuestion',
-          hooks: [{ type: 'command', command: 'sh /vivarium/hook.sh AskUserQuestion' }]
-        },
-        {
-          matcher: 'ExitPlanMode',
-          hooks: [{ type: 'command', command: 'sh /vivarium/hook.sh ExitPlanMode' }]
-        }
-      ],
-      // …and PostToolUse is the other half: the tool only completes once the
-      // user has answered, which is when the turn clock starts again. It does
-      // NOT fire when the call is rejected ("No, keep planning" denies the tool
-      // and hands the agent feedback instead), so the renderer also resumes on
-      // the keystroke that answers — see TerminalView.
-      PostToolUse: [
-        {
-          matcher: 'AskUserQuestion|ExitPlanMode',
-          hooks: [{ type: 'command', command: 'sh /vivarium/hook.sh Resumed' }]
-        }
-      ]
-    }
-  },
-  null,
-  2
-)}\n`
+/**
+ * The hooks settings file, for either side of the bridge. `command` spells how
+ * one hook kind reaches hook.sh from wherever `claude` runs, which is the only
+ * thing the two flavours disagree on; the set of hooks is written once.
+ *
+ * `permission` adds the PermissionRequest hook, and only the host flavour asks
+ * for it: container agents run with --dangerously-skip-permissions, so there
+ * the two blocking tools below are the only things that can stop a turn on a
+ * human, and the file they are served stays exactly what it was.
+ */
+function hooksJson(command: (kind: AgentHookKind) => string, permission: boolean): string {
+  const hook = (kind: AgentHookKind): { type: string; command: string }[] => [
+    { type: 'command', command: command(kind) }
+  ]
+  return `${JSON.stringify(
+    {
+      hooks: {
+        // Stop does NOT fire on a user esc-interrupt (documented behavior), so
+        // the renderer additionally resets the activity indicator on Esc.
+        UserPromptSubmit: [{ hooks: hook('UserPromptSubmit') }],
+        Stop: [{ hooks: hook('Stop') }],
+        // Neither blocking tool has a dedicated hook event; their "execution" IS
+        // the wait (showing the question UI / the plan for approval), so
+        // PreToolUse fires exactly when the agent starts waiting for the user.
+        // Two entries rather than one `AskUserQuestion|ExitPlanMode` matcher only
+        // so the log stays readable after the fact — the renderer treats them
+        // identically.
+        PreToolUse: [
+          { matcher: 'AskUserQuestion', hooks: hook('AskUserQuestion') },
+          { matcher: 'ExitPlanMode', hooks: hook('ExitPlanMode') }
+        ],
+        // "Run before permission prompt", every tool (the event's matcher is the
+        // tool name). There is no matching "answered" event, and PostToolUse on
+        // every tool would put a Git Bash launch — the slow part of a hook on
+        // Windows — behind every Read and Grep of every turn to catch it. So
+        // the answer is read off the keystroke instead, as the rejected-plan
+        // case below already is (see TerminalView).
+        ...(permission ? { PermissionRequest: [{ matcher: '*', hooks: hook('Permission') }] } : {}),
+        // …and PostToolUse is the other half: the tool only completes once the
+        // user has answered, which is when the turn clock starts again. It does
+        // NOT fire when the call is rejected ("No, keep planning" denies the
+        // tool and hands the agent feedback instead), so the renderer also
+        // resumes on the keystroke that answers — see TerminalView.
+        PostToolUse: [{ matcher: 'AskUserQuestion|ExitPlanMode', hooks: hook('Resumed') }]
+      }
+    },
+    null,
+    2
+  )}\n`
+}
 
-// Invoked as `sh /vivarium/hook.sh <event>` — the file has no exec bit because
-// it is written from the Windows host. Reads (and discards) the JSON payload
+// Invoked as `sh <dir>/hook.sh <event>` — the file has no exec bit because it
+// is written from the Windows host. Reads (and discards) the JSON payload
 // Claude Code puts on stdin so the hook never dies on a broken pipe, then
 // appends one TSV line. Single small O_APPEND writes don't interleave.
-const HOOK_SH = [
-  '#!/bin/sh',
-  'cat > /dev/null',
-  `printf '%s\\t%s\\t%s\\n' "$1" "\${VIVARIUM_SESSION_ID:-}" "$(date +%s)" >> /vivarium/${EVENTS_FILE}`,
-  ''
-].join('\n')
+// `events` is already shell-quoted for its side of the bridge.
+function hookScript(events: string): string {
+  return [
+    '#!/bin/sh',
+    'cat > /dev/null',
+    `printf '%s\\t%s\\t%s\\n' "$1" "\${VIVARIUM_SESSION_ID:-}" "$(date +%s)" >> ${events}`,
+    ''
+  ].join('\n')
+}
+
+const HOOKS_JSON = hooksJson((kind) => `sh /vivarium/hook.sh ${kind}`, false)
+const HOOK_SH = hookScript(`/vivarium/${EVENTS_FILE}`)
+
+/**
+ * A Windows path as Git Bash reads it inside double quotes: forward slashes
+ * (which it resolves as `C:/…` without any `cygpath`), and the three characters
+ * that still mean something between double quotes escaped. A username with a
+ * space in it is the realistic case; `$` and a backtick are the paranoid one.
+ */
+function bashQuoted(path: string): string {
+  return `"${path.replace(/\\/g, '/').replace(/([$`"])/g, '\\$1')}"`
+}
 
 /**
  * (Re)write the bridge files for a project and truncate its event log. Called
@@ -137,6 +171,38 @@ export async function ensureBridgeFiles(projectId: string): Promise<void> {
   await writeFile(join(dir, 'hooks.json'), HOOKS_JSON, 'utf8')
   await writeFile(join(dir, 'hook.sh'), HOOK_SH, 'utf8')
   await writeFile(join(dir, EVENTS_FILE), '', 'utf8')
+}
+
+/**
+ * The host flavour: write a host project's hooks.json + hook.sh, and return the
+ * Windows path a host agent is given as `--settings`.
+ *
+ * The container rule is "rewrite before every start", and a host project has no
+ * start — so this runs at app launch (`truncate`, the one moment no host agent
+ * can be alive, since quitting kills every local pty) and again before each
+ * agent spawn, where it writes **only what differs**. That second half is not
+ * an optimisation: every host agent of every host project spawns at once when
+ * the app comes up, and an unconditional writeFile truncates the very file a
+ * sibling `claude.exe` may be parsing at that instant — which it would read as
+ * a settings file with errors, and run without hooks.
+ */
+export async function ensureHostBridgeFiles(projectId: string, truncate = false): Promise<string> {
+  const dir = bridgeDir(projectId)
+  await mkdir(dir, { recursive: true })
+  const settings = join(dir, 'hooks.json')
+  const script = join(dir, 'hook.sh')
+  await writeIfChanged(
+    settings,
+    hooksJson((kind) => `sh ${bashQuoted(script)} ${kind}`, true)
+  )
+  await writeIfChanged(script, hookScript(bashQuoted(join(dir, EVENTS_FILE))))
+  if (truncate) await writeFile(join(dir, EVENTS_FILE), '', 'utf8')
+  return settings
+}
+
+async function writeIfChanged(file: string, content: string): Promise<void> {
+  const current = await readFile(file, 'utf8').catch(() => null)
+  if (current !== content) await writeFile(file, content, 'utf8')
 }
 
 /**

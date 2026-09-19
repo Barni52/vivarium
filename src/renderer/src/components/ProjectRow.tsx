@@ -1,6 +1,7 @@
 import React from 'react'
 import type { Project } from '@shared/types'
-import { useStore, type AttentionKind } from '../state/store'
+import { canMoveSession, isHostProject } from '@shared/projects'
+import { useStore, type AttentionKind, type ContextMenuItem } from '../state/store'
 import { ACCENT, MONO } from '../theme'
 import {
   Chevron,
@@ -8,6 +9,7 @@ import {
   Folder,
   Gear,
   GitBranch,
+  Monitor,
   Plus,
   Power,
   Search,
@@ -111,17 +113,50 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   const setDropTarget = useStore((s) => s.setDropTarget)
   const reorderProjects = useStore((s) => s.reorderProjects)
   const requestMoveSession = useStore((s) => s.requestMoveSession)
+  // Runs on Windows, with no container: the one fact about a project that
+  // changes what its row is allowed to say (see @shared/projects).
+  const host = isHostProject(project)
 
   const showMenu = (e: React.MouseEvent): void => {
     e.preventDefault()
     e.stopPropagation()
-    openContextMenu(e.clientX, e.clientY, [
+    const head: ContextMenuItem[] = [
       {
         label: 'Add session',
         icon: <Plus size={14} />,
         onSelect: () => openAddSession(project.id, new DOMRect(e.clientX, e.clientY, 0, 0))
       },
-      { label: 'Project settings', icon: <Gear size={14} />, onSelect: () => openSettings(project.id) },
+      { label: 'Project settings', icon: <Gear size={14} />, onSelect: () => openSettings(project.id) }
+    ]
+    const tail: ContextMenuItem[] = [
+      { label: '---' },
+      {
+        label: hasOutput
+          ? 'Write branch diff → changes.txt'
+          : 'Write branch diff (set an output folder first)',
+        icon: <GitBranch size={14} />,
+        disabled: !hasOutput,
+        onSelect: () => void runProjectDiff(project.id)
+      },
+      { label: '---' },
+      {
+        label: 'Delete project',
+        icon: <Trash size={14} />,
+        danger: true,
+        onSelect: () => requestDeleteProject(project.id, project.name)
+      }
+    ]
+    // A host project gets neither half of the middle: it has no container to
+    // power, and the three app-wide dialogs are all about Docker — the image's
+    // Claude Code, the volumes, and a search that only reads the transcripts on
+    // the container volume, which a host agent never writes to. Reachable from
+    // any container project's menu still.
+    if (host) {
+      openContextMenu(e.clientX, e.clientY, [...head, ...tail])
+      return
+    }
+    openContextMenu(e.clientX, e.clientY, [
+      ...head,
       {
         label:
           op === 'start'
@@ -161,22 +196,7 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
         icon: <Search size={14} />,
         onSelect: openTranscriptSearch
       },
-      { label: '---' },
-      {
-        label: hasOutput
-          ? 'Write branch diff → changes.txt'
-          : 'Write branch diff (set an output folder first)',
-        icon: <GitBranch size={14} />,
-        disabled: !hasOutput,
-        onSelect: () => void runProjectDiff(project.id)
-      },
-      { label: '---' },
-      {
-        label: 'Delete project',
-        icon: <Trash size={14} />,
-        danger: true,
-        onSelect: () => requestDeleteProject(project.id, project.name)
-      }
+      ...tail
     ])
   }
 
@@ -200,9 +220,18 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   // nothing and the cursor stays no-drop. This is also what makes a collapsed —
   // or empty — project reachable: no expansion needed, the drop expands it after
   // the fact.
+  //
+  // A session this project cannot take is refused the same way — no indicator,
+  // no-drop cursor — rather than accepted and then turned down by a dialog: a
+  // chat into a host project, or an agent across the host boundary, whose
+  // conversation could not come with it (see canMoveSession).
   const foreignSessionDrag = (): { id: string; projectId: string } | null => {
-    const d = useStore.getState().drag
+    const st = useStore.getState()
+    const d = st.drag
     if (!d || d.kind !== 'session' || !d.projectId || d.projectId === project.id) return null
+    const from = st.config.projects.find((p) => p.id === d.projectId)
+    const session = from?.sessions.find((x) => x.id === d.id)
+    if (!session || !canMoveSession(from, project, session.type)) return null
     return { id: d.id, projectId: d.projectId }
   }
 
@@ -308,25 +337,58 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
         >
           <Chevron />
         </span>
-        <span style={{ color: 'var(--muted)', display: 'flex', alignItems: 'center' }}>
-          <Folder />
+        {/* What kind of project this is, said twice and neither time in colour
+            alone: a folder that gets mounted into a box, or a monitor for one
+            that runs on the PC itself — and, for the latter, the word. */}
+        <span
+          title={host ? 'Host project — runs on Windows, no container' : undefined}
+          style={{ color: 'var(--muted)', display: 'flex', alignItems: 'center' }}
+        >
+          {host ? <Monitor /> : <Folder />}
         </span>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
-          <span
-            style={{
-              fontSize: 12.5,
-              // Bold, not medium. It is the only bold thing in the sidebar, and
-              // that is what separates a project from the sessions under it now
-              // that they are the same face at nearly the same size.
-              fontWeight: 700,
-              color: 'var(--fg)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              lineHeight: 1.2
-            }}
-          >
-            {project.name}
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <span
+              style={{
+                minWidth: 0,
+                fontSize: 12.5,
+                // Bold, not medium. It is the only bold thing in the sidebar, and
+                // that is what separates a project from the sessions under it now
+                // that they are the same face at nearly the same size.
+                fontWeight: 700,
+                color: 'var(--fg)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                lineHeight: 1.2
+              }}
+            >
+              {project.name}
+            </span>
+            {/* Beside the name rather than in the right-hand slot the container
+                square uses: that slot turns into the "+" on hover, and this is
+                not a state that should vanish when you point at it. `flex:
+                none` so a long name ellipsises and the tag stays whole. */}
+            {host && (
+              <span
+                style={{
+                  flex: 'none',
+                  padding: '0 5px',
+                  border: '1px solid var(--border-strong)',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--muted)',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: '.6px',
+                  textTransform: 'uppercase',
+                  // 13 + the 2px of border is the name's own 15px line, so the
+                  // tag adds no height to the row the `minHeight` note counts.
+                  lineHeight: '13px'
+                }}
+              >
+                host
+              </span>
+            )}
           </span>
 
           {/* Path and branch are stacked, not side by side: sharing one line
@@ -419,7 +481,7 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
               <Plus size={15} />
             </HeaderBtn>
           </div>
-        ) : (
+        ) : host ? null : (
           /* a container is a box: rounded square (vs the circular session
              dots), green with a steady soft glow while running — no animation,
              infrastructure hums rather than thinks. Amber pulse while a

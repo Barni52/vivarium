@@ -36,13 +36,15 @@ import type {
   VolumeReport
 } from '@shared/types'
 import { DEFAULT_EFFORT } from '@shared/models'
+import { canMoveSession, isHostProject, projectHolds } from '@shared/projects'
 import { ConfigStore } from './config'
 import { DockerService } from './docker'
-import { BridgeWatcher, bridgeDir, removeBridge } from './bridge'
+import { BridgeWatcher, bridgeDir, ensureHostBridgeFiles, removeBridge } from './bridge'
 import { ChatService } from './chat'
 import { gitBranch, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
-import { pasteImage, removeClips } from './clipboard'
+import { pasteImage, pruneClips, removeClips } from './clipboard'
+import { resolveClaude } from './host'
 import { UsageService } from './usage'
 import { ClaudeService } from './claude'
 
@@ -171,13 +173,19 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   // ---- claude code version / manual update -------------------------------
   // Updates are user-initiated only (no auto-updater): status feeds the
   // title-bar version chip, update runs npm inside one project's container.
+  // Container projects only, here and in every docker-facing handler below: a
+  // host project has no container to probe, and its `claude.exe` is the
+  // native install, which updates itself.
+  const containerProjects = (): Project[] => store.get().projects.filter((p) => !isHostProject(p))
+
   ipcMain.handle(CH.claudeStatus, (_e, force: boolean): Promise<ClaudeStatus> =>
-    claude.status(store.get().projects, force)
+    claude.status(containerProjects(), force)
   )
 
   ipcMain.handle(CH.claudeUpdate, async (_e, projectId: string): Promise<ClaudeUpdateResult> => {
     const p = store.getProject(projectId)
     if (!p) return { ok: false, version: null, message: 'project not found' }
+    if (isHostProject(p)) return { ok: false, version: null, message: 'a host project has no container' }
     const r = await claude.update(p)
     // The model list is whatever *that* CLI reported, and it has just been
     // replaced — so the cache for this project is dropped rather than left to
@@ -286,6 +294,17 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       }
     }
     if (changed) await store.save(cfg)
+    // A host project's side of the two things a container start does for its
+    // project (see DockerService.start): fresh bridge files with an empty log,
+    // and a clip prune. Launch is the host's equivalent of that moment for the
+    // same reason — quitting killed every local pty, so no host agent can be
+    // mid-turn holding a clip path or appending to the log. Ahead of
+    // syncBridgeWatchers, so a watcher starting now starts on the empty file.
+    for (const p of cfg.projects) {
+      if (!isHostProject(p)) continue
+      await ensureHostBridgeFiles(p.id, true).catch(() => {})
+      void pruneClips(p.id)
+    }
     // Apply the persisted shared output folder to docker + start watching it.
     docker.setSharedOutput(cfg.sharedOutputFolder)
     startOutputWatcher()
@@ -297,24 +316,57 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
 
   ipcMain.handle(CH.createProject, async (_e, input: NewProjectInput): Promise<Config> => {
     const id = randomUUID()
+    const host = input.kind === 'host'
     const cfg = await store.mutate((cfg) => {
       cfg.projects.push({
         id,
         name: input.name.trim() || 'untitled-project',
+        // Written only when it is not the default, so a container project is
+        // stored exactly as it was before host projects existed.
+        ...(host ? { kind: 'host' as const } : {}),
         basePath: input.basePath,
-        mounts: input.mounts,
-        image: input.image,
-        publishedPort: input.publishedPort,
+        // Nothing to mount and no image to build: the fields are required on
+        // Project, so a host project carries the inert values rather than the
+        // type growing a second shape every docker path would have to narrow.
+        mounts: host ? [] : input.mounts,
+        image: host ? 'slim' : input.image,
+        publishedPort: host ? undefined : input.publishedPort,
         sessions: []
       })
       return cfg
     })
+    // Written now rather than at the first spawn, so two agents created in quick
+    // succession cannot race each other to create them (see ensureHostBridgeFiles).
+    if (host) await ensureHostBridgeFiles(id, true).catch(() => {})
     syncBridgeWatchers()
     return cfg
   })
 
   ipcMain.handle(CH.updateProject, async (_e, input: UpdateProjectInput): Promise<Config> => {
     const project = store.getProject(input.id)
+    if (isHostProject(project)) {
+      // Only the name and the folder mean anything here. The folder is the one
+      // with a consequence: Claude files a transcript under the directory it was
+      // started in and refuses to `--resume` it from anywhere else, so an agent
+      // whose project moved would find its conversation and then die on it at
+      // every open. Each gets a fresh id instead — the old conversation is still
+      // in ~/.claude and `claude --resume` from the old folder still reaches it,
+      // and a live agent carries on in the old folder until it is next opened.
+      // Compared case-blind because Windows paths are.
+      const moved =
+        !!project &&
+        resolve(project.basePath).toLowerCase() !== resolve(input.basePath).toLowerCase()
+      return store.mutate((cfg) => {
+        const p = cfg.projects.find((x) => x.id === input.id)
+        if (!p) return cfg
+        p.name = input.name.trim() || p.name
+        p.basePath = input.basePath
+        if (moved) {
+          for (const s of p.sessions) if (s.type === 'agent') s.claudeSessionId = randomUUID()
+        }
+        return cfg
+      })
+    }
     const running = project ? await docker.isRunning(project) : false
     // A container is named after its project, so the rename has to reach docker
     // *before* it reaches config.json: once the new name is persisted, `project`
@@ -348,7 +400,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
         pty.kill(s.id)
         chat.close(s.id)
       }
-      await docker.remove(project)
+      if (!isHostProject(project)) await docker.remove(project)
       // The container is gone, so nothing can read /clip any more — and nothing
       // will ever name this directory again, since it is keyed by a project id
       // that is about to leave config.json. The same cascade the conversations
@@ -387,7 +439,9 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       const claudeSessionId = owns ? randomUUID() : undefined
       return store.mutate((cfg) => {
         const p = cfg.projects.find((x) => x.id === projectId)
-        if (p) {
+        // The picker only offers what the project can hold; this is the same
+        // rule applied to a type that arrived over IPC (see @shared/projects).
+        if (p && projectHolds(p, type)) {
           p.sessions.push({
             id,
             name,
@@ -527,10 +581,15 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       // Validate before killing anything — a call that can't move the session
       // must not end its pty either.
       const src = store.getProject(fromProjectId)
+      const dst = store.getProject(toProjectId)
+      const moving = src?.sessions.find((s) => s.id === sessionId)
       if (
         fromProjectId === toProjectId ||
-        !src?.sessions.some((s) => s.id === sessionId) ||
-        !store.getProject(toProjectId)
+        !moving ||
+        !dst ||
+        // A chat into a host project, or an agent across the host boundary —
+        // see canMoveSession for why the latter cannot carry its conversation.
+        !canMoveSession(src, dst, moving.type)
       ) {
         return store.get()
       }
@@ -607,16 +666,26 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   // process launches per tick — the same burst OPEN_LIMIT exists to meter, since
   // a loaded daemon answers `docker inspect` non-zero and isRunning() reads that
   // as "stopped". See DockerService.containerStates.
+  // A host project is simply absent from the answer, which the renderer already
+  // reads as "no container" — and its sessions never consult it (TerminalHost).
   ipcMain.handle(
     CH.containerStates,
-    (): Promise<ContainerState[]> => docker.containerStates(store.get().projects)
+    (): Promise<ContainerState[]> => docker.containerStates(containerProjects())
   )
 
   const sinkFor = (projectId: string) => (data: string): void =>
     emit(CH.containerOutput, { projectId, data })
 
-  ipcMain.handle(CH.startContainer, async (_e, projectId: string): Promise<boolean> => {
+  // The four lifecycle handlers below refuse a host project outright. The UI
+  // never offers them one, but `docker.start` on a host project would build an
+  // image and create a container for it, and the id arrives over IPC.
+  const containerProject = (projectId: string): Project | undefined => {
     const p = store.getProject(projectId)
+    return p && !isHostProject(p) ? p : undefined
+  }
+
+  ipcMain.handle(CH.startContainer, async (_e, projectId: string): Promise<boolean> => {
+    const p = containerProject(projectId)
     if (!p) return false
     const ok = await docker.start(p, sinkFor(projectId))
     emit(CH.containerStateChanged, { projectId, running: ok })
@@ -626,7 +695,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   })
 
   ipcMain.handle(CH.stopContainer, async (_e, projectId: string): Promise<boolean> => {
-    const p = store.getProject(projectId)
+    const p = containerProject(projectId)
     if (!p) return false
     await docker.stop(p)
     emit(CH.containerStateChanged, { projectId, running: false })
@@ -634,7 +703,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   })
 
   ipcMain.handle(CH.restartContainer, async (_e, projectId: string): Promise<boolean> => {
-    const p = store.getProject(projectId)
+    const p = containerProject(projectId)
     if (!p) return false
     const ok = await docker.restart(p, sinkFor(projectId))
     emit(CH.containerStateChanged, { projectId, running: ok })
@@ -642,7 +711,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   })
 
   ipcMain.handle(CH.recreateContainer, async (_e, projectId: string): Promise<boolean> => {
-    const p = store.getProject(projectId)
+    const p = containerProject(projectId)
     if (!p) return false
     const ok = await docker.recreate(p, sinkFor(projectId))
     emit(CH.containerStateChanged, { projectId, running: ok })
@@ -731,8 +800,10 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       await mkdir(next.sharedOutputFolder, { recursive: true }).catch(() => {})
     }
     startOutputWatcher()
-    // Auto-recreate running containers so the new mount applies immediately.
+    // Auto-recreate running containers so the new mount applies immediately. A
+    // host agent needs nothing: it sees the folder where it is.
     for (const p of next.projects) {
+      if (isHostProject(p)) continue
       if (await docker.isRunning(p)) {
         const ok = await docker.recreate(p, sinkFor(p.id))
         emit(CH.containerStateChanged, { projectId: p.id, running: ok })
@@ -848,7 +919,19 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       // Already live → just re-attach (renderer keeps the xterm).
       if (pty.has(sessionId)) return { ok: true }
 
-      if (s.type === 'host-shell') {
+      // Nothing that runs on the host touches docker, so none of it waits at
+      // the gate: a host shell anywhere, and everything in a host project.
+      if (s.type === 'host-shell' || isHostProject(p)) {
+        if (!projectHolds(p, s.type)) return { ok: false, reason: 'not-found' }
+        // Asked here as well as in the spawn so a missing install gets a
+        // sentence rather than "failed to open session".
+        if (s.type === 'agent' && !(await resolveClaude())) {
+          return {
+            ok: false,
+            reason: 'claude-missing',
+            message: 'claude.exe / claude.cmd not found on PATH or in ~/.local/bin'
+          }
+        }
         const ok = await pty.spawn(s, p, cols, rows)
         return ok ? { ok: true } : { ok: false, reason: 'spawn-failed' }
       }
@@ -1143,7 +1226,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
 
   // ---- clipboard ---------------------------------------------------------
   ipcMain.handle(CH.pasteImage, async (_e, projectId: string): Promise<string | null> =>
-    pasteImage(projectId)
+    pasteImage(projectId, isHostProject(store.getProject(projectId)))
   )
   ipcMain.handle(CH.clipboardReadText, (): string => clipboard.readText())
   ipcMain.on(CH.clipboardWriteText, (_e, text: string) => clipboard.writeText(text))

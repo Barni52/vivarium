@@ -5,6 +5,16 @@ export type ImageVariant = 'slim' | 'full'
 export type SessionType = 'agent' | 'chat' | 'container-shell' | 'host-shell'
 
 /**
+ * Where a project's sessions run. `container` is everything this app was built
+ * around — a Docker container per project with selected folders mounted in.
+ * `host` is a project with no container at all: its agents run the Windows
+ * `claude.exe` straight in `basePath`, beside the PowerShell terminals every
+ * project already has. Which session types each kind can hold is
+ * `@shared/projects`' to say, not this file's.
+ */
+export type ProjectKind = 'container' | 'host'
+
+/**
  * The two permission modes a chat session runs in, and nothing else.
  *
  * Both enforce nothing: a session that can reach `bypassPermissions` has plan
@@ -141,10 +151,25 @@ export interface ChatRewindResult {
 export interface Project {
   id: string
   name: string
-  /** Absolute host path the project is rooted at (host shells cwd here). */
+  /**
+   * Absolute on-disk path the project is rooted at. Host shells use it as their
+   * cwd, and so do a host project's agents.
+   */
   basePath: string
-  /** Absolute host paths of the subfolders mounted into the container. */
+  /**
+   * Absent means `container`, which is what makes every project written before
+   * host projects existed a container project with no migration. Chosen once at
+   * creation and never changed after: a conversation cannot follow a project
+   * across the boundary (the transcripts live on different filesystems), so
+   * converting one would strand every agent it holds.
+   */
+  kind?: ProjectKind
+  /**
+   * Absolute host paths of the subfolders mounted into the container. Always
+   * empty on a host project, which has no container to mount into.
+   */
   mounts: string[]
+  /** Inert on a host project, which builds no image — written as `slim`. */
   image: ImageVariant
   /** Only meaningful for `full` projects; slim projects never publish a port. */
   publishedPort?: number
@@ -312,6 +337,13 @@ export type AgentHookKind =
   | 'AskUserQuestion'
   | 'ExitPlanMode'
   | 'Resumed'
+  /**
+   * A permission prompt is on screen. Host agents only: a container agent runs
+   * with --dangerously-skip-permissions and is never asked, while a host agent
+   * is plain `claude` and is asked constantly — which is a turn blocked on a
+   * human exactly as much as a question is.
+   */
+  | 'Permission'
 
 /**
  * One rate-limit window from the (undocumented) Claude OAuth usage endpoint —
@@ -981,6 +1013,7 @@ export interface MountNode {
 /** Draft used by the Add-Project dialog. */
 export interface NewProjectInput {
   name: string
+  kind: ProjectKind
   basePath: string
   mounts: string[]
   image: ImageVariant

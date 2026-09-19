@@ -20,7 +20,13 @@ export function clipDir(projectId: string): string {
   return join(app.getPath('userData'), 'clip', projectId)
 }
 
-export async function pasteImage(projectId: string): Promise<string | null> {
+/**
+ * `host` is a host project's agent, which reads the file where it really is:
+ * there is no container, so no /clip, and the path typed into its prompt is the
+ * Windows one — quoted when it has a space in it, or the prompt would read it as
+ * two words.
+ */
+export async function pasteImage(projectId: string, host = false): Promise<string | null> {
   const image = clipboard.readImage()
   if (image.isEmpty()) return null
 
@@ -34,6 +40,10 @@ export async function pasteImage(projectId: string): Promise<string | null> {
   const filename = `clip-${Date.now()}-${counter}.png`
   await fs.writeFile(join(dir, filename), png)
 
+  if (host) {
+    const path = join(dir, filename)
+    return /\s/.test(path) ? `"${path}"` : path
+  }
   // Container-side path (dir is bind-mounted at /clip).
   return `/clip/${filename}`
 }

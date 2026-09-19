@@ -28,23 +28,37 @@ export function ConfirmMove(): React.ReactElement | null {
       <Panel width={400}>
         <div style={{ padding: '22px 24px 18px 24px' }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Move session?</div>
-          <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.55 }}>
-            <span style={mono}>{target.sessionName}</span> moves to{' '}
-            <span style={mono}>{target.toProjectName}</span> and reopens in that project’s
-            container, against that project’s mounts — so file paths from earlier in the
-            conversation may not exist there.
-            {target.live && (
-              <>
-                {' '}
-                Its terminal is live: the current turn is cut off
-                {/* the scrollback goes with the old container's terminal, but an
-                    agent's history doesn't — claude resumes and re-renders it */}
-                {' '}
-                and its scrollback is discarded. The conversation itself is kept and resumes in the
-                new container.
-              </>
-            )}
-          </div>
+          {/* A host PowerShell has no container to reopen in and no conversation
+              to keep — and it is the only thing that can cross into or out of a
+              host project (see canMoveSession), so it gets its own sentence
+              rather than the container one below, which would be wrong twice. */}
+          {target.type === 'host-shell' ? (
+            <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.55 }}>
+              <span style={mono}>{target.sessionName}</span> moves to{' '}
+              <span style={mono}>{target.toProjectName}</span> and reopens as a new PowerShell in
+              that project’s folder.
+              {target.live &&
+                ' Its terminal is live: whatever is running in it is ended and its scrollback is discarded.'}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.55 }}>
+              <span style={mono}>{target.sessionName}</span> moves to{' '}
+              <span style={mono}>{target.toProjectName}</span> and reopens in that project’s
+              container, against that project’s mounts — so file paths from earlier in the
+              conversation may not exist there.
+              {target.live && (
+                <>
+                  {' '}
+                  Its terminal is live: the current turn is cut off
+                  {/* the scrollback goes with the old container's terminal, but an
+                      agent's history doesn't — claude resumes and re-renders it */}
+                  {' '}
+                  and its scrollback is discarded. The conversation itself is kept and resumes in the
+                  new container.
+                </>
+              )}
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', borderTop: '1px solid var(--border)' }}>
           {/* danger only when something is actually being cut off; a dead session

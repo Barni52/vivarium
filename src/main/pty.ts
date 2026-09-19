@@ -2,7 +2,10 @@ import * as pty from 'node-pty'
 import { execFile } from 'child_process'
 import type { IPty } from 'node-pty'
 import type { Project, Session } from '@shared/types'
+import { isHostProject } from '@shared/projects'
 import type { DockerService } from './docker'
+import { ensureHostBridgeFiles } from './bridge'
+import { cmdLine, hostConversationExists, resolveClaude, withoutParentSession } from './host'
 
 type Emit = (channel: string, payload: unknown) => void
 
@@ -56,7 +59,8 @@ export class PtyManager {
     if (this.terms.has(session.id)) return true
 
     let file: string
-    let args: string[]
+    // A string only for the cmd.exe shim path — see host.ts `cmdLine`.
+    let args: string[] | string
     let cwd: string
 
     const env = {
@@ -65,9 +69,37 @@ export class PtyManager {
       COLORTERM: 'truecolor'
     } as Record<string, string>
 
+    // Everything below that runs on the host (not through `docker exec`, which
+    // passes no environment across) gets it without an outer Claude Code's
+    // session markers — see withoutParentSession.
     if (session.type === 'host-shell') {
       file = await resolvePwsh()
       args = ['-NoLogo']
+      cwd = project.basePath
+      withoutParentSession(env)
+    } else if (isHostProject(project)) {
+      // A host project's agent: the Windows `claude`, straight in the project
+      // folder. Deliberately *without* --dangerously-skip-permissions — the
+      // container is what made bypass a reasonable default, and here there is
+      // none, so this is exactly the `claude` you would get by typing it into
+      // your own terminal in that folder, prompts and all. (Shift+Tab still
+      // walks it through the TUI's own modes.)
+      const claude = await resolveClaude()
+      if (!claude) return false
+      const settings = await ensureHostBridgeFiles(project.id)
+      // Everything else mirrors the container agent (DockerService.execArgs):
+      // the hooks come in through --settings rather than the user's own
+      // settings.json, which a `claude` started anywhere else would pick up, and
+      // the conversation is pinned by id so it survives the app restarting.
+      const argv = ['--settings', settings]
+      if (session.claudeSessionId) {
+        const resume = await hostConversationExists(session.claudeSessionId)
+        argv.push(resume ? '--resume' : '--session-id', session.claudeSessionId)
+      }
+      withoutParentSession(env)
+      env.VIVARIUM_SESSION_ID = session.id
+      file = claude.kind === 'exe' ? claude.path : process.env['ComSpec'] || 'cmd.exe'
+      args = claude.kind === 'exe' ? argv : cmdLine(claude.path, argv)
       cwd = project.basePath
     } else {
       const bin = await this.docker.binaryName()

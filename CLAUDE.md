@@ -31,14 +31,18 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 - `git.ts` — branch detection (reads `.git/HEAD` directly) + "Write branch diff".
 - `clipboard.ts` — Ctrl+V image paste → PNG in the project clip dir (mounted at `/clip`).
 - `claude.ts` — `ClaudeService`: npm `latest` lookup (10-min cache) + per-container version probe.
+- `host.ts` — a host project's agent: which Windows `claude` to run, and whether its conversation
+  already exists in `~/.claude`.
 
 `src/preload/index.ts` — the typed `window.vivarium`. The renderer never touches `ipcRenderer`.
 
 `src/shared/` — `ipc.ts` (`CH`, channel names), `types.ts` (all cross-process types), `models.ts`,
-`mounts.ts`, `theme.ts`. `models.ts` and `mounts.ts` are the only *logic* in `@shared` and earn it
-the same way: both processes name models, and both processes name the container path a mounted
-folder lands on — so a second copy of either rule would let two surfaces disagree about what is
-answering you, or send you to a `/workspace/…` path docker never created. `models.ts` returns
+`mounts.ts`, `projects.ts`, `theme.ts`. `models.ts`, `mounts.ts` and `projects.ts` are the only
+*logic* in `@shared` and earn it the same way: both processes name models, both name the container
+path a mounted folder lands on, and both enforce which session types a project can hold and where
+a session may move — so a second copy of any of them would let two surfaces disagree about what is
+answering you, send you to a `/workspace/…` path docker never created, or offer a move main then
+refuses after killing the pty. `models.ts` returns
 anything it does not recognise **unchanged** — inventing a name is how a chip ends up lying.
 `mounts.ts` carries its own SHA-1 because the renderer has no `node:crypto` and an async digest
 cannot be read during a render; it is byte-exact with node's, which it must be — those eight hex
@@ -156,6 +160,35 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   session, drained at launch and after each container start. **There is no sweep and never will
   be** — the `-workspace` slug holds claude-box's transcripts too. The removal is `rm -rf` with an
   interpolated variable: the safety rests entirely on that uuid coming from `randomUUID()`.
+
+### Host projects
+
+- **A project is a container project unless `Project.kind === 'host'`.** Absent means container, so
+  old config needs no migration; the kind is picked in Add project and **never changes** — a
+  conversation cannot follow a project across the boundary. A host project holds only `agent` and
+  `host-shell` (`@shared/projects`, enforced by the picker, the drop targets *and* main's
+  `addSession`/`moveSession`). Its `mounts` are empty and its `image` is an inert `slim`.
+- **A host agent is plain `claude.exe` in `basePath` — never `--dangerously-skip-permissions`.** The
+  container is what made bypass a sane default; without one, the agent is the same `claude` you
+  would get in your own terminal, prompts and all. Spawned directly (no shell), found by
+  `resolveClaude` on PATH then `~/.local/bin`, resumed by pinned id exactly like a container agent.
+- **Host ptys drop an outer Claude Code's session markers** (`withoutParentSession`). Launch the app
+  from inside a Claude session and Electron inherits `CLAUDE_CODE_CHILD_SESSION` & co.; a host
+  `claude` then thinks it is a child, **saves no transcript**, and every later `--resume` breaks.
+  The list is explicit — `CLAUDE_CODE_*` is also where the user's own configuration lives.
+- **Hooks reach it through a host-flavoured `hooks.json` in the same bridge dir.** Claude Code on
+  Windows runs hook commands in Git Bash, so `hook.sh` is the same script addressed by
+  `C:/…` path. It adds `PermissionRequest` → waiting, because a host agent is asked constantly;
+  nothing reports the *answer*, so `TerminalView` resumes on Enter **or a digit**. The files are
+  written only-if-changed: every host agent spawns at once at launch, and truncating a
+  `hooks.json` a sibling `claude.exe` is parsing makes it run hookless.
+- **An agent never moves into, out of, or between host projects** (`canMoveSession`). Claude files
+  a transcript under the directory it started in and refuses `--resume` from any other, which is
+  also why changing a host project's folder gives its agents **new** conversation ids. Container
+  agents never meet this: every one runs in `/workspace`.
+- **Every docker-facing handler refuses or skips host projects in main** — the lifecycle four,
+  `claudeUpdate`, and the `containerStates` / `claudeStatus` sweeps. Their sessions render at launch
+  like host shells and never get the "Container stopped" placeholder.
 
 ### Terminals
 

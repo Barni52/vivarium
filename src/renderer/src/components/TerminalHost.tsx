@@ -1,5 +1,6 @@
 import React from 'react'
 import type { Project, Session } from '@shared/types'
+import { isHostProject } from '@shared/projects'
 import { useStore } from '../state/store'
 import { ACCENT, MONO, SESSION_TYPES, typeLabel } from '../theme'
 import { TypeIcon } from './Icons'
@@ -84,7 +85,9 @@ export function TerminalHost(): React.ReactElement {
   // (TerminalView) and stays mounted but hidden when another is selected, so
   // scrollback survives switching.
   //
-  //  • host shells need no container, so they come up at app launch;
+  //  • host shells need no container, so they come up at app launch — and so
+  //    does everything in a host project, whose agents are `claude.exe` in a
+  //    folder and have no container to wait for either;
   //  • a running container brings every one of its sessions up — on an explicit
   //    start, and at launch for a container that was already running;
   //  • a live pty outranks the probe, because unmounting runs TerminalView's
@@ -104,24 +107,22 @@ export function TerminalHost(): React.ReactElement {
   // IPC from a cache that is already current and never touches docker. It is kept
   // for cheapness, not survival, which is also why nobody should later "fix" this
   // by adding a type branch.
+  const onHost = (project: Project, session: Session): boolean =>
+    session.type === 'host-shell' || isHostProject(project)
   const toRender = allSessions.filter(
     ({ project, session }) =>
-      session.type === 'host-shell' || !!states[project.id]?.running || !!live[session.id]
+      onHost(project, session) || !!states[project.id]?.running || !!live[session.id]
   )
 
   const sel = allSessions.find(({ session }) => session.id === selected)
   const running = sel ? !!states[sel.project.id]?.running : false
-  const mini = sel
-    ? sel.session.type === 'host-shell'
-      ? 'host'
-      : running
-        ? 'running'
-        : 'stopped'
-    : ''
+  const selOnHost = !!sel && onHost(sel.project, sel.session)
+  const mini = sel ? (selOnHost ? 'host' : running ? 'running' : 'stopped') : ''
   // A selected agent/container session whose container is stopped shows the
   // "start the container" placeholder instead of a terminal (opening one must
-  // not auto-start the container — see main/ipc.ts openSession).
-  const selBlocked = !!sel && sel.session.type !== 'host-shell' && !running
+  // not auto-start the container — see main/ipc.ts openSession). Nothing that
+  // runs on the host has a container to be stopped.
+  const selBlocked = !!sel && !selOnHost && !running
 
   return (
     <div

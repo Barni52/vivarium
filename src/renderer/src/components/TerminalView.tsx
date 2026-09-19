@@ -381,7 +381,15 @@ export function TerminalView({
       // "waiting". Enter is the key that commits any of those choices, so treat
       // it as the answer — resumeAgent is a no-op in every other state, which is
       // why this can't disturb a normal turn. Falls through: Enter is the pty's.
-      if (session.type === 'agent' && e.key === 'Enter') {
+      //
+      // A digit is the other key that commits one: the TUI's option lists take
+      // `1`–`9` as "pick this one" with no Enter after it. That matters most for
+      // a host project's agent, which is plain `claude` and stops at permission
+      // prompts all day — the PermissionRequest hook reports the wait, nothing
+      // reports the answer (see bridge.ts), and "2" is how those are usually
+      // answered. Digits typed into an ordinary prompt reach here too, and are
+      // harmless for the same no-op reason.
+      if (session.type === 'agent' && (e.key === 'Enter' || /^[1-9]$/.test(e.key))) {
         useStore.getState().resumeAgent(session.id)
       }
       // Claude Code: Shift+Enter and Ctrl+Enter insert a newline instead of
@@ -589,6 +597,12 @@ export function TerminalView({
       setLive(session.id, false)
       if (res.reason === 'docker-missing') {
         term.write('\r\n\x1b[31mdocker not found on PATH — start Docker/Rancher Desktop.\x1b[0m\r\n')
+      } else if (res.reason === 'claude-missing') {
+        // A host project's agent is the Windows install, not the image's.
+        term.write(
+          `\r\n\x1b[31mClaude Code for Windows not found — ${res.message ?? 'no claude on PATH'}.\x1b[0m` +
+            '\r\n\x1b[2mInstall it, then restart Vivarium so it sees the new PATH.\x1b[0m\r\n'
+        )
       } else if (res.reason === 'container-stopped') {
         // The TerminalHost placeholder normally covers this; a state race can
         // still land here.

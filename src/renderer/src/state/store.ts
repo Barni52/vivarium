@@ -22,6 +22,7 @@ import type {
   ImageVariant,
   OutputNode,
   Project,
+  ProjectKind,
   SessionType,
   AgentActivity,
   TranscriptHit,
@@ -30,6 +31,7 @@ import type {
 } from '@shared/types'
 import { behindIds } from '../claude'
 import { DEFAULT_EFFORT } from '@shared/models'
+import { canMoveSession, isHostProject, projectHolds, sessionTypesFor } from '@shared/projects'
 import {
   ADD_SESSION_POPOVER,
   MONO,
@@ -116,6 +118,8 @@ export interface DropTarget {
 
 export interface ProjectDraft {
   name: string
+  /** Picked in the Add-Project dialog, read-only in Project settings. */
+  kind: ProjectKind
   basePath: string
   mounts: string[]
   mountDraft: string
@@ -150,6 +154,8 @@ interface MoveTarget {
   index: number
   sessionName: string
   toProjectName: string
+  /** A host shell reopens in a folder, everything else in a container — the wording turns on it. */
+  type: SessionType
   /** Whether the session has a pty right now — the dialog's wording turns on it. */
   live: boolean
 }
@@ -544,6 +550,7 @@ interface AppState {
 
 const emptyDraft = (): ProjectDraft => ({
   name: '',
+  kind: 'container',
   basePath: '',
   mounts: [],
   mountDraft: '',
@@ -1476,6 +1483,7 @@ export const useStore = create<AppState>((set, get) => ({
       st: {
         id: p.id,
         name: p.name,
+        kind: isHostProject(p) ? 'host' : 'container',
         basePath: p.basePath,
         mounts: [...p.mounts], // absolute paths; displayed relative in the dialog
         mountDraft: '',
@@ -1494,7 +1502,11 @@ export const useStore = create<AppState>((set, get) => ({
     const { width, height } = ADD_SESSION_POPOVER
     const top = Math.max(40, Math.min(anchor.top, window.innerHeight - height - 8))
     const left = Math.min(anchor.right + 8, window.innerWidth - width - 16)
-    const type = get().lastSessionType
+    // The last type you made, unless this project cannot hold it — a chat
+    // created a moment ago in a container project is not a host project's
+    // default. Its own first type (the agent) is, then.
+    const last = get().lastSessionType
+    const type = projectHolds(p, last) ? last : sessionTypesFor(p)[0]
     set({
       dialog: 'addSession',
       addSession: {
@@ -1536,8 +1548,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   createProject: async () => {
     const { ap } = get()
+    // A host project's mounts/image/port are dropped by main whatever arrives;
+    // the draft keeps them only so flipping the chooser back loses nothing.
     const config = await window.vivarium.createProject({
       name: ap.name,
+      kind: ap.kind,
       basePath: ap.basePath,
       // draft.mounts already hold absolute paths (converted at add-time)
       mounts: ap.mounts,
@@ -1567,7 +1582,8 @@ export const useStore = create<AppState>((set, get) => ({
     })
     set({ config, dialog: null, st: null })
     // Settings changes only take effect on a fresh container. Recreate if it was
-    // running so the new mounts/image/port apply immediately.
+    // running so the new mounts/image/port apply immediately. (A host project
+    // never reads as running — it has no container to recreate.)
     if (wasRunning) {
       await window.vivarium.recreateContainer(st.id)
     }
@@ -1634,6 +1650,9 @@ export const useStore = create<AppState>((set, get) => ({
     const to = s.config.projects.find((p) => p.id === toProjectId)
     const session = from?.sessions.find((x) => x.id === sessionId)
     if (!from || !to || !session || from === to) return
+    // The rows refuse the drop already; this is the last line before a dialog
+    // offers a move main would then refuse.
+    if (!canMoveSession(from, to, session.type)) return
     // Clear the drag here rather than leaving it to onDragEnd: the confirm dialog
     // takes focus the moment it opens, and a drag whose end event never lands
     // would leave every row still showing its drop indicator.
@@ -1648,6 +1667,7 @@ export const useStore = create<AppState>((set, get) => ({
         index,
         sessionName: session.name,
         toProjectName: to.name,
+        type: session.type,
         live: !!s.live[sessionId]
       }
     })
@@ -1761,6 +1781,9 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   runContainerOp: async (projectId, op) => {
+    // Nothing offers a host project a container op, and main refuses one; this
+    // keeps the amber square from pulsing on a row that has no container.
+    if (isHostProject(get().config.projects.find((p) => p.id === projectId))) return
     // The in-flight op drives the amber pulsing square on the project row —
     // a cold start (image build, mounts) can take minutes, and without it the
     // only feedback was the 3s state poll eventually flipping the indicator.

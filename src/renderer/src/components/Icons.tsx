@@ -60,6 +60,21 @@ export const Folder = ({ size = 15, color = 'currentColor', style }: P): React.R
     style
   )
 
+// A host project: a desktop monitor on its stand — "this runs on the PC", where
+// a container project is a folder that gets mounted into the box. Chosen to
+// share nothing with its two neighbours: the Folder it replaces in the sidebar,
+// and the HostWindow session glyph that will usually sit right under it (a
+// frame with a title bar and a prompt, and no stand).
+export const Monitor = ({ size = 15, color = 'currentColor', style }: P): React.ReactElement =>
+  svg(
+    size,
+    <>
+      <rect x="1.6" y="2.4" width="12.8" height="8.6" rx="1.2" stroke={color} strokeWidth="1.1" />
+      <path d="M8 11v2.4M5.2 13.6h5.6" stroke={color} strokeWidth="1.1" strokeLinecap="round" />
+    </>,
+    style
+  )
+
 // Box with an arrow leaving its top-right corner — the OS "open in external app"
 // convention. Used to open the shared folder in Explorer.
 export const OpenExternal = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>

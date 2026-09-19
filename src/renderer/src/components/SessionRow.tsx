@@ -1,5 +1,6 @@
 import React from 'react'
 import type { Project, Session } from '@shared/types'
+import { canMoveSession } from '@shared/projects'
 import { useStore } from '../state/store'
 import { ACCENT, MONO } from '../theme'
 import { TypeIcon, Pencil, Close, Refresh, ThinkingDots } from './Icons'
@@ -187,8 +188,20 @@ export function SessionRow({ project, session }: { project: Project; session: Se
       // is how you land a session at a chosen position in another project. The
       // dragged row itself is skipped so it can't target itself.
       onDragOver={(e) => {
-        const d = useStore.getState().drag
+        const st = useStore.getState()
+        const d = st.drag
         if (d?.kind !== 'session' || d.id === session.id) return
+        // From another project, only what this one can take (see
+        // canMoveSession) — otherwise not a target at all, the same refusal
+        // ProjectRow gives.
+        if (d.projectId && d.projectId !== project.id) {
+          const from = st.config.projects.find((p) => p.id === d.projectId)
+          const moving = from?.sessions.find((x) => x.id === d.id)
+          if (!moving || !canMoveSession(from, project, moving.type)) {
+            if (st.dropTarget) setDropTarget(null)
+            return
+          }
+        }
         e.preventDefault()
         // The enclosing sessions container also accepts session drags (it is the
         // "append to this project" surface). Keep this row's precise before/after
