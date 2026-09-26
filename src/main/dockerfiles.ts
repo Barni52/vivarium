@@ -5,7 +5,7 @@
 // Bump IMAGE_VERSION to force stale images to rebuild. It is written as a label
 // and checked before every container start.
 
-export const IMAGE_VERSION = '1'
+export const IMAGE_VERSION = '2'
 
 export const SLIM_IMAGE = 'vivarium:slim'
 export const FULL_IMAGE = 'vivarium:full'
@@ -26,6 +26,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
         git curl wget gnupg ca-certificates sudo less jq procps openssh-client socat \\
         ripgrep unzip xz-utils ncurses-term \\
     && rm -rf /var/lib/apt/lists/*
+
+# Python and Java in *every* container project, slim included: an agent that
+# reaches for a quick script or a JVM tool should find one rather than spend a
+# turn discovering it has to apt-get it. The full image builds FROM this one,
+# so it inherits both. Python is Debian's (3.11 on bookworm) with pip and venv;
+# bookworm's pip refuses system-wide installs (PEP 668), so a project wants a
+# venv. python-is-python3 makes a bare "python" answer too.
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+        python3 python3-pip python3-venv python-is-python3 \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Temurin JDK 25 (mvnw downloads Maven itself into ~/.m2)
+RUN wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \\
+    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \\
+    && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \\
+    && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64
 
 RUN npm install -g @anthropic-ai/claude-code
 
@@ -67,13 +84,7 @@ export function fullDockerfile(): string {
   return `FROM ${SLIM_IMAGE}
 USER root
 
-# Temurin JDK 25 (mvnw downloads Maven itself into ~/.m2)
-RUN wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \\
-    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \\
-    && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \\
-    && rm -rf /var/lib/apt/lists/*
-ENV JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64
-
+# Java and Python come from the slim base.
 RUN npm install -g pnpm@11.5.2 playwright
 
 # headless Chromium (+ its OS libs) for in-container browser testing; browsers
