@@ -12,7 +12,6 @@ import type {
   ChatAttachment,
   ChatEntry,
   ChatEvent,
-  ChatMode,
   ChatEffort,
   ChatModelOption,
   ChatOpenResult,
@@ -62,8 +61,13 @@ import { ClaudeService } from './claude'
  * DockerService.execArgs), so this is that spelling and not a display name.
  * Changing a session's model in the picker overwrites it and nothing here
  * reaches back in — this seeds, it does not enforce.
+ *
+ * Opus 5.5 needs Claude Code 2.1.280 or later; an older CLI lists it only as a
+ * disabled placeholder. A new container is brought up to the published CLI at
+ * creation (DockerService.freshenClaude), so a new chat in a new project gets
+ * it; an older container needs the Claude Code dialog's update first.
  */
-const DEFAULT_CHAT_MODEL = 'claude-opus-5'
+const DEFAULT_CHAT_MODEL = 'claude-opus-5-5'
 
 /**
  * `store` is passed in rather than made here: main/index.ts reads the saved
@@ -126,19 +130,6 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       void store.mutate((cfg) => {
         const p = cfg.projects.find((x) => x.id === projectId)
         if (p) p.slashCommands = commands
-        return cfg
-      })
-    },
-    (sessionId, mode) => {
-      // The same persistence chatSetMode performs, for a mode change that did not
-      // come from the toggle: approving a plan leaves plan mode, and this record is
-      // what every later spawn restores the session to, so a reopen has to agree
-      // with the header rather than plan all over again.
-      void store.mutate((cfg) => {
-        for (const p of cfg.projects) {
-          const s = p.sessions.find((x) => x.id === sessionId)
-          if (s) s.mode = mode
-        }
         return cfg
       })
     },
@@ -447,12 +438,9 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
             name,
             type,
             claudeSessionId,
-            // A new chat starts in bypass, matching today's terminal agent:
-            // nothing in daily use gets slower and no habit needs retraining.
-            mode: type === 'chat' ? 'bypassPermissions' : undefined,
-            // …and on a model of this app's choosing rather than the CLI's. Chat
-            // only, for the same reason `mode` is: nothing reads `Session.model`
-            // for a terminal agent — that one is `--model`-less on purpose and
+            // A new chat starts on a model of this app's choosing rather than the
+            // CLI's. Chat only: nothing reads `Session.model` for a terminal
+            // agent — that one is `--model`-less on purpose and
             // takes its model from the CLI's own config and its own `/model` —
             // so writing one there would be a stored preference with no effect.
             model: type === 'chat' ? DEFAULT_CHAT_MODEL : undefined,
@@ -999,20 +987,6 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     (_e, sessionId: string, requestId: string, answer: ChatAnswer): Promise<void> =>
       chat.answer(sessionId, requestId, answer)
   )
-
-  ipcMain.handle(CH.chatSetMode, async (_e, sessionId: string, mode: ChatMode): Promise<Config> => {
-    await chat.setMode(sessionId, mode)
-    // Persisted, deliberately: a per-session user preference about how the agent
-    // runs is not runtime state observed from Docker, which is exactly what
-    // config.json is for. Restored at reopen as the launch --permission-mode.
-    return store.mutate((cfg) => {
-      for (const p of cfg.projects) {
-        const s = p.sessions.find((x) => x.id === sessionId)
-        if (s) s.mode = mode
-      }
-      return cfg
-    })
-  })
 
   ipcMain.handle(CH.chatSetModel, async (_e, sessionId: string, model: string): Promise<Config> => {
     // Persisted only if the process actually took it. `Session.model` is what

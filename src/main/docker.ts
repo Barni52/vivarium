@@ -1163,36 +1163,43 @@ export class DockerService {
       args.push('--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose')
       // Load-bearing and undocumented — it is not in `claude --help`. A sentinel,
       // not a real MCP server: without it a raw `-p` run **auto-denies every
-      // prompt**, *and* AskUserQuestion / EnterPlanMode / ExitPlanMode are not in
-      // the session's tool list at all (verified by diffing init.tools with and
-      // without it). Every turn needs it, including a slash-command turn.
+      // prompt**, *and* AskUserQuestion is not in the session's tool list at all
+      // (verified by diffing init.tools with and without it). Every turn needs
+      // it, including a slash-command turn.
       args.push('--permission-prompt-tool', 'stdio')
       // Token deltas, so prose paints as it is generated rather than landing in
       // one block at the end. Chunky over docker exec (~16 events in 5s), but real.
       args.push('--include-partial-messages')
+      // Without this, thinking blocks reach the chat empty. A `-p` stream-json
+      // run asks the API for no display at all, and the API's default on current
+      // models is to omit the text: every block arrives as `"thinking": ""` plus a
+      // signature (verified on 2.1.283 against Opus 5.5 — one empty delta, versus
+      // a dozen `thinking_delta`s of prose with this flag). It is a *summary* of
+      // the thinking, not the raw text; `highlights` also exists but the API only
+      // accepts it from sessions Anthropic hosts. The flag rather than the
+      // `showThinkingSummaries` setting, because settings.json is shared with
+      // claude-box and would change the user's TUI sessions too.
+      args.push('--thinking-display', 'summarized')
       // Required for the live sub-log to match the settled sibling file block for
       // block. Without it the stream withholds a subagent's prose and thinking, so
       // the sub-log would *grow paragraphs* at completion — a systematic twitch,
       // which is not what the turn-end settle is meant to expose.
       args.push('--forward-subagent-text')
-      // **Always bypassPermissions, even for a session saved in `plan`** — plan is
-      // then entered over the control channel at spawn (see ChatService.start).
-      // Launching directly in plan mode is a one-way door, for two reasons read off
-      // the CLI (2.1.220) rather than guessed:
-      //   1. `isBypassPermissionsModeAvailable` is decided **once**, at startup,
-      //      from `--permission-mode bypassPermissions || --dangerously-skip-permissions`,
-      //      and every later `set_permission_mode bypassPermissions` is refused
-      //      against it for the life of the process ("the session was not launched
-      //      with --dangerously-skip-permissions"). The header toggle and the plan
-      //      card were both asking for a mode the process could never enter.
-      //   2. ExitPlanMode's approval path ends by setting the mode to
-      //      `prePlanMode ?? 'default'`, and `prePlanMode` is only recorded by a
-      //      *transition* into plan mode. Launched in plan there was no transition,
-      //      so approving a plan landed the session in `default` — asking about
-      //      every edit, which is not one of this app's two modes.
-      // Entering plan mode from bypass answers both: bypass stays available, and the
-      // CLI's own plan exit restores exactly the mode it came from.
+      // **Always bypassPermissions; there is no other mode.** Plan mode was
+      // removed — the chat used to offer a plan/bypass toggle and an approval card,
+      // and nobody used it. Re-checked on 2.1.283: `init` reports
+      // bypassPermissions and Write, Bash and a write under `.claude/` all run
+      // without a single `can_use_tool`. If a managed setting or a future CLI ever
+      // stops that, ChatService.init says so in the log.
       args.push('--permission-mode', 'bypassPermissions')
+      // …and the plan tools are taken away, not merely unused. Bypass does not
+      // remove them (init.tools lists both), so the model can still enter plan
+      // mode *by itself* — and with the approval card gone there would be no way
+      // back out: ExitPlanMode would be a permission prompt nobody can answer
+      // properly. One comma-joined value, because the flag is variadic and a
+      // second bare word would be read as another of its values; verified on
+      // 2.1.283 that both disappear from init.tools and AskUserQuestion stays.
+      args.push('--disallowedTools', 'EnterPlanMode,ExitPlanMode')
       // Vivarium owns the model: a chip reading "opus" at reopen while the process
       // actually spawned on the CLI's configured default is a reading that lies
       // about a live fact, in a header made entirely of readings.

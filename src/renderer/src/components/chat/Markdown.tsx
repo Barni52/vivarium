@@ -37,11 +37,12 @@ import { langFor, tokenize } from './highlight'
 /**
  * Gap between two block-level things. The container cancels the last one.
  *
- * 12 rather than 14, with the type a point smaller and its leading tighter: the
- * gap between blocks has to stay visibly larger than the gap between lines
- * *within* one, and that is a ratio, not a constant.
+ * The gap between blocks has to stay visibly larger than the gap between lines
+ * *within* one, and that is a ratio, not a constant: at `proseLine` 1.4 a wrap
+ * is ~5px of air, a hard break adds `lineBreakGap` to that, and a paragraph
+ * break is this — three steps, each clearly more than the last.
  */
-const BLOCK_GAP = 12
+const BLOCK_GAP = 16
 
 // ---- inline ---------------------------------------------------------------
 
@@ -605,7 +606,12 @@ function Paragraph({ lines, ctx }: { lines: string[]; ctx: Ctx }): React.ReactEl
     const text = raw.replace(/( {2,}|\\)$/, '').trim()
     nodes.push(...inlineNodes(broke ? text : ` ${text}`))
     broke = hard
-    if (hard && n < lines.length - 1) nodes.push(<br key={`br${n}`} />)
+    // A block rather than a `<br>`: a `<br>` can only end the line, and a hard
+    // break is meant to sit further apart than a wrap. The empty block splits
+    // the inline flow exactly where the `<br>` did and brings its own height.
+    // Copy is unchanged — neither contributes to `Range.toString()`.
+    if (hard && n < lines.length - 1)
+      nodes.push(<span key={`br${n}`} style={{ display: 'block', height: TYPE.lineBreakGap }} />)
   })
   return (
     <div

@@ -10,7 +10,6 @@ import type {
   ChatEffort,
   ChatEntry,
   ChatEvent,
-  ChatMode,
   ChatModelOption,
   ChatOpenResult,
   ChatRewindRange,
@@ -21,17 +20,17 @@ import type {
   Project,
   Session
 } from '@shared/types'
-import { DEFAULT_EFFORT, isEffort, sameModel } from '@shared/models'
+import { DEFAULT_EFFORT, isEffort, modelName, sameModel } from '@shared/models'
 import type { DockerService } from './docker'
 import {
   ATTACH_CLOSE,
   ATTACH_OPEN,
   ChatMapper,
+  blockIdAt,
   completeLines,
   parseNdjson,
   parseQuestions,
   takeTurn,
-  textBlockId,
   typedText,
   truncateBody,
   walkTranscript
@@ -512,22 +511,27 @@ const FALLBACK_MODELS: ChatModelOption[] = [
  * `stream_event` numbers content blocks across the whole message while the
  * transcript writes one block per line (index always 0), so the delta's index
  * cannot be used as an id — it is translated here into the per-type ordinal
- * `ChatMapper` counts, via `textBlockId`. Only text blocks are painted, so only
- * text blocks claim an ordinal, and they claim it in arrival order, which is the
- * order the mapper will see them in too.
+ * `ChatMapper` counts, via `blockIdAt`. Text and thinking blocks are painted,
+ * so those two claim ordinals, each counted separately and in arrival order,
+ * which is the order the mapper will see them in too.
  */
 interface Streaming {
   msgId: string
   at: number
   /** content-block index → the row id it was given */
   ids: Map<number, string>
+  /** content-block index → which kind of row it paints */
+  kinds: Map<number, StreamedBlock>
   /** text accumulated per content-block index */
   text: Map<number, string>
-  /** how many text blocks this message has opened */
-  texts: number
+  /** how many blocks of each kind this message has opened */
+  opened: Map<StreamedBlock, number>
   /** block indices changed since the last flush (see STREAM_FLUSH_MS) */
   dirty: Set<number>
 }
+
+/** The content blocks painted from deltas: prose, and the summary of thinking. */
+type StreamedBlock = 'text' | 'thinking'
 
 /**
  * A message typed while a turn was running, waiting for its own turn.
@@ -678,17 +682,8 @@ interface Live {
   slowTurn: boolean
   /** set by an interrupt so the turn's `idle` raises no attention flag */
   interrupted: boolean
-  /**
-   * A `set_permission_mode` is in flight, so the CLI's *reported* mode is stale.
-   *
-   * `init` carries `permissionMode` and is otherwise the authority on what the
-   * process is actually in — except while we are mid-change, and at spawn a `plan`
-   * session always is: the switch rides on stdin behind a boot that takes a second
-   * or more, and the init frame that overtakes it truthfully reports the launch
-   * mode. Without this the chip flips to bypass and back on every plan session's
-   * open, which is the header lying about the one fact the toggle exists for.
-   */
-  modeSwitch: boolean
+  /** an `init` has already been caught reporting a mode other than bypass */
+  modeWarned: boolean
   /**
    * A generated name is owed at the next settle.
    *
@@ -744,13 +739,6 @@ export class ChatService {
     private onRewind: (sessionId: string, ranges: ChatRewindRange[]) => void,
     /** cache a project's slash-command names so a cold chat has a menu */
     private onCommands: (projectId: string, commands: string[]) => void,
-    /**
-     * persist a mode change this app did not receive from the toggle — approving a
-     * plan is one, and it is a real change to a persisted preference: without it
-     * config still says `plan`, so closing the chat and reopening it mid-implementation
-     * would relaunch the agent into the mode the approval just left.
-     */
-    private onMode: (sessionId: string, mode: ChatMode) => void,
     /**
      * persist a name this service generated, and mark it as generated
      * (`Session.autoName`) so a later one may replace it and a human rename may
@@ -825,7 +813,7 @@ export class ChatService {
       spoke: false,
       slowTurn: false,
       interrupted: false,
-      modeSwitch: false,
+      modeWarned: false,
       titleWanted: false,
       titling: false,
       closing: false
@@ -842,6 +830,17 @@ export class ChatService {
     // exactly the moment you look at it. The control channel, unlike the message
     // stream, is live from spawn.
     void this.refreshContext(l)
+    // The model list, for the same reason and on the same channel: `reading()`
+    // spells an alias out from it until the first turn reports the resolved id,
+    // and without it a chat opened on `opus` reads `Opus` with no generation for
+    // as long as nobody has opened the picker. One control request, no tokens,
+    // cached per project — a sibling chat's open has usually paid for it already.
+    void this.listModels(session.id, l.project.id)
+      .then(() => {
+        if (this.live.get(session.id) !== l) return
+        this.emit({ kind: 'meta', sessionId: session.id, model: this.reading(l) ?? undefined })
+      })
+      .catch(() => {})
     // Same shape and the same reason: the menu this session opens with is the
     // *previous* session's list until a turn produces an init, and a skill
     // written since then is missing from it. Fire-and-forget for the same
@@ -877,7 +876,6 @@ export class ChatService {
       entries: this.wireEntries(l.entries.slice(-MOUNT_WINDOW)),
       total: l.entries.length,
       todos: [...l.todos.values()],
-      mode: l.session.mode ?? 'bypassPermissions',
       model: this.reading(l),
       // Always a level, and no `reading()`-style reconciliation, because there
       // is nothing to reconcile against: the CLI reports the effort nowhere.
@@ -911,7 +909,13 @@ export class ChatService {
   private reading(l: Live): string | null {
     const chosen = l.session.model ?? null
     if (!chosen) return l.reported
-    if (!l.reported) return chosen
+    // Nothing reported yet — a chat that has not had a turn in this process,
+    // which is every chat right after it opens. Returning the bare pick here is
+    // what left the chip and the composer reading `Opus` while the picker's own
+    // row said `Opus 5.5`: the alias has no generation in it, and the report that
+    // would have supplied one only comes with the first turn's `init`. The
+    // picker's list knows the number now (it is fetched at open for this).
+    if (!l.reported) return this.resolvedName(l, chosen, null)
     if (sameModel(chosen, l.reported)) return l.reported
     // Disagreement: the pick stands, but spelled as fully as this app can spell
     // it. `Session.model` is an alias, and an alias has no generation in it — so
@@ -1168,30 +1172,6 @@ export class ChatService {
     })
     proc.on('error', () => this.onExit(l, 1))
     proc.on('close', (code) => this.onExit(l, code ?? 0))
-    // A `plan` session is launched in bypassPermissions like every other one and
-    // *transitioned* into plan mode here — execArgs documents why launching in plan
-    // is a door that does not open again. Written at spawn, so it is the first line
-    // the CLI reads on stdin: a turn cannot be sent until `open` has returned, and
-    // that is after this, so no turn can overtake the switch.
-    if (l.session.mode === 'plan') {
-      l.modeSwitch = true
-      void this.request(l, { subtype: 'set_permission_mode', mode: 'plan' }).then((r) => {
-        l.modeSwitch = false
-        // Told again on purpose: the spawn-time `init` frame reports
-        // bypassPermissions — truthfully, that is what the process started in — so
-        // without this the chip would sit on bypass while the agent plans.
-        if (r.ok) {
-          this.emit({ kind: 'meta', sessionId: l.session.id, mode: 'plan' })
-          return
-        }
-        // Only the *guarded* modes (bypassPermissions, auto) can be refused, so this
-        // is a should-not-happen — but the mode the CLI is in is the one the header
-        // has to show, and the lie the other way round (claiming plan while the
-        // agent may write) is the dangerous one.
-        l.session = { ...l.session, mode: 'bypassPermissions' }
-        this.emit({ kind: 'meta', sessionId: l.session.id, mode: 'bypassPermissions' })
-      })
-    }
     return true
   }
 
@@ -1481,17 +1461,34 @@ export class ChatService {
       l.commandsAt = 0
       this.onCommands(l.project.id, commands)
     }
-    // Withheld while a switch of our own is outstanding: this frame reports what
-    // the process is in *now*, which is not what it is about to be in (see
-    // Live.modeSwitch).
-    const mode = l.modeSwitch ? '' : str(f.permissionMode)
     this.emit({
       kind: 'meta',
       sessionId: l.session.id,
       model: model ? this.reading(l) ?? undefined : undefined,
-      mode: mode === 'plan' || mode === 'bypassPermissions' ? mode : undefined,
       commands: commands.length ? commands : undefined
     })
+    // Every chat runs in bypassPermissions and nothing on screen says so any
+    // more — there is no mode to pick, so there is no chip. What replaces the
+    // chip is this: the one case worth hearing about is the CLI *not* being in
+    // bypass (a managed setting can disable it outright, and a Claude Code
+    // release can change what the flag does), because then every tool asks and
+    // the session reads as mysteriously stuck. `init` reports the mode each turn;
+    // said once per process, in the log, where the stuck turn is.
+    const mode = str(f.permissionMode)
+    if (mode && mode !== 'bypassPermissions' && !l.modeWarned) {
+      l.modeWarned = true
+      this.appendEntries(l, [
+        {
+          id: `mode:${Date.now()}`,
+          role: 'stop',
+          at: Date.now(),
+          turn: activeTurn(l),
+          kind: 'stop',
+          text: `Claude Code is in ${mode} mode, not bypassPermissions — tools will ask before they run`,
+          tone: 'alert'
+        }
+      ])
+    }
   }
 
   /** Token deltas — prose paints as it is generated instead of landing at once. */
@@ -1507,8 +1504,9 @@ export class ChatService {
         msgId: str(msg?.id) || 'stream',
         at: Date.now(),
         ids: new Map(),
+        kinds: new Map(),
         text: new Map(),
-        texts: 0,
+        opened: new Map(),
         dirty: new Set()
       }
       // The message's opening usage: input and cache are already final here (the
@@ -1533,18 +1531,34 @@ export class ChatService {
     }
     if (kind !== 'content_block_delta') return
     const delta = obj(ev.delta)
-    if (str(delta?.type) !== 'text_delta') return
+    const deltaType = str(delta?.type)
+    // Thinking arrives as text only because the chat is spawned with
+    // `--thinking-display summarized` (see DockerService.execArgs); without it
+    // the block streams one empty delta and a signature, and nothing is painted.
+    const type: StreamedBlock | null =
+      deltaType === 'text_delta' ? 'text' : deltaType === 'thinking_delta' ? 'thinking' : null
+    if (!type) return
     const s = l.streaming
     if (!s) return
+    const piece = str(type === 'text' ? delta?.text : delta?.thinking)
     const index = num(ev.index) ?? 0
     if (!s.ids.has(index)) {
+      // The mapper claims an ordinal only for a block it pushes a row for, and it
+      // pushes no row for an empty thinking block — which is what an omitted one
+      // is, and what a CLI that ignored the display flag would send. Claiming one
+      // here anyway would number every later thinking block one ahead of its
+      // settled row, and each would render twice until the turn ended.
+      if (type === 'thinking' && !piece) return
       // The delta's index counts blocks across the whole message; the mapper
       // counts them per type, because the transcript writes one block per line
       // and always calls it index 0. Translating here is what keeps a partial row
       // and its settled row the same row (see ChatMapper.blockId).
-      s.ids.set(index, textBlockId(s.msgId, s.texts++))
+      const ordinal = s.opened.get(type) ?? 0
+      s.opened.set(type, ordinal + 1)
+      s.ids.set(index, blockIdAt(s.msgId, type, ordinal))
+      s.kinds.set(index, type)
     }
-    s.text.set(index, (s.text.get(index) ?? '') + str(delta?.text))
+    s.text.set(index, (s.text.get(index) ?? '') + piece)
     s.dirty.add(index)
     // Coalesced rather than shipped per token — see STREAM_FLUSH_MS. The timer
     // is armed once per window and cleared by the flush itself, so a long
@@ -1575,14 +1589,14 @@ export class ChatService {
     for (const index of [...s.dirty].sort((a, b) => a - b)) {
       const id = s.ids.get(index)
       if (id === undefined) continue
-      rows.push({
-        id,
-        role: 'claude',
-        at: s.at,
-        turn: activeTurn(l),
-        kind: 'text',
-        md: s.text.get(index) ?? ''
-      })
+      const md = s.text.get(index) ?? ''
+      // The same row shapes ChatMapper.assistant pushes for the settled blocks,
+      // so the `assistant` frame and the settle upsert over these in place.
+      rows.push(
+        s.kinds.get(index) === 'thinking'
+          ? { id, role: 'think', at: s.at, turn: activeTurn(l), kind: 'thinking', md }
+          : { id, role: 'claude', at: s.at, turn: activeTurn(l), kind: 'text', md }
+      )
     }
     s.dirty.clear()
     if (rows.length) this.upsert(l, rows)
@@ -1893,12 +1907,14 @@ export class ChatService {
 
   // ---- the control channel ------------------------------------------------
   /**
-   * Tool permission, ExitPlanMode and AskUserQuestion all arrive as the *same*
-   * `can_use_tool` request and are answered with the same result. One handler,
-   * not three — and `requires_user_interaction: true` is the CLI asserting the
-   * native-card requirement rather than us preferring it: one-tap Approve/Deny
-   * must not be offered, the tool's card *is* the user-interaction surface.
-   * bypassPermissions does not suppress either blocking tool.
+   * Tool permission and AskUserQuestion both arrive as the *same* `can_use_tool`
+   * request and are answered with the same result. One handler, not two — and
+   * `requires_user_interaction: true` is the CLI asserting the native-card
+   * requirement rather than us preferring it: one-tap Approve/Deny must not be
+   * offered, the tool's card *is* the user-interaction surface.
+   * bypassPermissions does not suppress AskUserQuestion. ExitPlanMode used to be
+   * the third; the plan tools are now disallowed at spawn (see execArgs), so it
+   * cannot ask.
    */
   private controlRequest(l: Live, f: Json): void {
     const requestId = str(f.request_id)
@@ -1921,16 +1937,13 @@ export class ChatService {
     const input = obj(req.input) ?? {}
     const card: ChatBlockingCard = {
       requestId,
-      kind: toolName === 'ExitPlanMode' ? 'plan' : toolName === 'AskUserQuestion' ? 'question' : 'tool',
+      kind: toolName === 'AskUserQuestion' ? 'question' : 'tool',
       toolName,
       toolUseId: str(req.tool_use_id) || undefined,
       title:
-        toolName === 'ExitPlanMode'
-          ? 'Plan awaiting approval'
-          : toolName === 'AskUserQuestion'
-            ? 'Claude has a question'
-            : str(req.description) || `Allow ${toolName}?`,
-      md: toolName === 'ExitPlanMode' ? str(input.plan) : undefined,
+        toolName === 'AskUserQuestion'
+          ? 'Claude has a question'
+          : str(req.description) || `Allow ${toolName}?`,
       questions: toolName === 'AskUserQuestion' ? parseQuestions(input) : undefined,
       at: Date.now()
     }
@@ -1941,7 +1954,7 @@ export class ChatService {
     // `waiting` is *any* pending can_use_tool, not just the two
     // requires_user_interaction tools: bypass does not dissolve the
     // working-directory guard, so an out-of-mounts Read still prompts, and that
-    // blocks the turn on a human just as much as a plan does. The hook bridge
+    // blocks the turn on a human just as much as a question does. The hook bridge
     // cannot see this case at all, which makes chat's reading strictly more
     // correct than the pty's rather than an approximation of it.
     this.setActivity(l, 'waiting')
@@ -2244,8 +2257,8 @@ export class ChatService {
     // answered first and then the turn is cut — the defensive order, and the one
     // confirmed on the host: the interrupt acked `success`, the turn ended
     // `aborted_streaming`, the process survived and the next turn returned
-    // normally. `deny` alone never ends anything, since the agent re-calls
-    // ExitPlanMode within the same turn.
+    // normally. `deny` alone never ends anything, since the agent carries on with
+    // the denial as a tool result within the same turn.
     for (const [requestId] of l.pending) {
       this.respond(l, requestId, { behavior: 'deny', message: 'Interrupted by the user.' })
     }
@@ -2315,7 +2328,9 @@ export class ChatService {
 
     // Newest first, down to and including the picked one — popping the target is
     // what "revert *to* this message" means: it comes off the conversation and
-    // comes back in the composer.
+    // comes back in the composer. `users` holds turn openers only, never a tool
+    // result, so a loop that stops partway still leaves a history the API takes
+    // (see `opensTurn` in chatMapper).
     let popped = 0
     let landed: string | null = null
     let prefill: string | null = null
@@ -2420,29 +2435,7 @@ export class ChatService {
     if (!l) return
     const input = l.inputs.get(requestId) ?? {}
 
-    if (answer.behavior === 'plan-approve') {
-      // A plain allow, and deliberately **no** `updatedPermissions: setMode`. That
-      // suggestion was inert: ExitPlanMode's own tool call runs *after* this
-      // response and ends by setting the mode to `prePlanMode ?? 'default'`,
-      // overwriting whatever the host asked for — which is how "Approve & run" used
-      // to leave the session in `default`, prompting for every edit, while the chip
-      // read bypass. What makes approval land in bypass now is upstream of the card:
-      // the process is launched in bypassPermissions and transitions into plan mode,
-      // so `prePlanMode` *is* bypassPermissions and the CLI restores it itself (see
-      // start() and docker.execArgs). With two modes there is nothing else approval
-      // could mean, so the reading and the persisted preference follow it.
-      this.respond(l, requestId, { behavior: 'allow', updatedInput: input })
-      l.session = { ...l.session, mode: 'bypassPermissions' }
-      this.emit({ kind: 'meta', sessionId, mode: 'bypassPermissions' })
-      this.onMode(sessionId, 'bypassPermissions')
-    } else if (answer.behavior === 'plan-deny') {
-      // A plain deny. The agent takes the note and re-calls ExitPlanMode within
-      // the same turn; there is no PostToolUse asymmetry here, because *we* write
-      // the response that ends the wait — approve and deny are one line of our own
-      // code either way, and the TerminalView Esc/Enter heuristics have no
-      // equivalent and must not be reproduced.
-      this.respond(l, requestId, { behavior: 'deny', message: answer.message })
-    } else if (answer.behavior === 'question' && answer.clarify) {
+    if (answer.behavior === 'question' && answer.clarify) {
       // "Chat about this" is a **deny**, not an empty answer — an `allow` with no
       // answers reads as "the user ignored me" and the agent carries on with its
       // own guess. The prose is the CLI's own: it names the questions, carries
@@ -2495,43 +2488,48 @@ export class ChatService {
     this.armSilence(l)
   }
 
-  /** Accepted mid-conversation and even mid-turn, which is what makes it a toggle. */
-  async setMode(sessionId: string, mode: ChatMode): Promise<void> {
-    const l = this.live.get(sessionId)
-    if (!l) return
-    const previous = l.session.mode ?? 'bypassPermissions'
-    l.session = { ...l.session, mode }
-    l.modeSwitch = true
-    const r = await this.request(l, { subtype: 'set_permission_mode', mode })
-    l.modeSwitch = false
-    if (r.ok || mode === previous) return
-    // The refusal used to be dropped on the floor, and that is what hid the
-    // launched-in-plan bug for a version: the chip moved, the CLI did not, and the
-    // next tool call asked for permission from a session whose header promised it
-    // never would. bypassPermissions is the refusable one (settings or a feature
-    // gate can disable it outright); main is the authority on what the process is
-    // actually in, so the reading goes back.
-    l.session = { ...l.session, mode: previous }
-    this.emit({ kind: 'meta', sessionId, mode: previous })
-  }
-
   async setModel(sessionId: string, model: string): Promise<boolean> {
     const l = this.live.get(sessionId)
     if (!l) return true // persisted anyway; it applies as --model at the next spawn
+    // A placeholder for a model this CLI cannot run (see ChatModelOption.disabled).
+    // The menu never offers it, but the value arrives over IPC, and persisting it
+    // would put it on `--model` at every later spawn.
+    if (this.models.get(l.project.id)?.some((m) => m.value === model && m.disabled)) {
+      this.emit({ kind: 'meta', sessionId, model: this.reading(l) ?? undefined })
+      return false
+    }
     const r = await this.request(l, { subtype: 'set_model', model })
     if (!r.ok) {
-      // **Never swallowed**, the same rule `setMode` follows and for the same
-      // reason: the renderer painted the pick the moment it was clicked, so a
+      // **Never swallowed**: the renderer painted the pick the moment it was clicked, so a
       // refusal that returns quietly leaves the chip naming a model the process
       // was never put on — and the caller persists `Session.model` on the
       // strength of this answer, which would make the lie survive a restart. The
       // reading goes back to what the process is actually on, and `false` stops
       // the write (see the chatSetModel handler).
       this.emit({ kind: 'meta', sessionId, model: this.reading(l) ?? undefined })
+      // …and says why, in the log. Putting the chip back is honest but on its own
+      // it reads as the picker being broken: the CLI refuses with a reason worth
+      // reading — "Usage credits are required for this model" is the one met in
+      // practice, for Fable — and a click that springs back with no word is
+      // indistinguishable from a click that was lost. Its own id per refusal, since
+      // the same pick can be refused twice; not in the transcript, so it goes the
+      // way of the other stop rows on a reopen, which is right for a moment's news.
+      const why = r.error.replace(/\s*·\s*model not changed\s*$/i, '').replace(/^API error:\s*/i, '')
+      this.appendEntries(l, [
+        {
+          id: `model-refused:${Date.now()}`,
+          role: 'stop',
+          at: Date.now(),
+          turn: activeTurn(l),
+          kind: 'stop',
+          text: `model not changed to ${modelName(model)} — ${why || 'the CLI refused'}`,
+          tone: 'alert'
+        }
+      ])
       return false
     }
 
-    // The pick, on the same snapshot `setMode` writes the mode to. This is what
+    // The pick, on the `l.session` snapshot. This is what
     // `reading` treats as the authority and what `holdModel` re-asserts, so it
     // has to land here rather than only in config: `l.session` is a snapshot from
     // open time, and a live process would otherwise go on being measured against
@@ -2706,7 +2704,12 @@ export class ChatService {
         value,
         label,
         detail: resolved && resolved !== label ? resolved : value !== label ? value : undefined,
-        effortLevels: o.supportsEffort !== false && levels.length ? levels : undefined
+        effortLevels: o.supportsEffort !== false && levels.length ? levels : undefined,
+        // Listed so the menu can say a newer model exists and what it takes to
+        // get it, but never pickable: its value is a placeholder, and offering
+        // it as a row like any other is what made a click on "Opus 5.5" quietly
+        // go nowhere.
+        disabled: o.disabled === true ? str(o.description) || 'not available in this Claude Code' : undefined
       })
     }
     // Cached only when the CLI actually answered. The fallback is a guess and

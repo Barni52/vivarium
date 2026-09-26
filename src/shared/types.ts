@@ -15,17 +15,6 @@ export type SessionType = 'agent' | 'chat' | 'container-shell' | 'host-shell'
 export type ProjectKind = 'container' | 'host'
 
 /**
- * The two permission modes a chat session runs in, and nothing else.
- *
- * Both enforce nothing: a session that can reach `bypassPermissions` has plan
- * mode's blocks unenforced, and today's terminal agents already launch with
- * `--dangerously-skip-permissions`, so plan mode in Vivarium was only ever a
- * suggestion. `plan` is kept because the agent reliably reaches for
- * `ExitPlanMode` in it — and *that call is the plan card*.
- */
-export type ChatMode = 'plan' | 'bypassPermissions'
-
-/**
  * How hard the model is asked to think, Claude Code's own `--effort` /
  * `/effort` setting.
  *
@@ -66,13 +55,15 @@ export interface Session {
    * chat only. A deliberate exception to "runtime state is queried live, never
    * persisted": this is a per-session *user preference* about how the agent runs,
    * not state observed from Docker — which is exactly what config.json is for.
-   * Restored at reopen as the launch `--permission-mode`.
+   * Applied as `--model` at spawn.
+   *
+   * (There was a `mode` beside it, plan or bypass. Plan mode is gone and every
+   * chat runs in bypassPermissions; an old config.json may still carry the key,
+   * which nothing reads.)
    */
-  mode?: ChatMode
-  /** chat only. Same exception, same argument; applied as `--model` at spawn. */
   model?: string
   /**
-   * chat only. How hard to think — the seventh deliberate exception, and on the
+   * chat only. How hard to think — another deliberate exception, and on the
    * same argument as `model` above with one thing more: the effort is not only
    * unqueryable from Docker, it is unqueryable from **Claude Code**. `init`
    * never reports it and there is no control request that asks, so what the
@@ -93,7 +84,7 @@ export interface Session {
    * chat only. This name was written by the app, not by you — so the app may
    * write it again.
    *
-   * The sixth deliberate exception to "runtime state is queried live": it is a
+   * A deliberate exception to "runtime state is queried live": it is a
    * fact about *who last named this session*, and there is nowhere to query
    * that from. It exists because auto-titling has exactly one way to be
    * obnoxious — overwriting a name a human chose — and a flag is the only thing
@@ -834,26 +825,23 @@ export interface ChatTodo {
 }
 
 /**
- * A tool call blocked on the user. Plan approval, a question and an ordinary
- * permission prompt all arrive as the *same* `can_use_tool` control request and
- * are answered with the same result — one handler, not three.
+ * A tool call blocked on the user. A question and an ordinary permission prompt
+ * both arrive as the *same* `can_use_tool` control request and are answered with
+ * the same result — one handler, not two.
  */
 export interface ChatBlockingCard {
   requestId: string
-  kind: 'plan' | 'question' | 'tool'
+  kind: 'question' | 'tool'
   toolName: string
   toolUseId?: string
-  /** the plan markdown, or a one-line description of the tool being asked about */
+  /** a one-line description of what is being asked */
   title: string
-  md?: string
   questions?: ChatQuestion[]
   at: number
 }
 
 /** What the user did with a blocking card. */
 export type ChatAnswer =
-  | { behavior: 'plan-approve' }
-  | { behavior: 'plan-deny'; message: string }
   /**
    * Everything the question card can produce, in one variant.
    *
@@ -916,6 +904,14 @@ export interface ChatModelOption {
    * terms as every other reading in this app.
    */
   effortLevels?: ChatEffort[]
+  /**
+   * Why this model cannot be picked, when the CLI lists it but marks it
+   * `disabled` — in practice a newer model the container's Claude Code is too
+   * old to run, whose `value` is a placeholder (`cc-update-required-1`) rather
+   * than anything `set_model` could use. The CLI's own description, which says
+   * what to do about it ("Update to 2.1.280+ to use Opus 5.5").
+   */
+  disabled?: string
 }
 
 /** Everything a freshly-opened chat needs to paint itself. */
@@ -925,7 +921,6 @@ export interface ChatState {
   /** how many entries main holds, so the renderer knows there *is* an earlier */
   total: number
   todos: ChatTodo[]
-  mode: ChatMode
   model: string | null
   /** always a level — an unset session is launched at `DEFAULT_EFFORT` */
   effort: ChatEffort
@@ -986,7 +981,7 @@ export type ChatEvent =
   | { kind: 'error'; sessionId: string; error: ChatErrorInfo }
   | { kind: 'exit'; sessionId: string; exitCode: number }
   /** model / mode / command list, from each turn's re-emitted `init` */
-  | { kind: 'meta'; sessionId: string; model?: string; mode?: ChatMode; commands?: string[] }
+  | { kind: 'meta'; sessionId: string; model?: string; commands?: string[] }
 
 /**
  * What the renderer hands `chat:send` alongside the prose. Routed by

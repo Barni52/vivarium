@@ -11,7 +11,6 @@ import type {
   ChatErrorInfo,
   ChatEvent,
   ChatEffort,
-  ChatMode,
   ChatRewindResult,
   ChatTodo,
   ClaudeStatus,
@@ -184,7 +183,6 @@ export interface ChatSessionState {
   model: string | null
   /** how hard the model thinks — always a level, never "whatever the CLI does" */
   effort: ChatEffort
-  mode: ChatMode
   /** the process is up and the log is real */
   open: boolean
   opening: boolean
@@ -218,7 +216,6 @@ const emptyChat = (): ChatSessionState => ({
   // level the process is about to be launched at, so the first paint is already
   // right rather than a placeholder that changes under the user.
   effort: DEFAULT_EFFORT,
-  mode: 'bypassPermissions',
   open: false,
   opening: false,
   bodies: {},
@@ -487,7 +484,6 @@ interface AppState {
   /** wind the conversation back to just before `entryId`, and hand its text back */
   rewindChat: (sessionId: string, entryId: string) => Promise<ChatRewindResult>
   answerChat: (sessionId: string, requestId: string, answer: ChatAnswer) => Promise<void>
-  setChatMode: (sessionId: string, mode: ChatMode) => Promise<void>
   setChatModel: (sessionId: string, model: string) => Promise<void>
   setChatEffort: (sessionId: string, effort: ChatEffort) => Promise<void>
   loadEarlier: (sessionId: string) => Promise<void>
@@ -1273,7 +1269,6 @@ export const useStore = create<AppState>((set, get) => ({
         patch((c) => ({
           ...c,
           model: e.model ?? c.model,
-          mode: e.mode ?? c.mode,
           commands: e.commands ?? c.commands
         }))
         break
@@ -1311,7 +1306,6 @@ export const useStore = create<AppState>((set, get) => ({
             commands: st.commands,
             model: st.model,
             effort: st.effort,
-            mode: st.mode,
             open: true,
             opening: false,
             reason: undefined,
@@ -1361,15 +1355,6 @@ export const useStore = create<AppState>((set, get) => ({
       return { chats: { ...s.chats, [sessionId]: { ...c, blocking: null } } }
     })
     await window.vivarium.chatAnswer(sessionId, requestId, answer)
-  },
-
-  setChatMode: async (sessionId, mode) => {
-    set((s) => {
-      const c = s.chats[sessionId]
-      return c ? { chats: { ...s.chats, [sessionId]: { ...c, mode } } } : {}
-    })
-    const config = await window.vivarium.chatSetMode(sessionId, mode)
-    set({ config })
   },
 
   setChatModel: async (sessionId, model) => {

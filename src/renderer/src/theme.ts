@@ -669,10 +669,6 @@ export const CHAT = {
   cmd: 'var(--cmd)',
   /** the send button's fill */
   send: 'var(--send)',
-  /** the `plan` chip — the quiet mode, outlined in `--border-strong` */
-  mode: 'var(--muted)',
-  /** the `bypass` chip — the loud one */
-  bypass: 'var(--accent2)',
   /** the model chip's label */
   model: 'var(--fg)',
   /** the process is up */
@@ -815,8 +811,14 @@ export const GLOBAL_CSS = `${APP_CSS}
 export const CHAT_TEXT = {
   /** a message body, and the `Md` size every heading and table derives from */
   prose: 12.5,
-  /** leading inside a paragraph and between the items of a list */
-  proseLine: 1.55,
+  /** leading inside a paragraph and between the items of a list — the wrap of
+   *  one sentence onto the next line, which wants to read as one thing */
+  proseLine: 1.4,
+  /** extra space under a line the author *ended* — a hard break in Claude's
+   *  markdown, a newline in your own message. Tighter leading only reads well if
+   *  a deliberate break stays visibly apart from a soft wrap; a paragraph break
+   *  (`BLOCK_GAP` in `Markdown`) is larger again. */
+  lineBreakGap: 5,
   /** machinery: tool cards, clocks, command output, the composer's status line */
   mono: 11.5,
   /** the gutter's `hh:mm role`, chips, and the `show 40 lines` hints */

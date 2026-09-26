@@ -564,14 +564,14 @@ export class ChatMapper {
    * derivation all three agree on, since blocks arrive in order everywhere.
    *
    * The first occurrence deliberately has no suffix, so `chat.ts` can compute
-   * the same id for a partial-text row without knowing anything but the message
-   * id and how many text blocks it has already opened.
+   * the same id for a partial text or thinking row without knowing anything but
+   * the message id and how many blocks of that type it has already opened.
    */
   private blockId(msgId: string, type: string): string {
     const key = `${msgId}#${type}`
     const n = this.blockSeq.get(key) ?? 0
     this.blockSeq.set(key, n + 1)
-    return n === 0 ? key : `${key}#${n}`
+    return blockIdAt(msgId, type, n)
   }
 
   private push<T extends ChatEntry>(e: T): T {
@@ -868,7 +868,15 @@ export class ChatMapper {
     const msgId = str(message.id) || str(line.uuid) || this.id('a')
 
     // Derived, not clicked: the row marks where the model actually changed.
-    const model = str(message.model)
+    //
+    // `<synthetic>` is not a model. Claude Code stamps it on assistant messages
+    // it writes *itself* — an API error it is reporting, "No response
+    // requested." after an interrupt — and taking it as the model it now is put
+    // the literal `<synthetic>` in the header chip: `sameModel` answers "same"
+    // for any name it cannot read (on purpose, see there), so `reading()`
+    // adopted it as the fuller spelling of the pick. Nothing ran on a different
+    // model, so the message changes nothing here and draws no divider.
+    const model = str(message.model) === '<synthetic>' ? '' : str(message.model)
     if (model) {
       // `sameModel`, never `!==`: the two sides are routinely different
       // *spellings* of one model, because what this mapper is seeded with is
@@ -1333,14 +1341,14 @@ export class ChatMapper {
 export { roleForTool, toolTitle }
 
 /**
- * The id `ChatMapper.blockId` will compute for the `n`-th text block of a
- * message — the one thing `chat.ts` needs to paint a partial row that upserts
- * into its own settled row instead of duplicating it. Exported rather than
- * spelled out there, because two copies of this rule drifting apart is exactly
- * the bug it exists to fix.
+ * The id of the `ordinal`-th block of `type` in a message — the single spelling
+ * of the rule `ChatMapper.blockId` counts by, and the one thing `chat.ts` needs
+ * to paint a partial text or thinking row that upserts into its own settled row
+ * instead of duplicating it. Exported rather than spelled out there, because two
+ * copies of this rule drifting apart is exactly the bug it exists to fix.
  */
-export function textBlockId(msgId: string, ordinal: number): string {
-  return ordinal === 0 ? `${msgId}#text` : `${msgId}#text#${ordinal}`
+export function blockIdAt(msgId: string, type: string, ordinal: number): string {
+  return ordinal === 0 ? `${msgId}#${type}` : `${msgId}#${type}#${ordinal}`
 }
 
 /**
@@ -1457,7 +1465,11 @@ export function takeTurn(text: string): { lines: Json[]; bytes: number } {
 export interface TranscriptWalk {
   /** the lines to map, in file order, with the abandoned stretches left out */
   lines: Json[]
-  /** every kept `user` line, in file order, with the byte offset it starts at */
+  /**
+   * every kept `user` line that *opens a turn*, in file order, with the byte
+   * offset it starts at — never a tool result, an injected meta line or a
+   * compaction summary (see `opensTurn`)
+   */
   users: { uuid: string; offset: number }[]
 }
 
@@ -1498,12 +1510,40 @@ export function walkTranscript(text: string, skip: ChatRewindRange[] = []): Tran
     }
     if (!o) continue
     lines.push(o)
-    if (str(o.type) === 'user') {
+    if (opensTurn(o)) {
       const uuid = str(o.uuid)
       if (uuid) users.push({ uuid, offset: start })
     }
   }
   return { lines, users }
+}
+
+/**
+ * Is this a `user` line a revert may be aimed at — one that starts a turn rather
+ * than sitting inside one?
+ *
+ * Most `user` lines in a transcript are not you: every tool result is one, and
+ * so are the meta lines the CLI injects mid-turn (a Skill's body, a caveat).
+ * `rewind_conversation` will pop any of them — it truncates its message array at
+ * whatever it is handed — and a pop aimed at a tool result cuts the conversation
+ * *between a tool call and its answer*. Walking all the way down to the picked
+ * message repairs that, because the last pop lands on a turn boundary; but a
+ * loop that stops partway (a refusal, a timeout, a turn still winding down)
+ * leaves the model's history ending on a `tool_use` with no `tool_result`, and
+ * the next message fails with the API's "tool use concurrency" 400. Aiming only
+ * at turn openers makes every intermediate state a conversation the API accepts,
+ * and it is fewer round trips. Verified against 2.1.261: the CLI's own "newer
+ * message" test counts only human messages, so skipping tool results is legal,
+ * and it lands on exactly the same conversation.
+ *
+ * A slash command's echo and a task notification are kept: both arrive on
+ * ordinary user lines *between* turns and open one.
+ */
+function opensTurn(o: Json): boolean {
+  if (str(o.type) !== 'user') return false
+  if (o.isMeta === true || o.isCompactSummary === true) return false
+  const content = obj(o.message)?.content
+  return !(Array.isArray(content) && content.some((b) => obj(b)?.type === 'tool_result'))
 }
 
 /** Parse an NDJSON blob into objects, counting the lines that would not parse. */

@@ -139,8 +139,8 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   kinds write the same container-side transcript — so only the in-flight turn is lost.
 - Runtime state (container running, live ptys) is **queried live, never persisted**. `config.json`
   holds projects/mounts/sessions/settings and is written through `ConfigStore.mutate` (atomic
-  temp-file + rename). Seven deliberate exceptions, all user preferences or facts that *cannot* be
-  queried: `Session.mode`, `Session.model`, `Session.effort`, `Config.chatZoom`,
+  temp-file + rename). Six deliberate exceptions, all user preferences or facts that *cannot* be
+  queried: `Session.model`, `Session.effort`, `Config.chatZoom`,
   `Session.previousClaudeSessionIds` + `Config.pendingTranscriptDeletes`, `Session.rewound`, and
   `Session.autoName` (*who* last named a chat — nothing can be asked once both answers are just a
   string in `name`). `Session.effort` is the strongest case of the lot: the CLI reports the effort
@@ -254,15 +254,22 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   `docker exec -i … claude -p --input-format stream-json --output-format stream-json` per session
   — **`-i`, never `-it`**, no TTY anywhere in the path. Three flags are load-bearing:
   `--permission-prompt-tool stdio` (an undocumented *sentinel*, not an MCP server; without it a
-  raw `-p` run auto-denies every prompt **and** drops `AskUserQuestion`/`ExitPlanMode` from the
-  tool list), `--forward-subagent-text`, and `--include-partial-messages`. **Nothing is emitted
+  raw `-p` run auto-denies every prompt **and** drops `AskUserQuestion` from the tool list),
+  `--forward-subagent-text`, and `--include-partial-messages`. A fourth,
+  `--thinking-display summarized`, is what puts text in thinking blocks at all: a `-p` run asks
+  for no display and the API's default omits it, so every block arrived as `""` plus a signature.
+  Thinking streams on its own `thinking_delta`s and claims a block ordinal only once it has text,
+  because the mapper pushes no row for an empty one. **Nothing is emitted
   until the first user message** — `init` is the answer to turn one, not a greeting, so a client
   that waits for it deadlocks. The control channel is live from spawn, which is what makes the
   open-time context read possible.
-- **Always *launched* in `bypassPermissions`; a `plan` session is transitioned into plan mode over
-  the control channel at spawn.** Never `--permission-mode plan`: bypass availability is decided
-  once at startup, and ExitPlanMode's approval restores `prePlanMode ?? 'default'`, which is only
-  recorded by a transition *into* plan mode. A refused `set_permission_mode` is never swallowed.
+- **Every chat runs in `bypassPermissions`, and there is no plan mode.** The plan/bypass toggle,
+  the approval card and `Session.mode` were removed; the plan tools are taken away at spawn with
+  `--disallowedTools EnterPlanMode,ExitPlanMode` (one comma-joined value — the flag is variadic),
+  because bypass does not remove them and a model that entered plan mode by itself would have no
+  way back out. Nothing on screen names the mode any more, so an `init` reporting anything other
+  than bypass is said once, as an alert row in the log. The *terminal* agent's TUI keeps its own
+  plan mode and the hook bridge still treats `ExitPlanMode` as a wait — that is the pty, not this.
 - **The transcript is the chat's model, not a log of it.** History is the container-side `.jsonl`
   read over `docker exec`; there is **no host-side mirror**, which would drift from the file
   `--resume` actually feeds the model. A turn paints from the stream, and at `result` main
@@ -331,7 +338,7 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   only**: any weight, size, family or spacing of its own moves the glyphs out from under the real
   caret. Selected text stays readable because the app's `::selection` is 32% alpha.
 - **What `/` can expand is learned from `init` *and* from the disk.** `init` is emitted at the
-  first turn of a process and re-emitted only when `set_model`/`set_permission_mode` arms it, and
+  first turn of a process and re-emitted only when `set_model` arms it, and
   there is no `list_commands` control request — so a skill written since is missing from the menu.
   `ChatService.refreshCommands` scans the container's four canonical directories and **merges**:
   init's names first, the scan may only add, which keeps the built-ins and plugin skills it cannot

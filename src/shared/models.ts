@@ -43,6 +43,13 @@ function key(id: string | null | undefined): ModelKey | null {
   const cleaned = (id ?? '')
     .trim()
     .toLowerCase()
+    // A bracketed variant tag — `claude-opus-5-5[1m]`, the 1M-context pick
+    // `list_models` offers as its own value — names a context window, not a
+    // model. Left on, it glued itself to the last version digit (`1[1m]` is not
+    // a digit run), so the chip read `Opus 5` for Opus 5.5, and `sameModel`
+    // called the pick and the CLI's report (which never carries the tag) two
+    // different models — so `holdModel` re-sent `set_model` before every turn.
+    .replace(/\[[^\]]*\]$/, '')
     // The vendor prefix, the release date and a `-latest`/`-v2:0` pin are not
     // part of the name — and the date is most of what made the raw id
     // unreadable at 11.5px in the header.

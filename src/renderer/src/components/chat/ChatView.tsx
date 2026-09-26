@@ -4,7 +4,6 @@ import type {
   ChatBlockingCard,
   ChatContextUsage,
   ChatEntry,
-  ChatMode,
   ChatEffort,
   ChatModelOption,
   ChatQuestion,
@@ -43,9 +42,9 @@ import { selectionMarkdown } from './copy'
 // button and no `⏎ send` hint on the argument that every affordance already had a
 // free home — Enter sends, Esc interrupts, Ctrl+V attaches. That argument is
 // sound about *capability* and wrong about *discoverability*: none of it is on
-// screen, so none of it is findable, and the mode and model you are about to send
-// under were only readable by looking back up at the header. The footer row
-// carries all of it — `plan · haiku-4` on the left, `⏎ send · ⇧⏎ newline` and a
+// screen, so none of it is findable, and the model you are about to send
+// under was only readable by looking back up at the header. The footer row
+// carries all of it — the model on the left, `⏎ send · ⇧⏎ newline` and a
 // send button on the right — inside the box, which costs one line and no chrome
 // anywhere else. Attaching stays gesture-only (Ctrl+V, drag-drop, `@`), and Esc
 // is still taught on the live working row where it is the only thing that helps.
@@ -83,6 +82,16 @@ const DOUBLE_ESC_MS = 500
 const COMPOSER_MAX_FRACTION = 0.5
 const COMPOSER_MIN_MAX = 180
 
+/**
+ * The empty composer's height: one line of prose plus ~6.5px under it.
+ *
+ * The slack is what the box has always had below a single line; the number is
+ * what moves. It was 26 against a 1.55 line, and when `proseLine` tightened to
+ * 1.4 the line shrank and the slack grew, which read as the status line drifting
+ * away from the box. Re-derive it if `proseLine` or `prose` moves again.
+ */
+const COMPOSER_MIN_H = 24
+
 // There was a `columnMax(zoom)` here: the reading column's 880px `max-width`,
 // divided back out below 1× because a `max-width` on a zoomed box is in *zoomed*
 // pixels, so zooming out used to pull both edges of the page in from the window.
@@ -109,7 +118,6 @@ export function ChatView({
   const interruptChat = useStore((s) => s.interruptChat)
   const rewindChat = useStore((s) => s.rewindChat)
   const answerChat = useStore((s) => s.answerChat)
-  const setChatMode = useStore((s) => s.setChatMode)
   const setChatModel = useStore((s) => s.setChatModel)
   const setChatEffort = useStore((s) => s.setChatEffort)
   const loadEarlier = useStore((s) => s.loadEarlier)
@@ -327,7 +335,7 @@ export function ChatView({
     const cap = Math.max(COMPOSER_MIN_MAX, Math.round((view * COMPOSER_MAX_FRACTION) / zoom))
     el.style.maxHeight = `${cap}px`
     el.style.height = 'auto'
-    el.style.height = `${Math.min(cap, Math.max(26, el.scrollHeight))}px`
+    el.style.height = `${Math.min(cap, Math.max(COMPOSER_MIN_H, el.scrollHeight))}px`
   }, [zoom])
 
   React.useLayoutEffect(fitComposer, [fitComposer, draft, visible])
@@ -347,7 +355,6 @@ export function ChatView({
   const entries = React.useMemo(() => chat?.entries ?? [], [chat?.entries])
   const blocking = chat?.blocking ?? null
   const todos = chat?.todos ?? []
-  const mode: ChatMode = chat?.mode ?? session.mode ?? 'bypassPermissions'
   const working = isWorking(entries)
   const canSend = draft.trim().length > 0 || chips.some((c) => c.ok)
 
@@ -995,11 +1002,9 @@ export function ChatView({
       <Header
         session={session}
         project={project}
-        mode={mode}
         model={chat?.model ?? null}
         context={chat?.context ?? null}
         live={!!chat?.open}
-        onMode={(m) => void setChatMode(session.id, m)}
         onModelClick={() => void openModelMenu()}
         onCloseModelMenu={() => setModelMenu(false)}
         modelMenu={modelMenu}
@@ -1474,7 +1479,7 @@ export function ChatView({
                   display: 'block',
                   position: 'relative',
                   width: '100%',
-                  minHeight: 26,
+                  minHeight: COMPOSER_MIN_H,
                   // Height *and* the cap are both driven by the layout effect
                   // above (`fitComposer`) — the cap is a fraction of the window
                   // now, so it cannot be written here as a number. What it buys
@@ -1502,8 +1507,12 @@ export function ChatView({
             </div>
 
             {/* The status line. What you are about to send under, and how to send
-                it — both readings the header used to be the only home for. */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+                it — both readings the header used to be the only home for.
+                The margin is 8, not the 12 it was: the outlined bypass chip that
+                led this line stood ~4px proud of its text, so its border was what
+                the eye measured the gap to. With the chip gone the first ink is
+                the bare model name, and 8 puts it where that border was. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8 }}>
               <div
                 style={{
                   display: 'flex',
@@ -1514,26 +1523,6 @@ export function ChatView({
                   color: CHAT.dim3
                 }}
               >
-                {/* Drawn exactly like the header's active chip — same hue on the
-                    border and the word, same radius, no fill. The two readings
-                    of the mode are far apart on screen, so looking the same is
-                    what makes them read as one fact rather than two controls.
-                    `plan` is the quiet one: a --border-strong outline and a
-                    --muted word, which is the same "outlined, not shouting"
-                    treatment every inert control in the app wears. `bypass`
-                    takes --accent2 on both, because it is the state worth
-                    noticing. */}
-                <span
-                  style={{
-                    padding: '2px 6px',
-                    border: `1px solid ${mode === 'plan' ? 'var(--border-strong)' : CHAT.bypass}`,
-                    borderRadius: CHAT.radius,
-                    color: mode === 'plan' ? CHAT.mode : CHAT.bypass
-                  }}
-                >
-                  {mode === 'plan' ? 'plan' : 'bypass'}
-                </span>
-                <span>·</span>
                 <span>{modelName(chat?.model ?? null)}</span>
               </div>
               <div
@@ -1651,9 +1640,8 @@ function placeholderFor(open: boolean, blocking: boolean, working: boolean): str
 
 // ---- chrome ---------------------------------------------------------------
 /**
- * Four readings and two controls, all on one 52px line: the session name and its
- * project on the left, then the context meter, the mode toggle and the model
- * chip on the right.
+ * Readings and one control, all on one 52px line: the session name and its
+ * project on the left, then the context meter and the model chip on the right.
  *
  * The context reading is three sights of one number — `41.2k / 200k`, a bar, and
  * the percentage the bar's tint is keyed to — because the header is glanced at
@@ -1671,11 +1659,9 @@ function placeholderFor(open: boolean, blocking: boolean, working: boolean): str
 function Header({
   session,
   project,
-  mode,
   model,
   context,
   live,
-  onMode,
   onModelClick,
   onCloseModelMenu,
   modelMenu,
@@ -1686,12 +1672,10 @@ function Header({
 }: {
   session: Session
   project: Project
-  mode: ChatMode
   model: string | null
   context: ChatContextUsage | null
   /** the chat's process is running — what the dot on the model chip reports */
   live: boolean
-  onMode: (m: ChatMode) => void
   onModelClick: () => void
   onCloseModelMenu: () => void
   modelMenu: boolean
@@ -1835,58 +1819,10 @@ function Header({
           </span>
         </div>
 
-        {/* Two modes, live — set_permission_mode is accepted mid-conversation and
-            even mid-turn. Plain "plan" / "bypass": no warning chrome and no
-            explanatory tooltip. Plan mode being advisory here is a known accepted
-            property of this tool (terminal agents already run
-            --dangerously-skip-permissions), not something the UI argues with the
-            user about every time they look at it. */}
-        {/* Two separate outlined chips, not a segmented control.
-            The hue is carried by the *border and the label*, and nothing is
-            filled: a filled chip on this page is a much heavier mark than the
-            reading deserves, and it also forced dark ink onto a saturated hue,
-            which is the one text colour in the window that could not be read at
-            11.5px. Outlining means the two states differ by hue, weight and edge
-            at once, and the composer's status chip — outlined already — is drawn
-            the same way, so the two places that report the mode now *look* the
-            same and not merely agree. Losing the shared box costs nothing: they
-            are adjacent, so the gap reads as a pair. */}
-        <div style={{ display: 'flex', gap: 6 }}>
-          {(['plan', 'bypassPermissions'] as const).map((m) => {
-            const active = mode === m
-            // A hue per mode, not one hue for "whichever is on". The toggle used
-            // the same blue either way, so the only thing telling you which mode
-            // you were in was reading the two five-letter words — which is the
-            // same failure the log rows had. `plan` is the quiet register
-            // (--border-strong edge, --muted word) and `bypass` is --accent2 on
-            // both; the composer's status chip is drawn from the same two, so
-            // the two places that report the mode agree by construction.
-            const edge = m === 'plan' ? 'var(--border-strong)' : CHAT.bypass
-            const ink = m === 'plan' ? CHAT.mode : CHAT.bypass
-            return (
-              <button
-                key={m}
-                title={m === 'plan' ? 'Plan first, then approve' : 'Run without asking'}
-                onClick={() => onMode(m)}
-                style={{
-                  padding: '2px 10px',
-                  border: `1px solid ${active ? edge : CHAT.border}`,
-                  borderRadius: CHAT.radius,
-                  cursor: 'pointer',
-                  fontFamily: MONO,
-                  fontSize: TYPE.gutter,
-                  transition: '.14s',
-                  background: 'transparent',
-                  color: active ? ink : CHAT.dim2,
-                  fontWeight: active ? 500 : 400
-                }}
-              >
-                {m === 'plan' ? 'plan' : 'bypass'}
-              </button>
-            )
-          })}
-        </div>
-
+        {/* No mode toggle: every chat runs in bypassPermissions, so there is
+            nothing to pick and nothing a chip could report that is not always
+            true. A CLI that comes up in some other mode says so in the log
+            instead (see ChatService.init). */}
         {/* Anchored to the button it belongs to, not to the header's right edge. */}
         <div style={{ position: 'relative' }}>
           <button
@@ -1898,8 +1834,8 @@ function Header({
               gap: 6,
               // Sized to the 34px header: every control in this row clears it
               // with a little air, so nothing has to be clipped or centred by eye.
-              // Outlined and unfilled like the two mode chips beside it — the
-              // model is a reading, not a state, so it gets --fg rather than a hue.
+              // Outlined and unfilled — the model is a reading, not a state, so
+              // it gets --fg rather than a hue.
               padding: '2px 8px',
               background: 'transparent',
               border: '1px solid var(--border-strong)',
@@ -1965,15 +1901,22 @@ function Header({
                     </div>
                   )}
                   {models?.map((m) => {
-                    // The chip shows whatever the CLI last reported, which is a
-                    // resolved id; the list offers aliases. Matching on either keeps
-                    // the tick honest instead of never lighting up.
-                    const on = model !== null && (m.value === model || m.detail === model)
+                    // The tick follows the *pick* — `Session.model`, the alias
+                    // this chat was set to — and only falls back to matching the
+                    // reported id when nothing was ever picked. Matching the
+                    // resolved id first lit two rows at once whenever two aliases
+                    // resolve to the same model (`default` and `sonnet` both being
+                    // Sonnet 5), which reads as the picker not knowing either.
+                    const on = session.model
+                      ? m.value === session.model
+                      : model !== null && (m.value === model || m.detail === model)
+                    const off = !!m.disabled
                     return (
                       <button
                         key={m.value}
+                        disabled={off}
                         onClick={() => onPickModel(m.value)}
-                        title={m.detail ?? m.value}
+                        title={m.disabled ?? m.detail ?? m.value}
                         style={{
                           display: 'flex',
                           alignItems: 'baseline',
@@ -1983,10 +1926,10 @@ function Header({
                           border: 0,
                           borderLeft: `2px solid ${on ? CHAT.model : 'transparent'}`,
                           background: on ? CHAT.hover : 'transparent',
-                          color: on ? CHAT.text : CHAT.prose,
+                          color: on ? CHAT.text : off ? CHAT.dim3 : CHAT.prose,
                           fontSize: 12.5,
                           padding: '8px 12px',
-                          cursor: 'pointer'
+                          cursor: off ? 'default' : 'pointer'
                         }}
                       >
                         {/* Derived from the *resolved* id where there is one:
@@ -1996,10 +1939,13 @@ function Header({
                         <span style={{ flex: 'none' }}>
                           {modelOptionLabel(m.value, m.label, m.detail)}
                         </span>
-                        {m.detail && (
+                        {/* A disabled row's subtitle is the reason instead of the
+                            id: its id is a placeholder, and the reason is the one
+                            thing worth reading on it — it names the update. */}
+                        {(m.disabled ?? m.detail) && (
                           <span
                             style={{
-                              fontFamily: MONO,
+                              fontFamily: off ? undefined : MONO,
                               fontSize: 11.5,
                               color: CHAT.dim3,
                               overflow: 'hidden',
@@ -2007,7 +1953,7 @@ function Header({
                               whiteSpace: 'nowrap'
                             }}
                           >
-                            {m.detail}
+                            {m.disabled ?? m.detail}
                           </span>
                         )}
                       </button>
@@ -2053,9 +1999,9 @@ function Header({
                             <button
                               key={lvl}
                               onClick={() => onPickEffort(lvl)}
-                              // Drawn as the two mode chips are drawn, and for
-                              // the reason written there: outlined, never
-                              // filled, so the state differs by hue, weight and
+                              // Outlined, never filled: a filled chip is a
+                              // heavier mark than a reading deserves, and
+                              // outlined, the state differs by hue, weight and
                               // edge at once rather than by reading the word.
                               style={{
                                 padding: '2px 8px',
@@ -2123,14 +2069,13 @@ function TodoStrip({ todos }: { todos: ChatTodo[] }): React.ReactElement {
 }
 
 /**
- * Blocking keeps two surfaces, not one: the plan body renders in the log, in its
- * place in time, so the transcript stays a complete record — and the buttons are
- * pinned here, so a decision cannot scroll away behind twenty tool calls.
+ * A permission prompt, pinned under the log so the decision cannot scroll away
+ * behind twenty tool calls.
  *
  * A `question` never reaches this component — it is a card in the log itself
  * (QuestionCard), being a form rather than a sentence with two buttons after it.
- * What is left is the two one-line cases, which is all a bar was ever the right
- * shape for — and the two whose buttons genuinely must not scroll away.
+ * What is left is the one-line case, which is all a bar was ever the right shape
+ * for. (Plan approval was the other, and went with plan mode.)
  */
 function BlockingBar({
   card,
@@ -2139,52 +2084,6 @@ function BlockingBar({
   card: ChatBlockingCard
   onAnswer: (a: ChatAnswer) => void
 }): React.ReactElement {
-  const [notes, setNotes] = React.useState('')
-
-  if (card.kind === 'plan') {
-    return (
-      <Bar hue={CHAT.hold}>
-        <span style={{ fontSize: TYPE.prose, color: CHAT.text }}>Plan awaiting approval</span>
-        <input
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          placeholder="revision notes (optional)"
-          spellCheck={false}
-          style={{
-            flex: 1,
-            minWidth: 80,
-            height: 30,
-            background: CHAT.well,
-            border: `1px solid ${CHAT.border}`,
-            color: CHAT.text,
-            fontSize: 12.5,
-            padding: '0 10px',
-            outline: 'none'
-          }}
-        />
-        {/* Approving leaves plan mode for the mode the session came *from*, which
-            this app makes sure is bypass by launching there and transitioning in
-            (main/chat.ts). With two modes there is nothing else approval could
-            mean — so the toggle visibly moves to bypass, and this time it takes. */}
-        <button
-          data-fill=""
-          onClick={() => onAnswer({ behavior: 'plan-approve' })}
-          style={primaryButton(false)}
-        >
-          Approve &amp; run
-        </button>
-        <button
-          onClick={() =>
-            onAnswer({ behavior: 'plan-deny', message: notes.trim() || 'Keep planning.' })
-          }
-          style={secondaryButton}
-        >
-          Keep planning
-        </button>
-      </Bar>
-    )
-  }
-
   return (
     <Bar hue={CHAT.hold}>
       {/* The title of a permission card *is* the call — a bash line, a URL, a

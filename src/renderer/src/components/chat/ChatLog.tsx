@@ -276,7 +276,28 @@ export const LogRow = React.memo(function LogRow({
                   overflowWrap: 'anywhere'
                 }}
               >
-                <Hi>{entry.md}</Hi>
+                {/* One block per line so a newline you typed can sit further
+                    apart than a wrap (`lineBreakGap`). Each block keeps its own
+                    `\n`: a single trailing newline in a `pre-wrap` block draws
+                    no extra line (the reason autosizing mirrors append a
+                    character), but it stays in the text node, so a selection
+                    across the bubble still copies with its line breaks —
+                    `selectionMarkdown` reads between-block text through
+                    `Range.toString()`, which knows nothing of block edges.
+                    `minHeight: 1lh` keeps a blank line a line tall whichever way
+                    the engine sizes a block holding only a newline. */}
+                {entry.md.split('\n').map((line, n, all) => (
+                  <span
+                    key={n}
+                    style={{
+                      display: 'block',
+                      minHeight: '1lh',
+                      marginTop: n > 0 ? TYPE.lineBreakGap : 0
+                    }}
+                  >
+                    <Hi>{n < all.length - 1 ? `${line}\n` : line}</Hi>
+                  </span>
+                ))}
               </div>
             )}
             {entry.chips && entry.chips.length > 0 && (

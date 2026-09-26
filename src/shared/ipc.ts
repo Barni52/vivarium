@@ -77,7 +77,6 @@ export const CH = {
   chatInterrupt: 'chat:interrupt',
   chatRewind: 'chat:rewind',
   chatAnswer: 'chat:answer',
-  chatSetMode: 'chat:set-mode',
   chatSetModel: 'chat:set-model',
   chatSetEffort: 'chat:set-effort',
   chatModels: 'chat:models',
