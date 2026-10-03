@@ -13,7 +13,7 @@ import type {
   Session
 } from '@shared/types'
 import { DEFAULT_EFFORT, EFFORT_LEVELS, modelName, modelOptionLabel } from '@shared/models'
-import { useStore } from '../../state/store'
+import { AGENT_PANEL_MIN, useStore } from '../../state/store'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
 import {
@@ -28,9 +28,9 @@ import {
   ZoomIn,
   ZoomOut
 } from '../Icons'
-import { LogRow, type LogHandlers } from './ChatLog'
+import { AgentStatus, LogRow, agentProgress, type LogHandlers } from './ChatLog'
 import { FindContext, matcherFor, searchTextOf, type FindQuery } from './find'
-import { Preview, clock as clockOf } from './Markdown'
+import { Md, Preview, clock as clockOf } from './Markdown'
 import { chipForNode, flattenTree, routeFile, type PendingChip } from './attach'
 import { selectionMarkdown } from './copy'
 
@@ -172,6 +172,24 @@ export function ChatView({
   const [find, setFind] = React.useState<null | (FindQuery & { at: number })>(null)
   /** The turn outline rail, open or not. */
   const [outline, setOutline] = React.useState(false)
+  /**
+   * The agent panel: which subagent it shows, as a path — the agent opened from
+   * the log first, then each nested agent drilled into from its steps. Empty
+   * when the panel is closed.
+   *
+   * It takes the outline's slot while open rather than sitting beside it (two
+   * rails would leave the log a strip), and the outline comes back when it
+   * closes. Local like the outline, and held by tool_use id, which is stable
+   * across the settle that replaces the row it was opened from.
+   */
+  const [agentStack, setAgentStack] = React.useState<string[]>([])
+  /**
+   * Open an agent from the log or the band. Clicking the one already open
+   * closes the panel, so the card is a toggle and needs no second control.
+   */
+  const openAgent = React.useCallback((toolUseId: string): void => {
+    setAgentStack((s) => (s.length === 1 && s[0] === toolUseId ? [] : [toolUseId]))
+  }, [])
 
   const inputRef = React.useRef<HTMLTextAreaElement>(null)
   const findInputRef = React.useRef<HTMLInputElement>(null)
@@ -514,6 +532,68 @@ export function ChatView({
     return byTurn
   }, [entries])
 
+  /**
+   * The agents the band lists: everything still running, plus whatever the
+   * latest turn launched and has finished.
+   *
+   * "Latest turn" is the newest turn clock, which main appends the moment a
+   * message is sent — so a finished agent leaves the band exactly when you send
+   * the next message, and stays until then as the record of what that turn
+   * dispatched. A background agent outlives its turn by design and stays for as
+   * long as it runs, which is the case the band exists for: it is the only thing
+   * on screen saying work is happening forty rows above the fold.
+   */
+  const bandAgents = React.useMemo(() => {
+    let latest = -1
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i]
+      if (e.kind === 'turn') {
+        latest = e.turn
+        break
+      }
+    }
+    return entries.filter(
+      (e): e is Extract<ChatEntry, { kind: 'task' }> =>
+        e.kind === 'task' && (!!e.running || e.turn === latest)
+    )
+  }, [entries])
+
+  /**
+   * Agents launched together, as `{ index, size }` by row id.
+   *
+   * One assistant message that calls `Task` three times is one decision, and
+   * draws as one group (see TaskRow). The message is the id's first segment —
+   * `<message id>#tool_use#<n>`, `textBlockId`'s spelling — and the run has to
+   * be *adjacent* in draw order, which it is: a message's tool_use blocks are
+   * mapped back to back, and a subagent's own work never lands in this list.
+   */
+  const agentGroups = React.useMemo(() => {
+    const out = new Map<string, { index: number; size: number }>()
+    // An optimistic or synthetic id has no `#`, and is then its own message.
+    const msg = (id: string): string => (id.includes('#') ? id.slice(0, id.indexOf('#')) : id)
+    let run: string[] = []
+    const flush = (): void => {
+      run.forEach((id, index) => out.set(id, { index, size: run.length }))
+      run = []
+    }
+    for (const e of rows) {
+      if (e.kind === 'task' && run.length > 0 && msg(run[0]) === msg(e.id)) run.push(e.id)
+      else {
+        flush()
+        if (e.kind === 'task') run.push(e.id)
+      }
+    }
+    flush()
+    return out
+  }, [rows])
+
+  /** How many agents each turn launched, for the outline's meta line. */
+  const turnAgents = React.useMemo(() => {
+    const byTurn = new Map<number, number>()
+    for (const e of entries) if (e.kind === 'task') byTurn.set(e.turn, (byTurn.get(e.turn) ?? 0) + 1)
+    return byTurn
+  }, [entries])
+
   const matcher = React.useMemo(() => (find ? matcherFor(find) : null), [find])
 
   /**
@@ -630,6 +710,12 @@ export function ChatView({
     inputRef.current?.focus()
   }
 
+  // The agent opened *from the log*, which is the root of the panel's path — a
+  // nested one drilled into lives in a sub-log and has no card out here. A
+  // primitive, so drilling deeper does not rebuild `handlers` and re-render the
+  // whole log for a change it does not show.
+  const rootAgent = agentStack[0] ?? null
+
   // Memoised because `LogRow` is memoised: a new handlers object every render
   // would defeat it, and defeating it is what made a streaming turn re-render
   // every row in the log for every token that arrived.
@@ -638,6 +724,8 @@ export function ChatView({
       onExpand: (id: string) => void loadBody(session.id, id),
       onExpandTask: (toolUseId: string, agentId: string | null) =>
         void loadSubagent(session.id, toolUseId, agentId),
+      onOpenAgent: openAgent,
+      openAgent: rootAgent,
       bodies: chat?.bodies ?? {},
       images: chat?.images ?? {},
       onImage: (imageId: string) => void loadImage(session.id, imageId),
@@ -651,6 +739,8 @@ export function ChatView({
       loadBody,
       loadImage,
       loadSubagent,
+      openAgent,
+      rootAgent,
       openChat,
       project.id,
       session.id
@@ -1151,10 +1241,18 @@ export function ChatView({
               onSelect: () => openFind()
             },
             {
-              label: outline ? 'Hide outline' : 'Show outline',
+              // Judged by what is *on screen*: the agent panel takes the
+              // outline's slot, so an outline that is on underneath it is not
+              // showing, and the item says Show and brings it back.
+              label: outline && agentStack.length === 0 ? 'Hide outline' : 'Show outline',
               icon: <PanelToggle size={14} />,
               disabled: outlineTurns.length === 0,
-              onSelect: () => setOutline((o) => !o)
+              onSelect: () => {
+                if (agentStack.length > 0) {
+                  setAgentStack([])
+                  setOutline(true)
+                } else setOutline((o) => !o)
+              }
             },
             { label: '---' },
             {
@@ -1226,7 +1324,13 @@ export function ChatView({
                     : undefined
                 }
               >
-                <LogRow entry={e} handlers={handlers} streaming={e.id === streamingId} />
+                <LogRow
+                  entry={e}
+                  handlers={handlers}
+                  streaming={e.id === streamingId}
+                  groupIndex={agentGroups.get(e.id)?.index}
+                  groupSize={agentGroups.get(e.id)?.size}
+                />
               </div>
             ))}
           </FindContext.Provider>
@@ -1312,10 +1416,21 @@ export function ChatView({
         </div>
       )}
       </div>
-        {outline && (
+        {agentStack.length > 0 && chat ? (
+          <AgentPanel
+            path={agentStack}
+            entries={entries}
+            subagents={chat.subagents}
+            handlers={handlers}
+            zoom={zoom}
+            onPath={setAgentStack}
+            onJump={jumpToRow}
+          />
+        ) : outline && (
           <Outline
             turns={outlineTurns}
             clocks={turnClocks}
+            agents={turnAgents}
             activeId={activeHit}
             zoom={zoom}
             onPick={jumpToRow}
@@ -1341,6 +1456,14 @@ export function ChatView({
               not make the buttons more visible (they are adjacent either way) and
               it costs a disappearance the user did not cause. */}
           {todos.length > 0 && <TodoStrip todos={todos} />}
+          {bandAgents.length > 0 && (
+            <AgentStrip
+              agents={bandAgents}
+              subagents={chat?.subagents ?? {}}
+              open={rootAgent}
+              onOpen={openAgent}
+            />
+          )}
           {/* A question is the one blocking card that is *not* a bar and not
               here at all — it is a row at the end of the log (see QuestionCard).
               Everything else is one line of chrome with two buttons on it, which
@@ -2064,6 +2187,536 @@ function TodoStrip({ todos }: { todos: ChatTodo[] }): React.ReactElement {
           {t.status === 'in_progress' ? (t.activeForm ?? t.subject) : t.subject}
         </span>
       ))}
+    </div>
+  )
+}
+
+type TaskEntry = Extract<ChatEntry, { kind: 'task' }>
+
+/**
+ * What the agent panel always leaves the log, however far it is dragged. About
+ * a short paragraph's measure at 1× — enough that the conversation stays
+ * something you can read beside the agent, not a strip you have to close the
+ * panel to use.
+ */
+const PANEL_LOG_MIN = 320
+
+/**
+ * How many agents the band lists before it says "+N more".
+ *
+ * A fan-out of eight is real, and eight lines pinned over the composer would
+ * take the log's last screenful with them. Running agents are listed first, so
+ * what falls off the end is the finished ones — the record, not the news.
+ */
+const BAND_ROWS = 5
+
+/**
+ * The agents band, pinned above the composer with the todo strip.
+ *
+ * It exists because an agent used to be visible only as a row in the log, and a
+ * row is somewhere you have to be: a background agent outlives the turn that
+ * launched it, so it was routinely forty rows up, still ticking, with nothing
+ * near the box you type in saying that anything was running at all.
+ *
+ * One line per agent — `◆ type  description  ↳ latest step  status` — and a
+ * click opens it in the panel. It obeys the band rules the other strips do:
+ * absent when empty, nothing hidden behind anything else, and **nothing in it
+ * moves but the dots and the clock** (the compaction band's argument — a third
+ * animation is the one that reads as a flash). A line never changes height as
+ * its agent finishes: the step goes and the status takes its place, on one line.
+ */
+function AgentStrip({
+  agents,
+  subagents,
+  open,
+  onOpen
+}: {
+  agents: TaskEntry[]
+  subagents: Record<string, ChatEntry[]>
+  /** the agent the panel shows, so its line can say so */
+  open: string | null
+  onOpen: (toolUseId: string) => void
+}): React.ReactElement {
+  const ordered = [...agents.filter((a) => a.running), ...agents.filter((a) => !a.running)]
+  const shown = ordered.length > BAND_ROWS ? ordered.slice(0, BAND_ROWS - 1) : ordered
+  const more = ordered.length - shown.length
+  return (
+    <div
+      style={{
+        flex: 'none',
+        marginBottom: 10,
+        padding: '4px 0',
+        background: CHAT.card,
+        border: `1px solid ${CHAT.borderCard}`,
+        // The log card's rail, so the band and the rows it summarises are
+        // visibly the same kind of thing.
+        borderLeft: `2px solid ${CHAT.agent}`,
+        borderRadius: CHAT.radiusCard,
+        fontFamily: MONO,
+        fontSize: 11.5,
+        color: CHAT.dim3
+      }}
+    >
+      {shown.map((a) => {
+        const p = agentProgress(subagents[a.toolUseId])
+        return (
+          <div
+            key={a.toolUseId}
+            onClick={() => onOpen(a.toolUseId)}
+            data-click=""
+            title={`${a.agentType} — ${a.description}`}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              minWidth: 0,
+              padding: '3px 12px',
+              cursor: 'pointer',
+              background: a.toolUseId === open ? CHAT.hover : undefined
+            }}
+          >
+            <span aria-hidden style={{ color: CHAT.agent, flex: 'none' }}>
+              ◆
+            </span>
+            <span style={{ color: CHAT.dim2, flex: 'none' }}>{a.agentType}</span>
+            <span style={{ ...bandText, color: a.running ? CHAT.text : CHAT.dim3 }}>{a.description}</span>
+            {a.running && <span style={bandText}>↳ {p.latest ?? 'starting…'}</span>}
+            <AgentStatus entry={a} liveTools={p.tools} />
+          </div>
+        )
+      })}
+      {more > 0 && (
+        <div style={{ padding: '3px 12px', color: CHAT.dim4 }}>
+          +{more} more finished — in the log above
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** A band column that gives way first: shares what is left, then ellipsises. */
+const bandText: React.CSSProperties = {
+  flex: '1 1 0',
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap'
+}
+
+/**
+ * A task row by its tool_use id, wherever it lives — the main log, or the
+ * sub-log of the agent that launched it. A nested agent has no row out here,
+ * which is exactly why the panel's path has to be resolved this way.
+ */
+function findTask(
+  id: string,
+  entries: ChatEntry[],
+  subagents: Record<string, ChatEntry[]>
+): TaskEntry | null {
+  for (const e of entries) if (e.kind === 'task' && e.toolUseId === id) return e
+  for (const list of Object.values(subagents)) {
+    for (const e of list) if (e.kind === 'task' && e.toolUseId === id) return e
+  }
+  return null
+}
+
+/**
+ * The agent panel: one subagent, read as a thing in its own right.
+ *
+ * **It replaces expanding the row in place.** The sub-log used to pour into the
+ * log under its card, which pushed the conversation down by however many steps
+ * the agent took and lost the reader's place — and it was still only the steps,
+ * in order, with what the agent was asked thrown away at map time and what it
+ * answered buried as the last of thirty rows. This takes the outline's slot
+ * beside the log, so opening an agent moves the conversation by nothing.
+ *
+ * Ordered by what you want to know, not by when it happened: the agent and its
+ * outcome, what it was **asked** (folded past a few lines — it is written for
+ * the agent), what it **reported** (the answer the parent turn was handed, in
+ * full markdown), and then the **steps**, which are the log's own rows drawn by
+ * the log's own `LogRow`. A nested agent in those steps opens *here*, one level
+ * down, with a breadcrumb back — rather than nesting indents without a floor.
+ *
+ * While the agent runs the panel follows its buffer live, and it follows the
+ * tail if you are at the bottom, as the log does. It asks for the sub-log on
+ * open and **again when the agent stops**: while running, main's answer is the
+ * forwarded buffer, and only once it stops does the complete sibling file exist.
+ *
+ * Its body is zoomed with the chat, unlike the outline: the outline is an index,
+ * this is reading — a report is as much the conversation as the log is.
+ */
+function AgentPanel({
+  path,
+  entries,
+  subagents,
+  handlers,
+  zoom,
+  onPath,
+  onJump
+}: {
+  /** tool_use ids, the agent opened from the log first */
+  path: string[]
+  entries: ChatEntry[]
+  subagents: Record<string, ChatEntry[]>
+  handlers: LogHandlers
+  zoom: number
+  onPath: (path: string[]) => void
+  /** scroll the log to a row */
+  onJump: (id: string) => void
+}): React.ReactElement {
+  const id = path[path.length - 1]
+  const crumbs = path.map((p) => findTask(p, entries, subagents))
+  const entry = crumbs[crumbs.length - 1]
+  const dragged = useStore((s) => s.agentPanelWidth)
+  const setWidth = useStore((s) => s.setAgentPanelWidth)
+  const rootRef = React.useRef<HTMLDivElement>(null)
+  const bodyRef = React.useRef<HTMLDivElement>(null)
+  const contentRef = React.useRef<HTMLDivElement>(null)
+  const pinned = React.useRef(false)
+
+  // Through a ref, with primitives in the dependency list: `handlers` is rebuilt
+  // whenever *any* sub-log changes, so depending on it would turn every frame of
+  // a running agent into another request for that agent's log.
+  const ask = React.useRef(handlers)
+  React.useEffect(() => {
+    ask.current = handlers
+  })
+  React.useEffect(() => {
+    if (entry) ask.current.onExpandTask(entry.toolUseId, entry.agentId)
+  }, [entry?.toolUseId, entry?.agentId, entry?.running]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A different agent starts at its top — except one still running, whose news
+  // is at the bottom, so that one starts following the tail.
+  React.useEffect(() => {
+    const el = bodyRef.current
+    if (el) el.scrollTop = 0
+    pinned.current = !!entry?.running
+  }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  React.useEffect(() => {
+    const el = bodyRef.current
+    const content = contentRef.current
+    if (!el || !content) return
+    const ro = new ResizeObserver(() => {
+      if (pinned.current) el.scrollTop = el.scrollHeight
+    })
+    ro.observe(content)
+    return () => ro.disconnect()
+  }, [])
+
+  /**
+   * Drag the left edge, the sidebar's gesture mirrored.
+   *
+   * Measured from the width actually on screen rather than from the stored one,
+   * because the stored one may be capped (see the style below) or not set at all
+   * — starting from it would make the edge jump away from the pointer on the
+   * first move. The ceiling leaves the log `PANEL_LOG_MIN`, so the panel can be
+   * dragged as wide as reading a long report wants without the conversation it
+   * belongs to disappearing behind it.
+   */
+  const startResize = (e: React.MouseEvent): void => {
+    e.preventDefault()
+    const el = rootRef.current
+    if (!el) return
+    const startX = e.clientX
+    const startW = el.offsetWidth
+    const max = (el.parentElement?.clientWidth ?? startW) - PANEL_LOG_MIN
+    const move = (ev: MouseEvent): void => {
+      setWidth(Math.min(max, startW + (startX - ev.clientX)))
+    }
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+    document.body.style.userSelect = 'none'
+    // On the body too, or the cursor flips back to an arrow the moment the
+    // pointer outruns the 6px handle — which on a fast drag is every frame.
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  // A nested agent opens one level down; the card for the agent already shown
+  // is never in its own steps, so a click there can only ever go deeper.
+  const inner: LogHandlers = React.useMemo(
+    () => ({ ...handlers, onOpenAgent: (t: string) => onPath([...path, t]), openAgent: null }),
+    [handlers, onPath, path]
+  )
+
+  return (
+    <div
+      ref={rootRef}
+      style={{
+        flex: 'none',
+        // Undragged, the width follows the chat zoom and stops at 55% of the
+        // row; dragged, it is what you chose, capped only so the log keeps
+        // `PANEL_LOG_MIN` when the window has since been made narrower.
+        width:
+          dragged === null
+            ? `min(${Math.round(440 * Math.min(zoom, 1.4))}px, 55%)`
+            : `min(${dragged}px, calc(100% - ${PANEL_LOG_MIN}px))`,
+        minWidth: AGENT_PANEL_MIN,
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        position: 'relative',
+        borderLeft: `1px solid ${CHAT.border}`,
+        background: CHAT.bg
+      }}
+    >
+      {/* The resize handle. Inside the panel's own edge rather than straddling
+          it as the sidebar's does: the log's ScrollRail sits flush against
+          this border, and a handle hanging over it would take the scrollbar's
+          last pixels. */}
+      <div
+        onMouseDown={startResize}
+        title="Drag to resize"
+        style={{
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          left: 0,
+          width: 6,
+          cursor: 'col-resize',
+          zIndex: 5
+        }}
+      />
+      <div
+        style={{
+          flex: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 8px 0 12px',
+          height: 34,
+          minWidth: 0,
+          background: CHAT.header,
+          borderBottom: `1px solid ${CHAT.border}`,
+          fontFamily: MONO,
+          fontSize: 11
+        }}
+      >
+        <span
+          style={{
+            flex: 'none',
+            color: CHAT.agent,
+            letterSpacing: '.04em',
+            textTransform: 'uppercase'
+          }}
+        >
+          ◆ agent
+        </span>
+        {/* The way back up from a nested agent. Each crumb is the agent's type,
+            which is what tells two levels apart; the description is in the body. */}
+        <div style={{ ...bandText, display: 'flex', gap: 6, color: CHAT.dim3 }}>
+          {path.length > 1 &&
+            crumbs.map((c, i) => (
+              <React.Fragment key={path[i]}>
+                {i > 0 && <span style={{ color: CHAT.dim4 }}>›</span>}
+                {i < path.length - 1 ? (
+                  <span
+                    onClick={() => onPath(path.slice(0, i + 1))}
+                    data-click=""
+                    title={c?.description}
+                    style={{ cursor: 'pointer', color: CHAT.dim2 }}
+                  >
+                    {c?.agentType ?? 'agent'}
+                  </span>
+                ) : (
+                  <span style={{ color: CHAT.text }}>{c?.agentType ?? 'agent'}</span>
+                )}
+              </React.Fragment>
+            ))}
+        </div>
+        {/* Only the root has a row in the log to go to. */}
+        {crumbs[0] && (
+          <span
+            onClick={() => crumbs[0] && onJump(crumbs[0].id)}
+            data-click=""
+            title="Scroll the log to where this agent was launched"
+            style={{ flex: 'none', padding: '2px 6px', color: CHAT.dim2, cursor: 'pointer' }}
+          >
+            in log
+          </span>
+        )}
+        <FindBtn title="Close the agent panel" onClick={() => onPath([])}>
+          <Close size={12} />
+        </FindBtn>
+      </div>
+      <div
+        ref={bodyRef}
+        className="vchat-scroll"
+        onScroll={(e) => {
+          const el = e.currentTarget
+          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+        }}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
+      >
+        <div ref={contentRef} style={{ zoom, padding: '14px 16px 28px' }}>
+          {entry ? (
+            <AgentDetail key={id} entry={entry} handlers={inner} sub={subagents[id]} />
+          ) : (
+            <div style={{ fontSize: TYPE.prose, lineHeight: TYPE.proseLine, color: CHAT.dim3 }}>
+              This agent is no longer in the loaded conversation — a <code>/clear</code> or a
+              revert removed the message that launched it.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * What the panel says about one agent. Keyed on the agent, so a folded prompt
+ * does not stay unfolded on the next one you open.
+ */
+function AgentDetail({
+  entry,
+  handlers,
+  sub
+}: {
+  entry: TaskEntry
+  handlers: LogHandlers
+  sub: ChatEntry[] | undefined
+}): React.ReactElement {
+  const progress = React.useMemo(() => agentProgress(sub), [sub])
+  const long = entry.prompt.length > 360 || entry.prompt.split('\n').length > 5
+  const [asked, setAsked] = React.useState(!long)
+  const full = handlers.bodies[entry.id]
+  const report = full ?? entry.report
+
+  // A clipped report fetches the rest the moment it is on screen, which in this
+  // panel is always: unlike a tool card, nothing here is folded by default.
+  const { onExpand } = handlers
+  React.useEffect(() => {
+    if (entry.reportTruncated && full === undefined) onExpand(entry.id)
+  }, [entry.id, entry.reportTruncated, full, onExpand])
+
+  return (
+    <>
+      <div style={{ fontFamily: MONO, fontSize: TYPE.gutter, color: CHAT.agent }}>
+        ◆ {entry.agentType}
+      </div>
+      <div
+        style={{
+          marginTop: 4,
+          fontSize: TYPE.prose + 1,
+          lineHeight: TYPE.proseLine,
+          color: CHAT.text,
+          overflowWrap: 'anywhere'
+        }}
+      >
+        {entry.description}
+      </div>
+      <div style={{ marginTop: 6, fontFamily: MONO, fontSize: TYPE.mono, display: 'flex' }}>
+        <AgentStatus entry={entry} liveTools={progress.tools} verbose />
+      </div>
+
+      {entry.prompt && (
+        <PanelSection label="asked">
+          {asked ? (
+            <Md src={entry.prompt} />
+          ) : (
+            <div
+              style={{
+                fontSize: TYPE.prose,
+                lineHeight: TYPE.proseLine,
+                color: CHAT.dim,
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'anywhere',
+                display: '-webkit-box',
+                WebkitLineClamp: 4,
+                WebkitBoxOrient: 'vertical',
+                overflow: 'hidden'
+              }}
+            >
+              {entry.prompt}
+            </div>
+          )}
+          {long && (
+            <span
+              onClick={() => setAsked(!asked)}
+              data-click=""
+              style={{
+                display: 'inline-block',
+                marginTop: 4,
+                fontFamily: MONO,
+                fontSize: TYPE.gutter,
+                color: CHAT.dim3,
+                cursor: 'pointer'
+              }}
+            >
+              {asked ? 'fold' : 'show all'}
+            </span>
+          )}
+        </PanelSection>
+      )}
+
+      <PanelSection label="reported">
+        {report ? (
+          <>
+            <Md src={report} />
+            {entry.reportTruncated && full === undefined && (
+              <div style={{ fontFamily: MONO, color: CHAT.dim3 }}>…</div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontFamily: MONO, fontSize: TYPE.mono, color: CHAT.dim3 }}>
+            {entry.running
+              ? 'still running — its report lands here when it finishes'
+              : 'no report — the agent ended without handing one back'}
+          </div>
+        )}
+      </PanelSection>
+
+      <PanelSection label={`steps${sub?.length ? ` · ${sub.length}` : ''}`}>
+        {/* Bled back out by a row's own side padding, so a step's text starts
+            on the same edge as the report above it. */}
+        <div style={{ margin: '0 -10px' }}>
+          {(sub ?? []).map((e) => (
+            <LogRow key={e.id} entry={e} handlers={handlers} />
+          ))}
+        </div>
+        {!sub?.length && (
+          <div style={{ fontFamily: MONO, fontSize: TYPE.mono, color: CHAT.dim3 }}>
+            {entry.running ? 'no steps reported yet' : 'no steps recorded'}
+          </div>
+        )}
+      </PanelSection>
+    </>
+  )
+}
+
+/** A labelled stretch of the agent panel: a small-caps word on a hairline. */
+function PanelSection({
+  label,
+  children
+}: {
+  label: string
+  children: React.ReactNode
+}): React.ReactElement {
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          marginBottom: 8,
+          fontFamily: MONO,
+          fontSize: 10.5,
+          letterSpacing: '.06em',
+          textTransform: 'uppercase',
+          color: CHAT.dim3
+        }}
+      >
+        {label}
+        <span style={{ flex: 1, height: 1, background: CHAT.border }} />
+      </div>
+      {children}
     </div>
   )
 }
@@ -3611,6 +4264,7 @@ const RAIL_W = 8
 function Outline({
   turns,
   clocks,
+  agents,
   activeId,
   zoom,
   onPick,
@@ -3618,6 +4272,8 @@ function Outline({
 }: {
   turns: { id: string; at: number; text: string; turn: number }[]
   clocks: Map<number, { durationMs?: number; tokens?: number }>
+  /** agents launched per turn — a turn that fanned out is one worth finding */
+  agents: Map<number, number>
   /** the current find hit, so the rail agrees with the log about where you are */
   activeId: string | null
   zoom: number
@@ -3702,6 +4358,11 @@ function Outline({
                 <span>{Math.round(clock.durationMs / 1000)}s</span>
               )}
               {clock?.tokens ? <span>↓{tok(clock.tokens)}</span> : null}
+              {agents.get(t.turn) ? (
+                <span style={{ color: CHAT.agent }} title="agents this turn launched">
+                  ◆ {agents.get(t.turn)}
+                </span>
+              ) : null}
             </div>
             <div
               style={{

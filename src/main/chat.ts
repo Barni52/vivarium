@@ -944,6 +944,13 @@ export class ChatService {
       if (e.kind === 'compact' && e.summary.split('\n').length > 60) {
         return { ...e, summary: e.summary.split('\n').slice(0, 60).join('\n'), truncated: true }
       }
+      // A subagent's report is prose and usually short, but an Explore agent
+      // asked to map a codebase can hand back a few hundred lines — and it rides
+      // on a row that is re-shipped every time its turn settles. The panel shows
+      // the peek and asks `chat:body` for the rest, as a compaction does.
+      if (e.kind === 'task' && e.report.split('\n').length > 120) {
+        return { ...e, report: e.report.split('\n').slice(0, 120).join('\n'), reportTruncated: true }
+      }
       return e
     })
   }

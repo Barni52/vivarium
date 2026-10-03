@@ -114,6 +114,17 @@ const MIDNIGHT = {
   'role-you': '#6cb6d9',
   /** the `stop` role word */
   'role-stop': '#8d94a6',
+  /**
+   * A subagent: the rail on its log card, its band line, its panel.
+   *
+   * The third role hue, and violet because it is the one family left that
+   * reads as neither of the other two — `--role-you` is cool blue and
+   * `--accent2` warm orange, so an agent is visibly *not you and not Claude
+   * talking*, which is the whole thing a dispatched agent is. The same value
+   * as `--code-keyword` under a second name (the `--warn` argument): a token
+   * is a meaning, not a hex.
+   */
+  'role-agent': '#a98fe0',
 
   // ── Derived. ─────────────────────────────────────────────────────────────
   // The named palette does not cover a few states this app has and a transcript
@@ -215,6 +226,7 @@ const GRAPHITE: Tokens = {
   'send-fg': '#1a1305',
   'role-you': '#9bb6a0',
   'role-stop': '#8c8a83',
+  'role-agent': '#b294c9',
 
   // Still the one red in the app that means "this ends something" — a warm
   // theme is not a reason for a delete button to stop looking like one.
@@ -283,6 +295,8 @@ const PAPER: Tokens = {
   'send-fg': '#fffaf7',
   'role-you': '#1f5f8b',
   'role-stop': '#78736a',
+  // Dark enough to carry 11px text on cream, like every other role hue here.
+  'role-agent': '#6d3c9e',
 
   // A step darker than the close button's red, which stays what it is on every
   // theme: this one has to carry small text on cream.
@@ -675,6 +689,8 @@ export const CHAT = {
   live: 'var(--ok)',
   /** the `stop` role word */
   stop: 'var(--role-stop)',
+  /** a subagent — its card's rail, its band line, its panel */
+  agent: 'var(--role-agent)',
   /** plan / question — the "hold on" register */
   hold: 'var(--str)',
   /** a find-in-chat match; the current row additionally takes a `you` rail */

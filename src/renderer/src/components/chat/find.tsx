@@ -101,7 +101,10 @@ export function searchTextOf(entry: ChatEntry): string {
     case 'cmd':
       return `${entry.title}\n${entry.md}`
     case 'task':
-      return `${entry.agentType}\n${entry.description}\n${entry.status}`
+      // The prompt, because the card shows a line of it — but not the report,
+      // which the log never draws: a hit on a row with no visible match in it
+      // reads as the find bar being wrong.
+      return `${entry.agentType}\n${entry.description}\n${entry.status}\n${entry.prompt}`
     case 'todo':
       return entry.text
     case 'stop':

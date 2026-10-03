@@ -704,6 +704,26 @@ export type ChatEntry =
       agentId: string | null
       agentType: string
       description: string
+      /**
+       * What the agent was asked — the tool_use's `prompt`, whole.
+       *
+       * Carried in full rather than clipped behind `chat:body`: it is prose Claude
+       * wrote, and prose is the rounding error in a transcript's weight (see
+       * ChatToolBody). It was thrown away at map time until the agent panel, which
+       * left a task row able to say *that* an agent ran and not what it was for.
+       */
+      prompt: string
+      /**
+       * What the agent answered — its final message, the thing the parent turn
+       * was handed. Empty while it runs and when it ended without one.
+       *
+       * A sync `Task` has it in its tool_result; a background `Agent` in the
+       * notification's `<result>`. Clipped on the wire like a compaction summary
+       * (`reportTruncated`), with the rest behind `chat:body` under this row's id.
+       * It is **not a row** in the main log, on purpose — see taskNotification.
+       */
+      report: string
+      reportTruncated?: boolean
       status: string
       durationMs: number | null
       tools: number | null

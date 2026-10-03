@@ -172,6 +172,9 @@ interface DeleteProjectTarget {
  * scroll position, which cards are expanded and the composer draft; those three
  * live in the component precisely because a move is meant to drop them.
  */
+/** The narrowest the agent panel drags to — a step row's title still reads. */
+export const AGENT_PANEL_MIN = 280
+
 export interface ChatSessionState {
   entries: ChatEntry[]
   /** how many entries main holds — there is an "earlier" whenever this is larger */
@@ -294,6 +297,13 @@ interface AppState {
   expanded: Record<string, boolean>
   sidebarWidth: number
   sidebarCollapsed: boolean
+  /**
+   * The chat agent panel's dragged width (px), or `null` for the default the
+   * panel derives from the chat zoom. Session-only like `sidebarWidth`, and one
+   * value for every chat: it is a fact about the window you are reading in, not
+   * about any one conversation.
+   */
+  agentPanelWidth: number | null
   /**
    * Which theme is on.
    *
@@ -454,6 +464,7 @@ interface AppState {
   select: (sessionId: string) => void
   toggle: (projectId: string) => void
   setSidebarWidth: (n: number) => void
+  setAgentPanelWidth: (n: number) => void
   toggleSidebar: () => void
   setTheme: (name: ThemeName) => void
   /** the next theme in `THEMES` order, wrapping — what Ctrl+Shift+T does */
@@ -659,6 +670,7 @@ export const useStore = create<AppState>((set, get) => ({
   expanded: {},
   sidebarWidth: 288,
   sidebarCollapsed: false,
+  agentPanelWidth: null,
   // Adopted from the attribute, never decided here — see the field's note.
   theme: currentTheme(),
   terminalFontSize: 13,
@@ -995,6 +1007,11 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => ({ expanded: { ...s.expanded, [projectId]: !s.expanded[projectId] } })),
 
   setSidebarWidth: (n) => set({ sidebarWidth: Math.max(232, Math.min(460, n)) }),
+  // Only the floor is clamped here. The ceiling depends on how wide the chat
+  // is, which the store does not know — the panel caps itself against the row
+  // it sits in, so a width dragged on a maximised window cannot crush the log
+  // after a restore-down.
+  setAgentPanelWidth: (n) => set({ agentPanelWidth: Math.max(AGENT_PANEL_MIN, Math.round(n)) }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
   // The attribute (which the CSS reads and localStorage remembers) and the

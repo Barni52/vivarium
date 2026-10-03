@@ -204,6 +204,25 @@ function resultText(content: unknown): string {
     .join('\n')
 }
 
+/**
+ * A subagent's final message, out of the tool_result that hands it back.
+ *
+ * `toolUseResult.content` is the agent's own text blocks and nothing else, so it
+ * is read first. The tool_result's *content* is what the parent model was shown,
+ * and the CLI appends its bookkeeping there — an `agentId: … (for resuming…)`
+ * line and a `<usage>` block — which is addressed to the model, not part of
+ * what the agent said. That tail is cut only where it is the tail, so a report
+ * that happens to mention an agentId mid-paragraph keeps it.
+ */
+function agentReport(structured: Json | null, text: string): string {
+  const own = resultText(structured?.content).trim()
+  if (own) return own
+  return text
+    .replace(/<usage>[\s\S]*?<\/usage>\s*$/, '')
+    .replace(/(?:^|\n)agentId: [\w-]+[^\n]*\s*$/, '')
+    .trim()
+}
+
 function firstLine(s: string): string {
   const t = s.trim().split('\n')[0] ?? ''
   return t.length > 160 ? `${t.slice(0, 157)}…` : t
@@ -978,6 +997,8 @@ export class ChatMapper {
         // of them used to print the placeholder.
         agentType: str(input.subagent_type) || 'general-purpose',
         description: str(input.description) || compact(str(input.prompt), 80),
+        prompt: str(input.prompt),
+        report: '',
         status: 'running',
         durationMs: null,
         tools: null,
@@ -1050,7 +1071,8 @@ export class ChatMapper {
    * The `<result>` is deliberately **not** given a row. It is the agent's whole
    * report, it is already the last row of the sub-log this task expands into,
    * and Claude invariably paraphrases it in the very next message — three copies
-   * of one paragraph, two of them uninvited.
+   * of one paragraph, two of them uninvited. It is kept on the task row as
+   * `report` instead, which the agent panel reads and the log never draws.
    *
    * A notification whose `<tool-use-id>` names no row we hold (a `/clear`
    * between launch and report, or a rewind over the launch) still says
@@ -1076,6 +1098,8 @@ export class ChatMapper {
 
     entry.agentId = entry.agentId || noteTag(body, 'task-id') || null
     entry.status = status
+    entry.report = noteTag(body, 'result') || entry.report
+    if (entry.report) this.bodies.set(entry.id, entry.report)
     entry.durationMs = usageNum('duration_ms') ?? entry.durationMs
     entry.tools = usageNum('tool_uses') ?? entry.tools
     entry.tokens = usageNum('subagent_tokens') ?? entry.tokens
@@ -1141,6 +1165,10 @@ export class ChatMapper {
         return entry
       }
       entry.status = isError ? 'failed' : str(structured?.status) || 'completed'
+      // `|| entry.report` for the same reason as the id above: a pass that sees
+      // the result without its structured half must not blank a report.
+      entry.report = agentReport(structured, text) || entry.report
+      if (entry.report) this.bodies.set(entry.id, entry.report)
       entry.durationMs = num(structured?.totalDurationMs)
       entry.tools = num(structured?.totalToolUseCount)
       entry.tokens = num(structured?.totalTokens)

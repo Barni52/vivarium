@@ -62,17 +62,6 @@ const META_GAP = 3
  */
 const BAND_GAP = 14
 
-/**
- * How far a subagent's sub-log is inset from the row that spawned it.
- *
- * It used to be the gutter's width plus a bit — the rail sat under the boundary
- * the two columns shared. With no column there is no boundary to hang it off, and
- * the indent only has to say "these rows belong to the card above": 12 clears the
- * row's own 10px padding by enough for the rail to read as a step in rather than
- * as a second left edge.
- */
-const SUB_INDENT = 12
-
 const mono: React.CSSProperties = {
   fontFamily: MONO,
   fontSize: TYPE.mono,
@@ -219,8 +208,12 @@ function Card({
 export interface LogHandlers {
   /** expand a clipped tool body (main holds the full text) */
   onExpand: (entryId: string) => void
-  /** expand a subagent row into its own sub-log */
+  /** fetch a subagent's sub-log — the agent panel asks, never the log row */
   onExpandTask: (toolUseId: string, agentId: string | null) => void
+  /** open a subagent in the agent panel */
+  onOpenAgent: (toolUseId: string) => void
+  /** the agent the panel is showing, so its card can say so */
+  openAgent: string | null
   /** full bodies that have already been fetched */
   bodies: Record<string, string>
   /** pictures already fetched, by chip handle; `null` means main no longer has it */
@@ -246,14 +239,20 @@ export interface LogHandlers {
 export const LogRow = React.memo(function LogRow({
   entry,
   handlers,
-  depth = 0,
-  streaming = false
+  streaming = false,
+  groupIndex = 0,
+  groupSize = 1
 }: {
   entry: ChatEntry
   handlers: LogHandlers
-  depth?: number
   /** this is the row the running turn is writing into — reveal it smoothly */
   streaming?: boolean
+  /**
+   * A `task` row's place among the agents its message launched together.
+   * Primitives rather than an object, so the memo still holds.
+   */
+  groupIndex?: number
+  groupSize?: number
 }): React.ReactElement | null {
   switch (entry.kind) {
     case 'text':
@@ -520,7 +519,9 @@ export const LogRow = React.memo(function LogRow({
       )
 
     case 'task':
-      return <TaskRow entry={entry} handlers={handlers} depth={depth} />
+      return (
+        <TaskRow entry={entry} handlers={handlers} groupIndex={groupIndex} groupSize={groupSize} />
+      )
 
     case 'todo':
       // Always one line — it changed nothing on disk; the *fold* (current state)
@@ -1401,90 +1402,203 @@ function SlowClock({ since }: { since: number }): React.ReactElement | null {
 }
 
 /**
- * One `task` row that expands into its own sub-log.
+ * Where a subagent's own work has got to, read off its sub-log.
  *
- * The filesystem hands us exactly this shape, which is the reason to trust it:
- * the parent transcript already *is* the collapsed view, and the sibling file
- * already *is* the expansion. The sub-log nests — a subagent's own subagent is
- * another task row that expands the same way, with no depth cap.
+ * Free while the agent runs: main ships the forwarded frames as `task` events
+ * whether or not anything is looking at them, so the store already holds every
+ * agent's buffer and nothing has to be asked for to say what it is doing now.
+ * `tools` counts calls made so far — the row's own `tools` is only reported at
+ * the end, and an agent showing no count for two minutes reads as idle.
+ */
+export function agentProgress(sub: ChatEntry[] | undefined): { tools: number; latest: string | null } {
+  if (!sub || sub.length === 0) return { tools: 0, latest: null }
+  let tools = 0
+  for (const e of sub) if (e.kind === 'tool' || e.kind === 'task') tools++
+  let latest: string | null = null
+  for (let i = sub.length - 1; i >= 0 && latest === null; i--) {
+    const e = sub[i]
+    if (e.kind === 'tool') latest = `${e.role} ${e.title}`
+    else if (e.kind === 'task') latest = `◆ ${e.agentType} ${e.description}`
+    else if (e.kind === 'cmd') latest = e.title || 'command'
+    else if (e.kind === 'thinking') latest = 'thinking'
+    else if (e.kind === 'text' && e.role === 'claude' && e.md.trim()) {
+      latest = e.md.trim().split('\n')[0].slice(0, 200)
+    }
+  }
+  return { tools, latest }
+}
+
+/**
+ * An agent's outcome in one line: a mark, then what it cost.
+ *
+ * One component for the log card, the band and the panel, so the three can
+ * never disagree about whether an agent finished. Colour is spent only on a
+ * failure — the same rule the `stop` row follows — and the mark carries the
+ * meaning without it.
+ */
+export function AgentStatus({
+  entry,
+  liveTools,
+  verbose = false
+}: {
+  entry: Extract<ChatEntry, { kind: 'task' }>
+  /** calls counted off the sub-log, for while the row has no total of its own */
+  liveTools: number
+  /** the panel spells the status word out; the card and the band let the mark say it */
+  verbose?: boolean
+}): React.ReactElement {
+  if (entry.running) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none', color: CHAT.dim2 }}>
+        <Dots color={CHAT.agent} />
+        <Elapsed since={entry.at} />
+        {liveTools > 0 && <span>· {calls(liveTools)}</span>}
+      </span>
+    )
+  }
+  const failed = entry.status === 'failed' || entry.status === 'error'
+  const done = entry.status === 'completed'
+  const tools = entry.tools ?? (liveTools || null)
+  const stats = [
+    verbose || (!done && !failed) ? entry.status : null,
+    entry.durationMs !== null ? secs(entry.durationMs) : null,
+    tools !== null ? calls(tools) : null,
+    entry.tokens !== null ? `${tok(entry.tokens)} tok` : null
+  ].filter(Boolean)
+  return (
+    <span style={{ flex: 'none', color: failed ? CHAT.danger : CHAT.dim2 }}>
+      {done ? '✓ ' : failed ? '✗ ' : '■ '}
+      {stats.join(' · ')}
+    </span>
+  )
+}
+
+function calls(n: number): string {
+  return `${n} ${n === 1 ? 'tool' : 'tools'}`
+}
+
+/** `42s`, `3m 05s` — an agent can run long enough that bare seconds stop reading. */
+function secs(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+}
+
+/**
+ * One dispatched subagent, as a card in the log.
+ *
+ * **Its own family, not a fourth kind of tool card.** It used to be the same
+ * one-line inset box as a `Read`, with only the gutter word `task` to tell it
+ * apart — and an agent is not a call, it is a second worker with its own
+ * transcript, which the reader goes looking for. So it takes the `you` bubble's
+ * idiom in a third role hue: a 2px `--role-agent` rail and a `◆` (shape first,
+ * so the hue only reinforces it), on the inset surface the machinery uses.
+ *
+ * It says three things: who and what for (type and description), what it was
+ * asked (one line of the prompt), and — only while it runs — what it is doing
+ * now (`↳` the latest step). The step line is there from the first frame with a
+ * placeholder, so the card does not grow a line under the reader the moment the
+ * first tool call lands.
+ *
+ * **It does not expand.** Clicking opens the agent panel beside the log. The
+ * sub-log used to pour into the column right here, which pushed the
+ * conversation down by however many steps the agent took and lost the reader's
+ * place in it; the panel shows the same rows without moving the log a pixel.
+ *
+ * Agents one message launched together render as one group: the first carries
+ * the meta line (`agents · 3 in parallel`) and the rest sit under it with no
+ * line of their own, because a fan-out is one decision and reads as one.
  */
 function TaskRow({
   entry,
   handlers,
-  depth
+  groupIndex,
+  groupSize
 }: {
   entry: Extract<ChatEntry, { kind: 'task' }>
   handlers: LogHandlers
-  depth: number
+  groupIndex: number
+  groupSize: number
 }): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const sub = handlers.subagents[entry.toolUseId] ?? []
+  const sub = handlers.subagents[entry.toolUseId]
+  const progress = React.useMemo(() => agentProgress(sub), [sub])
+  const on = handlers.openAgent === entry.toolUseId
+  // A one-line peek, so the slice is cheap and the ellipsis does the rest — a
+  // prompt can run to pages and only the first sentence is ever on screen here.
+  const peek = entry.prompt.slice(0, 400).replace(/\s+/g, ' ').trim()
 
-  // Through a ref, and the effect below depends on primitives only: `handlers`
-  // is rebuilt whenever *any* sub-log changes, so asking for one with `handlers`
-  // in the dependency list is a request that triggers the next request.
-  const expand = React.useRef(handlers.onExpandTask)
-  React.useEffect(() => {
-    expand.current = handlers.onExpandTask
-  })
-
-  // Asked on open, and **again when the agent stops**. What main can hand back
-  // changes at exactly that moment: while a subagent runs the answer is the live
-  // buffer of whatever the stream forwarded, and once it finishes the complete
-  // sibling file exists. Without the second ask, a task expanded while it ran
-  // showed the three rows it had at that instant for good.
-  React.useEffect(() => {
-    if (open) expand.current(entry.toolUseId, entry.agentId)
-  }, [open, entry.running, entry.toolUseId, entry.agentId])
-
-  const toggle = (): void => setOpen(!open)
-
-  const stats = [
-    entry.status,
-    entry.durationMs !== null ? `${Math.round(entry.durationMs / 1000)}s` : null,
-    entry.tools !== null ? `${entry.tools} tools` : null,
-    entry.tokens !== null ? `${tok(entry.tokens)} tok` : null
-  ].filter(Boolean)
-
-  return (
-    <>
-      <Line at={entry.at} role="task" color={CHAT.dim2}>
-        <Card onClick={toggle}>
-          <span style={{ color: CHAT.text, flex: 'none' }}>{entry.agentType}</span>
-          <span
-            style={{
-              flex: 1,
-              minWidth: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap'
-            }}
-          >
-            {entry.description}
-          </span>
-          {entry.running ? (
-            <>
-              <Dots />
-              <Elapsed since={entry.at} style={{ flex: 'none' }} />
-            </>
-          ) : (
-            <span style={{ flex: 'none', color: CHAT.dim2 }}>{stats.join(' · ')}</span>
-          )}
-          <span style={{ flex: 'none', fontSize: TYPE.gutter, color: CHAT.dim3 }}>
-            {open ? 'hide' : `show${sub.length ? ` ${sub.length}` : ''}`}
-          </span>
-        </Card>
-      </Line>
-      {open && (
-        <div style={{ borderLeft: `1px solid ${CHAT.borderSoft}`, marginLeft: SUB_INDENT }}>
-          {sub.map((e) => (
-            <LogRow key={e.id} entry={e} handlers={handlers} depth={depth + 1} />
-          ))}
-          {sub.length === 0 && (
-            <div style={{ ...mono, color: CHAT.dim3, padding: '8px 18px' }}>no steps recorded</div>
-          )}
+  const card = (
+    <div
+      onClick={() => handlers.onOpenAgent(entry.toolUseId)}
+      data-click=""
+      title={on ? 'Showing in the agent panel — click to close it' : 'Open this agent'}
+      style={{
+        ...mono,
+        minWidth: 0,
+        padding: '8px 12px',
+        background: CHAT.inset,
+        // The whole border lights while the panel is showing this agent, the
+        // way a running compaction's does: on, not pulsing. Spelled as
+        // longhands because the colour changes on a re-render, and React
+        // re-applying a `border` shorthand would wipe the `borderLeft` rail.
+        borderStyle: 'solid',
+        borderWidth: '1px 1px 1px 2px',
+        borderTopColor: on ? CHAT.agent : CHAT.borderCard,
+        borderRightColor: on ? CHAT.agent : CHAT.borderCard,
+        borderBottomColor: on ? CHAT.agent : CHAT.borderCard,
+        borderLeftColor: CHAT.agent,
+        borderRadius: CHAT.radiusCard,
+        color: CHAT.dim,
+        cursor: 'pointer'
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <span aria-hidden style={{ color: CHAT.agent, flex: 'none' }}>
+          ◆
+        </span>
+        <span style={{ color: CHAT.text, flex: 'none' }}>{entry.agentType}</span>
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            color: CHAT.text,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <Hi>{entry.description}</Hi>
+        </span>
+        <AgentStatus entry={entry} liveTools={progress.tools} />
+      </div>
+      {peek && <div style={{ ...oneLine, color: CHAT.dim3, marginTop: 3 }}><Hi>{peek}</Hi></div>}
+      {entry.running && (
+        <div style={{ ...oneLine, color: CHAT.dim2, marginTop: 3 }}>
+          ↳ {progress.latest ?? 'starting…'}
         </div>
       )}
-    </>
+    </div>
   )
+
+  if (groupIndex === 0) {
+    return (
+      <Line
+        at={entry.at}
+        role={groupSize > 1 ? `agents · ${groupSize} in parallel` : 'agent'}
+        color={CHAT.agent}
+      >
+        {card}
+      </Line>
+    )
+  }
+  // The rest of a fan-out: `Line`'s side padding without its meta line, and
+  // nothing on top, so the lanes sit 6px apart — one block, not three rows.
+  return <div style={{ padding: '0 10px 6px' }}>{card}</div>
+}
+
+const oneLine: React.CSSProperties = {
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap'
 }

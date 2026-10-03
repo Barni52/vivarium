@@ -317,7 +317,10 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   row, never rendered as itself, and adopted across turns by reference (`adoptTasks`), since the
   agent outlives the mapper that launched it. The **sub-log** is the sibling file once the agent
   stops and the forwarded stream while it runs, chosen by the row's `running`; one sub-mapper per
-  subagent, and rows merged by id at all three hops.
+  subagent, and rows merged by id at all three hops. The row also carries the agent's `prompt`
+  (whole — it is prose) and its `report` (the tool_result's text, or the notification's
+  `<result>`, clipped on the wire with the rest behind `chat:body`). The report is **never a row
+  in the log** — Claude paraphrases it in the next message — only the agent panel draws it.
 - **Neither a slash command's output nor a task notification is something the user typed.** Both
   arrive on ordinary **user** lines, and both render as raw markup inside the tinted `you` bubble
   if the mapper does not recognise them there.
@@ -433,6 +436,17 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   field, multi-select answers travel joined with `", "` as a string, and `updatedInput` is
   re-validated against the tool's schema (unknown keys tolerated). The settled row reads
   `toolUseResult`, never prose.
+- **A subagent is one object in three places, and none of them expands in place.** In the log it
+  is a card in its own family — a `--role-agent` rail and a `◆`, the prompt's first line, and
+  while running a `↳` latest step whose line is reserved from the first frame — with agents one
+  message launched drawn as one group (`agentGroups`, keyed on the id's message segment). Above
+  the composer the **agents band** lists everything running plus whatever the latest turn
+  launched, so finished ones leave when you send the next message and a background agent stays
+  for as long as it runs. Clicking either opens the **agent panel** in the outline's slot:
+  outcome, asked, reported, then the steps as ordinary `LogRow`s, with a nested agent opening
+  one level down behind a breadcrumb. The sub-log used to pour into the log under its card,
+  which moved the conversation by every step the agent took; do not bring that back. The live
+  `↳` step and tool count are read off the `task` buffer the store already holds — no IPC.
 - **A `you` row is a raised `--card` bubble *and* a `--role-you` left rail *and* a gap above it.**
   The surface alone was one step over the page and read as one more tool card; the rail and the
   gap are what make a turn findable when scrolling back through mostly machinery.
