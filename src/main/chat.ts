@@ -397,6 +397,34 @@ function activeTurn(l: Live): number {
   return l.inFlight[0] ?? l.turn
 }
 
+/**
+ * Is this frame the start of a turn nobody sent — model output arriving while
+ * no turn is open?
+ *
+ * Claude Code runs turns of its own. A background agent's completion is queued
+ * inside the CLI as a `task-notification` prompt, and once the CLI is free it
+ * *answers* it — a whole turn, with its own `result`, that no message of ours
+ * started (2.1.295's schema: "exactly one result message per turn", and turns
+ * can be synthetic). A plain interrupt leaves those notifications queued, so
+ * one can start the moment an Esc has ended the turn before it.
+ *
+ * Only what a model call produces counts: an `assistant` message or a
+ * `message_start` of the **main** conversation, or a compaction boundary (an
+ * auto-compact can run before a turn's first request). Each of those belongs to
+ * a turn, and every turn ends in a `result`, so a turn opened here is always
+ * closed. The bar is kept that narrow on purpose, because a false positive is a
+ * turn no result will ever close: not any stream event (the CLI's stall
+ * heartbeat is a bare `ping`), not a user line (the CLI files lines of its own
+ * between turns), and nothing a subagent says — a background agent talks for as
+ * long as it runs and ends in a task notification, never a `result`.
+ */
+function startsCliTurn(type: string, f: Json): boolean {
+  if (str(f.parent_tool_use_id)) return false
+  if (type === 'assistant') return true
+  if (type === 'stream_event') return str(obj(f.event)?.type) === 'message_start'
+  return type === 'system' && str(f.subtype) === 'compact_boundary'
+}
+
 /** How many entries the renderer mounts; the rest come from `chat:earlier`. */
 const MOUNT_WINDOW = 300
 
@@ -575,6 +603,18 @@ interface Live {
    * moment even after the agent finished and wrote thirty more.
    */
   subagentsRead: Set<string>
+  /**
+   * The CLI's task id → the tool_use id that spawned it, learned from
+   * `task_started`.
+   *
+   * `task_updated` names its task by `task_id` **only** — its schema carries a
+   * `patch` and no `tool_use_id` at all (read off 2.1.295's own frame schema) —
+   * so without this map every one of them was dropped at the door, and a
+   * background agent's row had no live way to stop running: it waited for the
+   * `<task-notification>` *transcript* line to reach a mapper, which can take a
+   * whole extra turn and, through a withheld settle, never happen at all.
+   */
+  taskIds: Map<string, string>
   /** byte offset into the transcript that has already been mapped */
   offset: number
   /**
@@ -790,6 +830,7 @@ export class ChatService {
       todos: new Map(),
       subagents: new Map(),
       subagentsRead: new Set(),
+      taskIds: new Map(),
       offset: 0,
       transcriptExists: undefined,
       turn: 0,
@@ -822,6 +863,14 @@ export class ChatService {
     const historyError = await this.readHistory(l)
     if (!(await this.start(l))) return { ok: false, reason: 'spawn-failed' }
     this.live.set(session.id, l)
+    // A process that has just been spawned is running nothing — nothing is even
+    // emitted until the first user message — so this is the one moment the
+    // reading is known without being told. Said out loud because the store keeps
+    // the last thing it heard across a close: a chat torn down mid-turn (a retry,
+    // a move, a container stop — `close` emits nothing, by design) came back
+    // `live` with its old `working` and showed the ellipsis until a turn ended.
+    // Quiet: nothing finished, so there is nothing to flag.
+    this.setActivity(l, 'idle', true)
 
     // The open-time context reading is the load-bearing half of the cadence:
     // nothing is emitted on the wire until the first user message, so a chat
@@ -1056,15 +1105,30 @@ export class ChatService {
     // reports into this one, and the row it completes belongs to that turn.
     mapper.adoptTasks(l.entries)
     const now = Date.now()
+    const touched: ChatEntry[] = []
+    for (const line of lines) touched.push(...mapper.feed(line, now))
     // Rows this turn *changed* without creating. There is one producer: a
     // background agent's notification completing a task row from an earlier
     // turn. They are not part of this turn's replacement set — dropping and
     // re-adding them would move them out of their place in time — so they ride
     // out separately, as the upserts they are.
-    const foreign: ChatEntry[] = []
-    for (const line of lines) {
-      for (const e of mapper.feed(line, now)) if (e.turn !== turn) foreign.push(e)
-    }
+    //
+    // **"Not one of the mapper's own rows", not "stamped with another turn".**
+    // Those were the same test until the turn number stopped being the proof: an
+    // adopted row is main's object, held by reference, and when it carries this
+    // turn's number the turn test filed it with the replacement set — which does
+    // not contain it, and which is withheld whenever the transcript is short. The
+    // row was completed in main and never shipped, so the card span on screen
+    // until the chat was reopened.
+    //
+    // By id rather than by object: a Skill's result *replaces* its row with a
+    // new object (see ChatMapper.toolResult), so the object touched at its
+    // tool_use is no longer the mapper's — and shipping it would put the stale
+    // tool card back over the settled row. Latest touch per id wins.
+    const own = new Set(mapper.entries.map((e) => e.id))
+    const foreignById = new Map<string, ChatEntry>()
+    for (const e of touched) if (!own.has(e.id)) foreignById.set(e.id, e)
+    const foreign = [...foreignById.values()]
     mapper.markCancelled(0)
     // Shipped before the withholding check below, and unconditionally: a
     // finished agent must not wait on a turn whose prose is still landing, and
@@ -1218,9 +1282,13 @@ export class ChatService {
       l.inFlight = []
       // And a message waiting behind it is never going to be written now.
       this.dropQueue(l)
-      this.setActivity(l, 'idle', true)
       l.turnRunning = false
     }
+    // Outside the branch: a dead process is idle whether or not a turn was
+    // running, and "not running" was not always the same as "showing idle" — a
+    // card from a background agent leaves `waiting` behind with no turn in
+    // flight. The store no-ops a repeat, so the usual case costs nothing.
+    this.setActivity(l, 'idle', true)
     this.emit({ kind: 'exit', sessionId: l.session.id, exitCode: code })
     this.live.delete(l.session.id)
   }
@@ -1313,6 +1381,11 @@ export class ChatService {
   private frame(l: Live, f: Json): void {
     const type = str(f.type)
 
+    // Model output with no turn open is a turn **the CLI started by itself**, and
+    // it gets opened as one before anything else reads `activeTurn`. See
+    // `startsCliTurn` for what qualifies and `openCliTurn` for why this matters.
+    if (!l.turnRunning && startsCliTurn(type, f)) this.openCliTurn(l)
+
     // The first frame of a turn is the proof the 60s test is actually looking
     // for, so the budget widens the moment it lands. Re-armed here rather than
     // left to the next chunk: `onStdout` arms *before* it frames, so the timer
@@ -1359,7 +1432,9 @@ export class ChatService {
     if (type === 'system') {
       const subtype = str(f.subtype)
       if (subtype === 'init') return this.init(l, f)
-      if (subtype === 'task_started' || subtype === 'task_updated') return this.taskEvent(l, f)
+      if (subtype === 'task_started' || subtype === 'task_updated' || subtype === 'task_notification') {
+        return this.taskEvent(l, f)
+      }
       // A compaction is the one event that invalidates a name without anyone
       // doing anything: the conversation has outgrown its own context, so the
       // opening prompt the title came from is now the *smallest* part of it —
@@ -1378,10 +1453,19 @@ export class ChatService {
       // compact_boundary / turn_duration fall through to the mapper.
     }
 
-    if (type === 'assistant') {
+    if (type === 'assistant' && !str(f.parent_tool_use_id)) {
       // The turn is producing output, so it is working — and this is the only
       // place that has to say so, because the derivation costs no extra parsing:
       // main is already reading every message to render the log.
+      //
+      // **The main conversation's output only.** `--forward-subagent-text` sends
+      // every subagent's messages down this same stream, and a *background* agent
+      // keeps talking after the turn that launched it has ended — so each of its
+      // messages flipped an idle session back to `working`, and nothing was left
+      // to flip it back: no turn was running, so no `result` was coming. The
+      // sidebar said "working" from the agent's first step until the next turn
+      // you happened to send. A running agent has its own surface (its card, the
+      // agents band); this state is about the turn.
       this.setActivity(l, 'working')
     }
 
@@ -1406,6 +1490,15 @@ export class ChatService {
     const rows = touched.filter(
       (e) => !(e.kind === 'stop' && e.text === 'interrupted' && this.hasInterruptRow(l, e.turn))
     )
+    // The marker is the renderer's cue to drop that turn's running clock, so main
+    // drops its own copy at the same moment rather than waiting for `result`.
+    // Kept until then, the row is still there to be *written to* — a usage
+    // reading or a cleared phase upserts it — and an upsert landing after the
+    // marker would put `working · 4s` back on screen. `result` re-sends the
+    // marker for the same reason (see there); this keeps the window shut.
+    for (const e of rows) {
+      if (e.kind === 'stop' && e.text === 'interrupted') this.dropTurnClock(l, e.turn)
+    }
     if (rows.length) {
       for (const [id, body] of mapper.bodies) l.bodies.set(id, body)
       this.keepImages(l, mapper.images)
@@ -1629,20 +1722,91 @@ export class ChatService {
     this.upsert(l, [entry])
   }
 
+  /**
+   * The CLI's own task lifecycle, which is the **live** end of a subagent.
+   *
+   * Three frames, in the shapes 2.1.295's schema gives them — not the shapes
+   * this used to assume, which is why a finished agent's card kept spinning:
+   *
+   *   - `task_started` carries `task_id` *and* `tool_use_id`. It is the only one
+   *     guaranteed to name the spawning call, so it is read for the pairing alone.
+   *   - `task_updated` carries `task_id` and a `patch` — the status is
+   *     `patch.status` (`completed` / `failed` / `killed`, among non-terminal
+   *     ones) and there is **no** `tool_use_id`. Matching on one returned on the
+   *     first line for every frame this ever received.
+   *   - `task_notification` is the terminal bookend: `tool_use_id` when the CLI
+   *     knows it, `status` (`completed` / `failed` / `stopped`) and a `usage`
+   *     block holding the same three numbers a synchronous Task's
+   *     `toolUseResult` reports. It was not routed here at all.
+   *
+   * Before this the only thing that could stop a **background** agent's row was
+   * its `<task-notification>` transcript line reaching a mapper — a turn later at
+   * best, and never when the settle carrying it was withheld (see settleTurn).
+   *
+   * Only a row that is still running is touched. A synchronous Task is finished
+   * by its own tool_result, whose numbers are the richer of the two, and this
+   * must not repaint them a moment later; a background agent's notification line
+   * still lands at the next settle and fills in the report, which this leaves
+   * alone because a notification's `summary` is not one.
+   */
   private taskEvent(l: Live, f: Json): void {
-    const toolUseId = str(f.tool_use_id) || str(f.toolUseId)
-    if (!toolUseId) return
-    const entry = l.entries.find((e) => e.kind === 'task' && e.toolUseId === toolUseId)
-    if (!entry || entry.kind !== 'task') return
-    if (str(f.subtype) === 'task_updated') {
-      entry.running = false
-      entry.status = str(f.status) || 'completed'
-      entry.durationMs = num(f.duration_ms) ?? entry.durationMs
-      // Emitted, not silently folded into main's copy: the renderer holds its own
-      // rows, so a task row that is not shipped stays spinning on screen until the
-      // turn's settle lands — which for a long turn is minutes later.
-      this.upsert(l, [entry])
+    const subtype = str(f.subtype)
+    const taskId = str(f.task_id)
+    const named = str(f.tool_use_id)
+    if (subtype === 'task_started') {
+      if (taskId && named) l.taskIds.set(taskId, named)
+      return
     }
+    const toolUseId = named || (taskId ? l.taskIds.get(taskId) : undefined)
+    if (!toolUseId) return
+
+    let status: string | null = null
+    if (subtype === 'task_notification') status = str(f.status) || 'completed'
+    else {
+      const s = str(obj(f.patch)?.status)
+      if (s === 'completed' || s === 'failed') status = s
+      // The notification that follows spells the same end `stopped`; one word
+      // for it on the card whichever of the two lands first.
+      else if (s === 'killed') status = 'stopped'
+    }
+    if (!status) return
+
+    const found = this.findTask(l, toolUseId)
+    if (!found || !found.entry.running) return
+    const { entry, parent } = found
+    const usage = obj(f.usage)
+    entry.running = false
+    entry.status = status
+    entry.durationMs = num(usage?.duration_ms) ?? entry.durationMs
+    entry.tools = num(usage?.tool_uses) ?? entry.tools
+    entry.tokens = num(usage?.total_tokens) ?? entry.tokens
+    // Emitted, not silently folded into main's copy: the renderer holds its own
+    // rows, so a task row that is not shipped stays spinning on screen until
+    // something else happens to re-send it. An agent nested inside another
+    // lives in its parent's sub-log rather than the log, and goes out the way
+    // that sub-log's rows always do.
+    if (parent) this.emit({ kind: 'task', sessionId: l.session.id, toolUseId: parent, entries: [entry] })
+    else this.upsert(l, [entry])
+  }
+
+  /**
+   * A `task` row by its spawning tool_use id: in the log, or one level down in
+   * a sub-log (`parent` names it), where an agent started by another agent is.
+   * The objects are the ones main holds, so a mutation is the update.
+   */
+  private findTask(
+    l: Live,
+    toolUseId: string
+  ): { entry: Extract<ChatEntry, { kind: 'task' }>; parent: string | null } | null {
+    for (const e of l.entries) {
+      if (e.kind === 'task' && e.toolUseId === toolUseId) return { entry: e, parent: null }
+    }
+    for (const [parent, rows] of l.subagents) {
+      for (const e of rows) {
+        if (e.kind === 'task' && e.toolUseId === toolUseId) return { entry: e, parent }
+      }
+    }
+    return null
   }
 
   private result(l: Live, f: Json): void {
@@ -1679,7 +1843,19 @@ export class ChatService {
       // them. Neither producer can be dropped: the mapper's is what a reopened
       // conversation renders (it is in the transcript), and this one is the only
       // row an older CLI that emits no such message would produce at all.
-      if (!this.hasInterruptRow(l, turn)) {
+      //
+      // **The one already there is sent again rather than left alone.** A stop
+      // row landing is the renderer's only cue to take a turn's clock down, so
+      // this is the moment that has to be certain, and the marker's own landing
+      // is not: anything that wrote to the clock after it would put it back, and
+      // with no second row coming, `working · 4s` would stay on screen for the
+      // rest of the session. An upsert of an identical row is a no-op everywhere
+      // except for exactly that.
+      const marker = l.entries.find(
+        (e) => e.turn === turn && e.kind === 'stop' && e.text === 'interrupted'
+      )
+      if (marker) this.upsert(l, [marker])
+      else {
         this.appendEntries(l, [
           {
             id: `stop:${turn}`,
@@ -1739,6 +1915,13 @@ export class ChatService {
     // settle is about to read, which is the case `takeTurn` already exists for
     // — one turn per settle, from an offset this turn's `from` captured above.
     if (l.inFlight.length === 0) this.startNext(l)
+    // Something is still in flight that this result was not for. By
+    // construction that cannot happen — one message reaches the pipe at a time,
+    // and a turn the CLI starts itself is opened as one — but the clock was
+    // disarmed at the top of this method and nothing else would re-arm it, so
+    // if it ever did, a turn with no frames left to come would read `working`
+    // for good instead of failing on the silence budget like any other.
+    else this.armSilence(l)
   }
 
   /**
@@ -1891,6 +2074,7 @@ export class ChatService {
     l.todos.clear()
     l.subagents.clear()
     l.subagentsRead.clear()
+    l.taskIds.clear()
     l.offset = 0
     // The conversation those turns belonged to is gone — including anything
     // still waiting to be sent into it. The rows are already cleared above, so
@@ -2211,6 +2395,53 @@ export class ChatService {
   }
 
   /**
+   * Open a turn the CLI started by itself (see `startsCliTurn`) — the same
+   * bookkeeping `startTurn` does, minus the message, because there is none.
+   *
+   * Left unopened, such a turn was invisible to everything that reads
+   * `turnRunning` and `inFlight`, and that was both halves of "working stays":
+   *
+   *   - **Esc did nothing.** `interrupt` returns early with no turn running, so a
+   *     turn answering a background agent's report — which can go on for as
+   *     long as any other — could not be stopped, while its `assistant` frames
+   *     held the sidebar at `working`. An Esc that *did* stop a turn could be
+   *     followed by exactly this: a notification it left queued starts a turn
+   *     of its own the moment the CLI is free.
+   *   - **Its rows and its result went to the turn before.** `activeTurn` fell
+   *     back to `l.turn`, so the streamed answer was stamped as part of your
+   *     last turn, its `result` re-froze that turn's clock with this one's
+   *     duration, and its settle compared this turn's prose against both turns'
+   *     and was withheld — which is where the finished agent's completion was
+   *     lost (see settleTurn).
+   *
+   * Opened, it has its own number, its own clock (`working · 4s` at the tail,
+   * and the composer offering Esc), its own settle, and a message typed into it
+   * queues behind it exactly as one typed into any other turn does — rather
+   * than being written into a turn the CLI is busy with, which is the steering
+   * `send` exists to prevent. There is no `you` row: nobody typed anything.
+   */
+  private openCliTurn(l: Live): void {
+    l.turn += 1
+    const turn = l.turn
+    l.inFlight.push(turn)
+    l.turnRunning = true
+    l.interrupted = false
+    l.malformed = 0
+    l.mapper = null
+    // `frame` arms the long budget on the way past: this frame is the proof of
+    // life the short one is waiting for.
+    l.spoke = false
+    l.slowTurn = false
+    l.streaming = null
+    l.usage.clear()
+    const at = Date.now()
+    this.appendEntries(l, [
+      { id: `clock:${turn}`, role: 'run', at, turn, kind: 'turn', startedAt: at }
+    ])
+    this.setActivity(l, 'working', false, true)
+  }
+
+  /**
    * Open the next queued turn, if there is one. Called from `result`, which is
    * the only moment the CLI is provably free.
    *
@@ -2266,11 +2497,20 @@ export class ChatService {
     // `aborted_streaming`, the process survived and the next turn returned
     // normally. `deny` alone never ends anything, since the agent carries on with
     // the denial as a tool result within the same turn.
+    const answered = l.pending.size > 0
     for (const [requestId] of l.pending) {
       this.respond(l, requestId, { behavior: 'deny', message: 'Interrupted by the user.' })
     }
+    if (!l.turnRunning) {
+      // A no-op with nothing running, and never a draft-killer — except that a
+      // card can be up with no turn at all (a background agent asks too), and
+      // the `waiting` it raised has just been answered away.
+      if (answered) this.setActivity(l, 'idle', true)
+      return
+    }
+    // Only now: armed with nothing running, the flag outlived this press and
+    // silenced the "finished" of whatever turn ended next.
     l.interrupted = true
-    if (!l.turnRunning) return // a no-op with nothing running, and never a draft-killer
     await this.request(l, { subtype: 'interrupt' }, 5_000)
   }
 
@@ -2478,7 +2718,14 @@ export class ChatService {
 
     // Answering ends the wait; the turn is running again unless it was the last
     // thing in it, in which case `result` will say so a moment later.
-    if (l.pending.size === 0 && l.turnRunning) this.setActivity(l, 'working')
+    //
+    // With no turn running the card was a background agent's, and nothing else
+    // is going to end the `waiting` it raised — no result is coming — so it ends
+    // here, quietly: the session is exactly as idle as it was before it asked.
+    if (l.pending.size === 0) {
+      if (l.turnRunning) this.setActivity(l, 'working')
+      else this.setActivity(l, 'idle', true)
+    }
   }
 
   private respond(l: Live, requestId: string, result: Json): void {

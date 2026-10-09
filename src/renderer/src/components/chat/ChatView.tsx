@@ -536,22 +536,33 @@ export function ChatView({
    * The agents the band lists: everything still running, plus whatever the
    * latest turn launched and has finished.
    *
-   * "Latest turn" is the newest turn clock, which main appends the moment a
-   * message is sent — so a finished agent leaves the band exactly when you send
-   * the next message, and stays until then as the record of what that turn
-   * dispatched. A background agent outlives its turn by design and stays for as
-   * long as it runs, which is the case the band exists for: it is the only thing
-   * on screen saying work is happening forty rows above the fold.
+   * "Latest turn" is the turn of the newest message you sent — so a finished
+   * agent leaves the band exactly when you send the next message, and stays
+   * until then as the record of what that turn dispatched. A background agent
+   * outlives its turn by design and stays for as long as it runs, which is the
+   * case the band exists for: it is the only thing on screen saying work is
+   * happening forty rows above the fold.
+   *
+   * Your message, not the newest clock, which is what this used to read and was
+   * the same thing until main started opening the turns the CLI runs by itself.
+   * A background agent's report is answered in one (see ChatService.openCliTurn)
+   * the moment the agent finishes — so the newest clock was that turn's, and the
+   * agent left the band at the very instant its ✓ should have appeared. A
+   * queued message has not been sent yet and does not count; a conversation
+   * with no message at all falls back to the clock, as before.
+   *
+   * The highest turn number rather than the last row: a settle re-appends its
+   * turn's rows at the end of the list, so the last `you` row can belong to the
+   * turn *before* the one that is running. Turn numbers only ever grow.
    */
   const bandAgents = React.useMemo(() => {
-    let latest = -1
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i]
-      if (e.kind === 'turn') {
-        latest = e.turn
-        break
-      }
+    let sent = -1
+    let clocked = -1
+    for (const e of entries) {
+      if (e.kind === 'text' && e.role === 'you' && !e.queued) sent = Math.max(sent, e.turn)
+      else if (e.kind === 'turn') clocked = Math.max(clocked, e.turn)
     }
+    const latest = sent >= 0 ? sent : clocked
     return entries.filter(
       (e): e is Extract<ChatEntry, { kind: 'task' }> =>
         e.kind === 'task' && (!!e.running || e.turn === latest)

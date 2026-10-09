@@ -54,8 +54,21 @@ export const ATTACH_OPEN = '<vivarium-attached>'
 export const ATTACH_CLOSE = '</vivarium-attached>'
 const ATTACH_RE = /<vivarium-attached>\n([\s\S]*?)\n<\/vivarium-attached>/g
 
-/** The synthetic user message Claude Code writes where a turn was cut. */
-const INTERRUPT_MARKER = '[Request interrupted by user]'
+/**
+ * The synthetic user messages Claude Code writes where a turn was cut — one
+ * per way of cutting it. A turn stopped mid-stream (`aborted_streaming`) gets
+ * the first; one stopped while its tools ran (`aborted_tools`) gets the second,
+ * as a text block of its own (2.1.295 builds both in one helper, picking the
+ * text on a `toolUse` flag). Knowing only the first, the
+ * second rendered as a tinted `you` bubble reading the marker back as though it
+ * had been typed, `result` added an `interrupted` row under it, and on reopen
+ * the cancelled tool cards read as failures, since `markCancelled` looks for
+ * this row to stand behind them.
+ */
+const INTERRUPT_MARKERS = new Set([
+  '[Request interrupted by user]',
+  '[Request interrupted by user for tool use]'
+])
 
 /**
  * A typed slash command records as a plain user row wrapped in these — three
@@ -795,7 +808,7 @@ export class ChatMapper {
     // extra row in it. Rendering this as a tinted `you` row — the default for a
     // user message with a plain text block — would be a lie, "as though you had
     // typed the words".
-    if (text === INTERRUPT_MARKER) {
+    if (INTERRUPT_MARKERS.has(text)) {
       this.push({
         id,
         role: 'stop',

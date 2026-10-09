@@ -235,6 +235,10 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
     waiting, `result` → idle), which costs no extra parsing. Never pointed at the hooks and never
     given a `VIVARIUM_SESSION_ID`. `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS` is deliberately never
     set — an undocumented env-gated signal is the silent breakage hooks were introduced to end.
+    **Only the main conversation's `assistant` frames count**: `--forward-subagent-text` sends a
+    background agent's messages down the same stream after its turn has ended, and with no
+    `result` coming they held an idle session at `working` for good. A card answered with no turn
+    running goes back to idle (`answer`); a fresh process says idle at `open`, a dead one at exit.
   - Hook gotchas are **pty-only** TUI artifacts: `Stop` does not fire on an Esc-interrupt, and
     `PostToolUse` does not fire on a rejection, which "No, keep planning" is. Neither exists over
     stream-json, so `TerminalView`'s Esc/Enter heuristics must not be reproduced in the chat.
@@ -315,7 +319,13 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   `toolUseResult`. A **background `Agent`** returns `async_launched` with no outcome at all, so
   its row stays running until a `<task-notification>` user line completes it — folded into the
   row, never rendered as itself, and adopted across turns by reference (`adoptTasks`), since the
-  agent outlives the mapper that launched it. The **sub-log** is the sibling file once the agent
+  agent outlives the mapper that launched it. **Live, the CLI's own task frames end it first**
+  (`taskEvent`): `task_notification` (terminal, `tool_use_id`, `status`, `usage`) and a terminal
+  `task_updated` — which names its task by **`task_id` only**, status in `patch.status`, so the
+  pairing is learned from `task_started`. Matching `task_updated` on a `tool_use_id` dropped every
+  one, and the card span until reopen. A settle ships every row it changed that is **not one of
+  its own by id** — not "stamped with another turn" — or a completion folded into a withheld
+  settle never left main. The **sub-log** is the sibling file once the agent
   stops and the forwarded stream while it runs, chosen by the row's `running`; one sub-mapper per
   subagent, and rows merged by id at all three hops. The row also carries the agent's `prompt`
   (whole — it is prose) and its `report` (the tool_result's text, or the notification's
@@ -359,6 +369,16 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   tagged `queued`; the tag comes off when the turn opens, and becomes `not sent` if the process
   dies or the conversation is cleared under it. An **aborted** turn still flushes the queue: the
   usual reason to have a message waiting is that it says what to do instead.
+- **A turn the CLI starts by itself is opened as a turn** (`startsCliTurn` / `openCliTurn`).
+  Claude Code answers a background agent's `<task-notification>` with a whole turn of its own and
+  its own `result`, and a plain interrupt leaves those notifications queued, so one can start
+  right after an Esc. Unopened, it was invisible to `turnRunning`: Esc returned early and stopped
+  nothing, its rows and `result` landed on the turn before, and its settle was withheld. Opened on
+  main-conversation model output only — an `assistant` frame, a `message_start`, a
+  `compact_boundary` — because each of those ends in a `result`; a user line or anything a
+  subagent says could open a turn nothing ever closes. It has a clock and no `you` row, and a
+  message typed into it queues like any other. The agents band keys "latest turn" on your newest
+  sent message, not the newest clock, or a finishing agent left the band as its ✓ appeared.
 - **The chat has no terminal states, and nothing retries itself.** Every failure recovers by the
   same single act — respawn and re-read the transcript. Detection is a **60s silence timeout on
   *any* frame**: killing the in-container `claude` is completely silent, and a broken credential
@@ -368,7 +388,11 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
 - **`terminal_reason` is the only test that distinguishes cancelled from failed** — `is_error`
   cannot, since a clean deny-then-interrupt reports true. On reopen a cancelled tool is detected
   **structurally**, never by matching the refusal wording. The `interrupted` row has two producers
-  on one stream and neither can be dropped, so whichever lands second is suppressed, per turn.
+  on one stream and neither can be dropped, so whichever lands second is suppressed, per turn. The
+  marker has **two spellings** — `[Request interrupted by user]` and `… for tool use]` (an
+  `aborted_tools` cut) — and the second used to render as a `you` bubble. The renderer drops a
+  turn's clock when a `stop` row for it lands, so main drops its own clock at the marker (nothing
+  can write it back) and an aborted `result` **re-sends** the marker rather than staying silent.
 - **A chat names itself, and a human rename ends the arrangement for good.** Two beats: the first
   message of a chat still called `chat-N` replaces that name with a cleaned slice of what you
   typed (instant, free), and the settle replaces the slice with a few words from a **throwaway
