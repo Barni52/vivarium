@@ -333,7 +333,11 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   in the log** — Claude paraphrases it in the next message — only the agent panel draws it.
 - **Neither a slash command's output nor a task notification is something the user typed.** Both
   arrive on ordinary **user** lines, and both render as raw markup inside the tinted `you` bubble
-  if the mapper does not recognise them there.
+  if the mapper does not recognise them there. **A meta line is `isMeta` in the transcript and
+  `isSynthetic` on the stream** — the CLI never copies `isMeta` onto a stream frame, it folds it
+  (with `isCompactSummary` and `isVisibleInTranscriptOnly`) into that one flag — and both go to
+  `metaUser`, which never draws a `you` row. Reading only `isMeta` painted every skill body, command
+  expansion and live compaction summary as a message you had typed.
 - **The composer's `/` typeahead opens with its first row highlighted; its `@` one opens with
   none.** A `/` is only a menu when it is the first character, so the list is unambiguously what
   you are doing; an `@` occurs in prose (`foo@bar.com`), where a default highlight would put a
@@ -518,10 +522,13 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   at; the row it produces is the report. `phase` is
   cleared when the boundary arrives, so the tail of the turn reads as the ordinary work it is.
 - **A Skill's body is collapsed, and it is the one thing in the log that is closed by default.**
-  A `Skill` tool_result is the whole SKILL.md — instructions addressed to the model, which used to
-  render as markdown in place and bury the turn around it. The row states what was loaded and how
-  large it was; the text is one click away and still *in* the log, because dropping it would make
-  the transcript lie about what entered the model's context. A local command's stdout is the other
+  The SKILL.md is instructions addressed to the model, which used to render as markdown in place
+  and bury the turn around it. The row states what was loaded and how large it was; the text is
+  one click away and still *in* the log, because dropping it would make the transcript lie about
+  what entered the model's context. On 2.1.295 the tool_result is only `Launching skill: <name>`
+  and the SKILL.md follows as a **meta message of its own**, stamped `sourceToolUseID` in the
+  transcript (the stream's `source_tool_use_id` is never written, so live it goes to the Skill
+  whose result landed last); `metaUser` folds it into the row. A local command's stdout is the other
   `cmd` row, told apart by having **no title**, and stays open: it is short, it is addressed to
   you, and `/context` draws a meter that reflowing destroys.
 - **The log follows the tail on a ResizeObserver, not on the entry count** — a streaming turn

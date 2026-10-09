@@ -540,6 +540,15 @@ export class ChatMapper {
    * is what made this look like a rendering bug rather than a mapping one.
    */
   private subMappers = new Map<string, ChatMapper>()
+  /**
+   * The `cmd` row each Skill call became, by its tool_use id — where that
+   * skill's body is folded when its meta message names the call (see metaUser).
+   */
+  private skillRows = new Map<string, Extract<ChatEntry, { kind: 'cmd' }>>()
+  /** the Skill whose result landed most recently, until the model speaks again */
+  private lastSkill: Extract<ChatEntry, { kind: 'cmd' }> | undefined
+  /** skill rows that already hold a body, so a second meta line appends */
+  private skillFed = new Set<string>()
   private seq = 0
   private turn = 0
   /** index in `entries` where the current turn began, for the cancelled sweep */
@@ -694,7 +703,15 @@ export class ChatMapper {
     // `isMeta` covers a slash command's expanded prompt: the command itself is
     // already recorded as a plain user row, and rendering both would show the
     // machinery twice. (No isSidechain test — see the note at the top.)
-    if (line.isMeta === true) return
+    //
+    // **`isSynthetic` is the same flag on the stream**, and it was not read. The
+    // CLI does not copy `isMeta` onto a stream-json user frame; it folds it, with
+    // `isVisibleInTranscriptOnly` and `isCompactSummary`, into one `isSynthetic`
+    // (2.1.295's SDK conversion). So everything a transcript hides arrived live
+    // as an ordinary user line — above all a Skill the model invoked, whose whole
+    // SKILL.md is a meta message of its own, and which therefore painted as a
+    // `you` bubble of instructions you never typed.
+    if (line.isMeta === true || line.isSynthetic === true) return this.metaUser(line, at, touched)
     const message = obj(line.message)
     if (!message) return
     const uuid = str(line.uuid) || this.id('u')
@@ -792,6 +809,81 @@ export class ChatMapper {
       summary: md,
       truncated: false
     })
+  }
+
+  /**
+   * A user line the CLI marked as not typed — `isMeta` in a transcript,
+   * `isSynthetic` on the stream. It never becomes a `you` row. What it can be
+   * is part of a row that already exists, and each case is tested for in turn:
+   *
+   *   1. **A tool result** is paired whatever flagged its line — a card left
+   *      without its answer spins for good.
+   *   2. **The stream's compaction summary.** The transcript flags it
+   *      `isCompactSummary` and `user` catches it before this; the stream only
+   *      says `isSynthetic`, so it is recognised by position instead: the line
+   *      straight after a boundary whose row still has no summary.
+   *   3. **A background agent's report**, folded into its task row as on an
+   *      ordinary line, so the outcome is never lost to the flag.
+   *   4. **A Skill's body.** On 2.1.295 the Skill tool answers only
+   *      `Launching skill: <name>` and hands the SKILL.md over as a meta message
+   *      of its own, stamped with the call's id (`sourceToolUseID` in the
+   *      transcript). It becomes the body of that Skill's `cmd` row — collapsed,
+   *      one click away, and still in the log, because dropping it would make the
+   *      log lie about what entered the model's context. The stream carries no
+   *      such id (its `source_tool_use_id` is declared and never written), so
+   *      live it goes to the Skill whose result landed last, until the model
+   *      speaks again; the settle re-derives it from the id either way.
+   *
+   * Anything else — a typed command's expansion, a caveat, a reminder — is
+   * machinery addressed to the model, and is dropped as it always was.
+   */
+  private metaUser(line: Json, at: number, touched: ChatEntry[]): void {
+    const content = obj(line.message)?.content
+    for (const block of arr(content)) {
+      const b = obj(block)
+      if (!b || str(b.type) !== 'tool_result') continue
+      const done = this.toolResult(b, obj(line.toolUseResult) ?? obj(line.tool_use_result), at)
+      if (done) touched.push(done)
+    }
+    const text = (
+      typeof content === 'string'
+        ? content
+        : arr(content)
+            .map((block) => {
+              const b = obj(block)
+              return b && str(b.type) === 'text' ? str(b.text) : ''
+            })
+            .filter(Boolean)
+            .join('\n\n')
+    ).trim()
+    if (!text) return
+
+    const last = this.entries[this.entries.length - 1]
+    if (line.isSynthetic === true && last?.kind === 'compact' && !last.summary) {
+      this.compactSummary(line, at)
+      // Filled in place, and the row is older than this line: say so, or the
+      // renderer keeps the boundary it was sent with an empty summary.
+      touched.push(last)
+      return
+    }
+
+    const note = TASK_NOTE_RE.exec(text)
+    if (note) return this.taskNotification(note[1], `${str(line.uuid) || this.id('u')}#0`, at, touched)
+
+    const source = str(line.sourceToolUseID) || str(line.source_tool_use_id)
+    const skill = source
+      ? this.skillRows.get(source)
+      : line.isSynthetic === true
+        ? this.lastSkill
+        : undefined
+    if (!skill) return
+    // The first one replaces the tool's own `Launching skill:` stub, which says
+    // nothing the row's title does not; anything after it (a re-invocation
+    // note) belongs to the same load and is kept beside it.
+    skill.md = this.skillFed.has(skill.id) ? `${skill.md}\n\n${text}` : text
+    this.skillFed.add(skill.id)
+    this.bodies.set(skill.id, skill.md)
+    touched.push(skill)
   }
 
   private userText(
@@ -898,6 +990,9 @@ export class ChatMapper {
     const message = obj(line.message)
     if (!message) return
     const msgId = str(message.id) || str(line.uuid) || this.id('a')
+    // The model speaking again closes the window in which a stream meta line can
+    // only be the last Skill's body (see metaUser).
+    this.lastSkill = undefined
 
     // Derived, not clicked: the row marks where the model actually changed.
     //
@@ -1213,7 +1308,7 @@ export class ChatMapper {
       // A Skill tool_use reads identically whether you typed it or Claude reached
       // for it — same `cmd` row either way.
       const md = body.text || text
-      const replacement: ChatEntry = {
+      const replacement: Extract<ChatEntry, { kind: 'cmd' }> = {
         id: entry.id,
         role: 'cmd',
         at: entry.at,
@@ -1225,6 +1320,11 @@ export class ChatMapper {
       }
       const i = this.entries.indexOf(entry)
       if (i >= 0) this.entries[i] = replacement
+      // Where the skill's body lands when it arrives as a message of its own
+      // (see metaUser). Not for a failed call: nothing was loaded, so nothing
+      // follows, and the next meta line is somebody else's.
+      this.skillRows.set(toolUseId, replacement)
+      if (!isError) this.lastSkill = replacement
       return replacement
     }
     void at
