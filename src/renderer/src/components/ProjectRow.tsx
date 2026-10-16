@@ -222,9 +222,9 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   // the fact.
   //
   // A session this project cannot take is refused the same way — no indicator,
-  // no-drop cursor — rather than accepted and then turned down by a dialog: a
-  // chat into a host project, or an agent across the host boundary, whose
-  // conversation could not come with it (see canMoveSession).
+  // no-drop cursor — rather than accepted and then turned down by a dialog: an
+  // agent or a chat into, out of or between host projects, whose conversation
+  // could not come with it (see canMoveSession).
   const foreignSessionDrag = (): { id: string; projectId: string } | null => {
     const st = useStore.getState()
     const d = st.drag

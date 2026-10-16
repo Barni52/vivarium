@@ -219,6 +219,18 @@ export interface Config {
    */
   pendingTranscriptDeletes?: string[]
   /**
+   * The same debt for **host** chats, whose transcripts are on this disk under
+   * `~/.claude/projects` rather than on the claude-box-creds volume.
+   *
+   * A list of its own rather than a second meaning for the one above, because
+   * the two are paid by different creditors on different days: the container
+   * list is drained through docker and only clears on a docker success, so a
+   * host uuid filed there would sit unpaid for as long as Docker is down or
+   * absent — on a machine that only has host projects, forever. This one needs
+   * nothing but the filesystem and is drained at launch and after every delete.
+   */
+  pendingHostTranscriptDeletes?: string[]
+  /**
    * Where and how big the window was when it was last touched.
    *
    * The same argument `chatZoom` makes, one level out: it is a fact about the
@@ -953,7 +965,11 @@ export interface ChatState {
 
 export interface ChatOpenResult {
   ok: boolean
-  /** 'container-stopped' | 'docker-missing' | 'not-found' | 'spawn-failed' */
+  /**
+   * 'container-stopped' | 'docker-missing' | 'not-found' | 'spawn-failed', and
+   * for a host chat 'claude-missing' — which, unlike the first and the last, the
+   * renderer does not retry: no amount of waiting installs Claude Code.
+   */
   reason?: string
   message?: string
   state?: ChatState
@@ -1009,6 +1025,10 @@ export type ChatEvent =
  * of the project's mounts becomes a **container path**, anything else becomes
  * **inline content**. Nothing is copied, /clip is never written to, and no mount
  * is ever changed.
+ *
+ * In a host chat every file on the disk is reachable, so anything with a path
+ * is a path chip and `containerPath` holds the **Windows path** — the name is
+ * "the path the CLI reads it at", which on the host is the path it has.
  */
 export type ChatAttachment =
   | { kind: 'path'; name: string; containerPath: string }
@@ -1016,7 +1036,11 @@ export type ChatAttachment =
   | { kind: 'document'; name: string; mediaType: string; data: string }
   | { kind: 'text'; name: string; text: string }
 
-/** One node of a project's mounted tree, for the composer's `@` typeahead. */
+/**
+ * One node of a project's mounted tree, for the composer's `@` typeahead. For a
+ * host project the tree is its base folder (and the shared output folder), and
+ * `containerPath` is the Windows path, for the reason `ChatAttachment` gives.
+ */
 export interface MountNode {
   name: string
   hostPath: string

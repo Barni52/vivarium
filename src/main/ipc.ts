@@ -37,13 +37,13 @@ import type {
 import { DEFAULT_EFFORT } from '@shared/models'
 import { canMoveSession, isHostProject, projectHolds } from '@shared/projects'
 import { ConfigStore } from './config'
-import { DockerService } from './docker'
+import { DockerService, SNIPPET_AFTER, SNIPPET_BEFORE, snippetOf } from './docker'
 import { BridgeWatcher, bridgeDir, ensureHostBridgeFiles, removeBridge } from './bridge'
 import { ChatService } from './chat'
 import { gitBranch, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
 import { pasteImage, pruneClips, removeClips } from './clipboard'
-import { resolveClaude } from './host'
+import { deleteHostTranscripts, resolveClaude, searchHostTranscripts } from './host'
 import { UsageService } from './usage'
 import { ClaudeService } from './claude'
 
@@ -238,6 +238,30 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     return out
   }
 
+  /**
+   * Record what a delete owes, on the side of the boundary it is owed on.
+   *
+   * Called inside the mutate that removes the session or project, so the two
+   * stay one atomic fact. Which list is decided by the project's kind, and that
+   * is safe to decide once: a chat never crosses the host boundary (see
+   * canMoveSession), so a host project's chats have only ever written to this
+   * disk and a container project's only ever to the volume.
+   */
+  function owe(cfg: Config, project: Project | undefined, owed: string[]): void {
+    if (owed.length === 0) return
+    if (isHostProject(project)) {
+      cfg.pendingHostTranscriptDeletes = [...(cfg.pendingHostTranscriptDeletes ?? []), ...owed]
+    } else {
+      cfg.pendingTranscriptDeletes = [...(cfg.pendingTranscriptDeletes ?? []), ...owed]
+    }
+  }
+
+  /** Pay whatever is owed on either side. Each half no-ops when it owes nothing. */
+  function drainAllTranscriptDeletes(): void {
+    void drainTranscriptDeletes()
+    void drainHostTranscriptDeletes()
+  }
+
   let draining = false
   /**
    * Pay the debt. Runs at app launch and after each successful container start —
@@ -266,6 +290,43 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       })
     } finally {
       draining = false
+    }
+  }
+
+  let drainingHost = false
+  /**
+   * The host half of the debt (see `Config.pendingHostTranscriptDeletes`). Same
+   * rule — a uuid leaves the list only once its files are gone — with nothing
+   * to wait for: the files are on this disk, so it runs at launch (there is no
+   * container start for it to follow) and straight after the delete that
+   * enqueued it.
+   *
+   * The one wrinkle is the order a delete happens in: the chat's CLI is killed
+   * and the files removed a moment later, and on Windows a file a process still
+   * has open cannot be unlinked until that process is fully gone. So a failed
+   * pass gets **one** more try a few seconds on — not a loop, since what is
+   * still failing after that is paid at the next launch, which is what the list
+   * is for.
+   */
+  async function drainHostTranscriptDeletes(again = true): Promise<void> {
+    if (drainingHost) return
+    const owed = store.get().pendingHostTranscriptDeletes ?? []
+    if (owed.length === 0) return
+    drainingHost = true
+    try {
+      if (!(await deleteHostTranscripts(owed))) {
+        if (again) setTimeout(() => void drainHostTranscriptDeletes(false), 3_000)
+        return
+      }
+      await store.mutate((cfg) => {
+        cfg.pendingHostTranscriptDeletes = (cfg.pendingHostTranscriptDeletes ?? []).filter(
+          (id) => !owed.includes(id)
+        )
+        if (cfg.pendingHostTranscriptDeletes.length === 0) delete cfg.pendingHostTranscriptDeletes
+        return cfg
+      })
+    } finally {
+      drainingHost = false
     }
   }
 
@@ -300,8 +361,9 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     docker.setSharedOutput(cfg.sharedOutputFolder)
     startOutputWatcher()
     syncBridgeWatchers()
-    // App launch is one of the two moments Docker is proven up (see the debt list).
-    void drainTranscriptDeletes()
+    // App launch is one of the two moments Docker is proven up (see the debt
+    // list), and the one moment the host half is drained without a delete.
+    drainAllTranscriptDeletes()
     return cfg
   })
 
@@ -353,7 +415,23 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
         p.name = input.name.trim() || p.name
         p.basePath = input.basePath
         if (moved) {
-          for (const s of p.sessions) if (s.type === 'agent') s.claudeSessionId = randomUUID()
+          for (const s of p.sessions) {
+            if (s.type === 'agent') s.claudeSessionId = randomUUID()
+            // A chat the same, for the same reason — and its old id is *retired*
+            // onto the chain rather than forgotten, exactly as a `/clear` retires
+            // one: delete means delete for a chat, and the cascade can only take
+            // the conversations it can still name. Its revert ranges go with the
+            // old file they were offsets into. A chat that is open right now keeps
+            // its process (in the old folder, on the old conversation) until it
+            // is next opened, as a live agent does.
+            if (s.type === 'chat') {
+              if (s.claudeSessionId) {
+                s.previousClaudeSessionIds = [...(s.previousClaudeSessionIds ?? []), s.claudeSessionId]
+              }
+              s.claudeSessionId = randomUUID()
+              delete s.rewound
+            }
+          }
         }
         return cfg
       })
@@ -403,9 +481,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       // Enqueued inside the mutate that removes the project, so this cannot race
       // the `docker rm -f` above: a config write and a container removal are
       // different things entirely.
-      if (owed.length) {
-        cfg.pendingTranscriptDeletes = [...(cfg.pendingTranscriptDeletes ?? []), ...owed]
-      }
+      owe(cfg, project, owed)
       return cfg
     })
     syncBridgeWatchers()
@@ -414,7 +490,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     // config.json, so nothing will ever name it again and nothing else reclaims
     // it — the same cascade the container, the clips and the transcripts get.
     await removeBridge(id)
-    void drainTranscriptDeletes()
+    drainAllTranscriptDeletes()
     return cfg
   })
 
@@ -483,16 +559,15 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     async (_e, projectId: string, sessionId: string): Promise<Config> => {
       pty.kill(sessionId)
       chat.close(sessionId)
-      const owed = conversationIds(store.getProject(projectId), sessionId)
+      const project = store.getProject(projectId)
+      const owed = conversationIds(project, sessionId)
       const cfg = await store.mutate((cfg) => {
         const p = cfg.projects.find((x) => x.id === projectId)
         if (p) p.sessions = p.sessions.filter((s) => s.id !== sessionId)
-        if (owed.length) {
-          cfg.pendingTranscriptDeletes = [...(cfg.pendingTranscriptDeletes ?? []), ...owed]
-        }
+        owe(cfg, project, owed)
         return cfg
       })
-      void drainTranscriptDeletes()
+      drainAllTranscriptDeletes()
       return cfg
     }
   )
@@ -575,8 +650,9 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
         fromProjectId === toProjectId ||
         !moving ||
         !dst ||
-        // A chat into a host project, or an agent across the host boundary —
-        // see canMoveSession for why the latter cannot carry its conversation.
+        // An agent or a chat across the host boundary, or between two host
+        // projects — see canMoveSession for why neither can carry its
+        // conversation there.
         !canMoveSession(src, dst, moving.type)
       ) {
         return store.get()
@@ -962,6 +1038,14 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       const s = p?.sessions.find((x) => x.id === sessionId)
       if (!p || !s) return { ok: false, reason: 'not-found' }
       if (!retry && chat.has(sessionId)) return chat.open(p, s)
+      // A host chat touches no docker — its transcript is a file on this disk
+      // and its CLI a local process — so, like everything else on the host, it
+      // does not queue behind container opens at the gate. Refused here if the
+      // project cannot hold a chat, as openSession refuses a type it cannot.
+      if (isHostProject(p)) {
+        if (!projectHolds(p, s.type)) return { ok: false, reason: 'not-found' }
+        return chat.open(p, s, retry)
+      }
       return openGate(() => chat.open(p, s, retry))
     }
   )
@@ -1078,6 +1162,24 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   ipcMain.handle(CH.chatMountTree, async (_e, projectId: string): Promise<MountNode[]> => {
     const p = store.getProject(projectId)
     if (!p) return []
+    // A host chat reads files where they are, so its tree is its own folder —
+    // plus the shared output folder, which a host session sees in place rather
+    // than at a mount — and every node's "container path" is its Windows path
+    // (see MountNode). Nothing is translated, so nothing can be translated wrong.
+    if (isHostProject(p)) {
+      const folders = [p.basePath, store.get().sharedOutputFolder].filter((f): f is string => !!f)
+      const out: MountNode[] = []
+      for (const hostPath of folders) {
+        out.push({
+          name: hostPath.split(/[\\/]/).filter(Boolean).pop() ?? hostPath,
+          hostPath,
+          containerPath: hostPath,
+          type: 'dir',
+          children: await scanMounts(hostPath, hostPath, 0, true)
+        })
+      }
+      return out
+    }
     const roots = docker.mountTargets(p)
     const out: MountNode[] = []
     for (const { hostPath, target } of roots) {
@@ -1096,7 +1198,13 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   // node_modules would otherwise cost seconds of stat() for entries nobody scrolls
   // to. The shadow volumes make those directories the container's copy anyway.
   const MOUNT_SKIP = new Set(['node_modules', '.git', '.angular', 'target', 'dist', 'out'])
-  async function scanMounts(dir: string, target: string, depth: number): Promise<MountNode[]> {
+  async function scanMounts(
+    dir: string,
+    target: string,
+    depth: number,
+    /** a host tree, whose nodes are addressed by their own Windows path */
+    host = false
+  ): Promise<MountNode[]> {
     if (depth > 5) return []
     let entries
     try {
@@ -1108,14 +1216,14 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     for (const e of entries.slice(0, 400)) {
       if (e.name.startsWith('.') || MOUNT_SKIP.has(e.name)) continue
       const hostPath = join(dir, e.name)
-      const containerPath = `${target}/${e.name}`
+      const containerPath = host ? hostPath : `${target}/${e.name}`
       if (e.isDirectory()) {
         out.push({
           name: e.name,
           hostPath,
           containerPath,
           type: 'dir',
-          children: await scanMounts(hostPath, containerPath, depth + 1)
+          children: await scanMounts(hostPath, containerPath, depth + 1, host)
         })
       } else if (e.isFile()) {
         out.push({ name: e.name, hostPath, containerPath, type: 'file' })
@@ -1146,8 +1254,33 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     async (_e, query: string): Promise<TranscriptSearchResult> => {
       const term = typeof query === 'string' ? query.trim() : ''
       if (!term) return { ok: true, hits: [] }
-      const r = await docker.searchTranscripts(term)
-      if (!r.ok) return { ok: false, hits: [], error: r.error }
+      // A host project's conversations — its chats' and its agents' — are on
+      // this disk, not on the volume, so they are searched there, and only they
+      // are (see searchHostTranscripts for why the rest of `~/.claude` is not
+      // this box's business).
+      const hostOwned = store
+        .get()
+        .projects.filter((p) => isHostProject(p))
+        .flatMap((p) => p.sessions)
+        .flatMap((s) => [
+          ...(s.claudeSessionId ? [s.claudeSessionId] : []),
+          ...(s.previousClaudeSessionIds ?? [])
+        ])
+      const [r, h] = await Promise.all([
+        docker.searchTranscripts(term),
+        searchHostTranscripts(hostOwned, term, SNIPPET_BEFORE, SNIPPET_AFTER)
+      ])
+      // A docker failure is still the answer when the host had nothing to say;
+      // when it did, its hits are returned rather than thrown away over a daemon
+      // that a host chat never needed — on a machine with only host projects,
+      // Docker may not be installed at all.
+      if (!r.ok && h.counts.size === 0) return { ok: false, hits: [], error: r.error }
+      for (const [uuid, n] of h.counts) {
+        r.counts.set(uuid, n)
+        const fragment = h.fragments.get(uuid)
+        const snippet = fragment ? snippetOf(fragment, term) : null
+        if (snippet) r.snippets.set(uuid, snippet)
+      }
 
       // uuid → where it lives, built once rather than searched per hit.
       const owner = new Map<

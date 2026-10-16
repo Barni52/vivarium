@@ -150,7 +150,7 @@ export function AddProject(): React.ReactElement {
             </div>
             <div style={{ fontSize: 11.5, color: 'var(--dim)', lineHeight: 1.5, marginTop: 2 }}>
               {host
-                ? 'Claude Code and PowerShell, run straight in the base folder with your own Windows account. No container and no mounts — and Claude asks before it acts, as it does in any terminal.'
+                ? 'Agents, chats and PowerShell, run straight in the base folder with your own Windows account. No container and no mounts. An agent asks before it acts, as in any terminal; a chat does not — it runs with permissions bypassed, as a container chat does.'
                 : 'Agents, chats and both terminals, sandboxed in a Docker container that sees only the folders you mount.'}
             </div>
           </div>

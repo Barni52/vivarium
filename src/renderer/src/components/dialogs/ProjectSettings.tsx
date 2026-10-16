@@ -68,8 +68,8 @@ export function ProjectSettings(): React.ReactElement | null {
                 said before Save rather than discovered after. */}
             {host && (
               <div style={{ fontSize: 11.5, color: 'var(--dim)', lineHeight: 1.5 }}>
-                Moving the folder starts its agents on new conversations — Claude only resumes a
-                conversation from the folder it began in.
+                Moving the folder starts its agents and chats on new conversations — Claude only
+                resumes a conversation from the folder it began in.
               </div>
             )}
           </div>

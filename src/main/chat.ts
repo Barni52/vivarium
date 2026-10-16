@@ -21,7 +21,18 @@ import type {
   Session
 } from '@shared/types'
 import { DEFAULT_EFFORT, isEffort, modelName, sameModel } from '@shared/models'
+import { isHostProject } from '@shared/projects'
 import type { DockerService } from './docker'
+import {
+  askHostClaude,
+  hostConversationExists,
+  listHostCommandFiles,
+  readHostSubagentLog,
+  readHostTranscript,
+  resolveClaude,
+  spawnHostClaude,
+  type TranscriptRead
+} from './host'
 import {
   ATTACH_CLOSE,
   ATTACH_OPEN,
@@ -38,10 +49,15 @@ import {
 
 // One live Claude Code CLI process per chat session, keyed by session id — the
 // same shape as PtyManager, and for the same reason. What is different is that
-// nothing here is unrecoverable: the *conversation* lives in the container-side
+// nothing here is unrecoverable: the *conversation* lives in Claude Code's own
 // transcript, so the chat has no terminal states. Every failure below is
 // recovered in place by the same single act — respawn the process and re-read
 // the transcript — and nothing is lost by respawning that was not already lost.
+//
+// The transcript is in the container for a container project and on this disk
+// for a host one, and that is the *only* difference between the two kinds of
+// chat: `ChatRuntime` below is where it lives, and nothing above that seam
+// knows which side it is on.
 
 type Json = Record<string, unknown>
 type Emit = (event: ChatEvent) => void
@@ -739,6 +755,204 @@ interface Live {
   /** a titling call is in flight; it takes seconds, and one at a time is plenty */
   titling: boolean
   closing: boolean
+  /** where this chat's CLI runs and its files live — fixed at open (see ChatRuntime) */
+  rt: ChatRuntime
+}
+
+// ---- where a chat lives -----------------------------------------------------
+
+/**
+ * The `claude` arguments every chat is launched with, after the binary — the
+ * same list in a container and on the host, which is the point of it being one
+ * function: a flag added for one side and forgotten on the other is a chat that
+ * quietly behaves differently depending on where its project happens to run.
+ *
+ * `resume` is whether the pinned conversation already has a transcript; it
+ * picks `--resume` over `--session-id` (the CLI refuses each in the other's
+ * case). Ignored when the session has no pinned id.
+ */
+export function chatCliArgs(session: Session | undefined, resume: boolean): string[] {
+  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']
+  // Load-bearing and undocumented — it is not in `claude --help`. A sentinel,
+  // not a real MCP server: without it a raw `-p` run **auto-denies every
+  // prompt**, *and* AskUserQuestion is not in the session's tool list at all
+  // (verified by diffing init.tools with and without it). Every turn needs
+  // it, including a slash-command turn.
+  args.push('--permission-prompt-tool', 'stdio')
+  // Token deltas, so prose paints as it is generated rather than landing in
+  // one block at the end. Chunky over docker exec (~16 events in 5s), but real.
+  args.push('--include-partial-messages')
+  // Without this, thinking blocks reach the chat empty. A `-p` stream-json
+  // run asks the API for no display at all, and the API's default on current
+  // models is to omit the text: every block arrives as `"thinking": ""` plus a
+  // signature (verified on 2.1.283 against Opus 5.5 — one empty delta, versus
+  // a dozen `thinking_delta`s of prose with this flag). It is a *summary* of
+  // the thinking, not the raw text; `highlights` also exists but the API only
+  // accepts it from sessions Anthropic hosts. The flag rather than the
+  // `showThinkingSummaries` setting, because settings.json is shared with
+  // claude-box (and, on the host, with every terminal `claude` the user runs)
+  // and would change the user's TUI sessions too.
+  args.push('--thinking-display', 'summarized')
+  // Required for the live sub-log to match the settled sibling file block for
+  // block. Without it the stream withholds a subagent's prose and thinking, so
+  // the sub-log would *grow paragraphs* at completion — a systematic twitch,
+  // which is not what the turn-end settle is meant to expose.
+  args.push('--forward-subagent-text')
+  // **Always bypassPermissions; there is no other mode.** Plan mode was
+  // removed — the chat used to offer a plan/bypass toggle and an approval card,
+  // and nobody used it. Re-checked on 2.1.283: `init` reports
+  // bypassPermissions and Write, Bash and a write under `.claude/` all run
+  // without a single `can_use_tool`. If a managed setting or a future CLI ever
+  // stops that, ChatService.init says so in the log.
+  //
+  // **On the host too, and that is a decision, not an oversight.** A host
+  // *agent* never gets `--dangerously-skip-permissions`: the container is what
+  // made bypass a sane default, and the terminal agent's TUI can answer its own
+  // prompts. A host chat has neither the container nor a permission card to
+  // answer a prompt with — the card was removed along with plan mode — so a
+  // prompting host chat would be a chat that stalls on every tool call. The
+  // user chose bypass for it explicitly, knowing it runs as them on Windows.
+  // (Verified on 2.1.301 for the host CLI: `init` reports bypassPermissions.)
+  args.push('--permission-mode', 'bypassPermissions')
+  // …and the plan tools are taken away, not merely unused. Bypass does not
+  // remove them (init.tools lists both), so the model can still enter plan
+  // mode *by itself* — and with the approval card gone there would be no way
+  // back out: ExitPlanMode would be a permission prompt nobody can answer
+  // properly. One comma-joined value, because the flag is variadic and a
+  // second bare word would be read as another of its values; verified on
+  // 2.1.283 that both disappear from init.tools and AskUserQuestion stays.
+  args.push('--disallowedTools', 'EnterPlanMode,ExitPlanMode')
+  // Vivarium owns the model: a chip reading "opus" at reopen while the process
+  // actually spawned on the CLI's configured default is a reading that lies
+  // about a live fact, in a header made entirely of readings.
+  if (session?.model) args.push('--model', session.model)
+  // How hard to think. **Always passed, even when nothing was picked** —
+  // that is what makes the header's reading true rather than a guess at the
+  // CLI's own default, which is reported nowhere and could move under us
+  // (see DEFAULT_EFFORT). An unrecognised value in config falls back rather
+  // than being forwarded: an unknown level is *not* an error the CLI
+  // refuses, it warns on stderr (which nothing here reads) and silently
+  // runs at its default, which is the one outcome the chip could not
+  // describe. `/effort` changes it on a chat that is already live; this is
+  // the launch half.
+  args.push('--effort', isEffort(session?.effort) ? session.effort : DEFAULT_EFFORT)
+  // Deliberately absent: --settings /vivarium/hooks.json and
+  // VIVARIUM_SESSION_ID. The hook bridge stays for pty agents only; a chat
+  // derives its own activity from this stream, and double-emitting would give
+  // the store two producers for one session.
+  const claudeId = session?.claudeSessionId
+  if (claudeId) args.push(resume ? '--resume' : '--session-id', claudeId)
+  return args
+}
+
+/**
+ * Where one chat's CLI runs and where its files live — the seam between
+ * everything ChatService *does* with a conversation and the I/O underneath it.
+ *
+ * Two implementations, picked once at open by the project's kind and never
+ * swapped (a chat never crosses the host boundary, see `canMoveSession`):
+ *
+ *  - **container**: `docker exec -i` into the project's container, and every
+ *    read a `docker exec` against the claude-box-creds volume.
+ *  - **host**: the Windows `claude` spawned directly in `basePath`, and every
+ *    read straight off `~/.claude/projects` on this disk.
+ *
+ * Only I/O is behind it. The settle and replacement rules — byte offsets,
+ * whole lines, one turn per settle, the prose floor, the rewound ranges — sit
+ * above it and are the same code for both, because the file underneath is the
+ * same kind of file: Claude Code writes the same transcript format wherever it runs.
+ * Equally, everything that rides the *stream* (activity, the turn clock, the
+ * queue, the silence timeout, model and effort, the control channel) is above
+ * it and cannot tell the two apart: only the process at the other end of the
+ * pipes differs.
+ */
+interface ChatRuntime {
+  /** null when the chat may open; otherwise the refusal `open` returns */
+  ready(): Promise<ChatOpenResult | null>
+  /** start the CLI, or null when it could not be started */
+  spawn(
+    session: Session,
+    conversationExists: boolean | undefined
+  ): Promise<ChildProcessWithoutNullStreams | null>
+  readTranscript(uuid: string, fromByte: number): Promise<TranscriptRead>
+  readSubagentLog(uuid: string, agentId: string): Promise<string | null>
+  listCommandFiles(): Promise<string[]>
+  /** a one-shot answer from a throwaway conversation (the auto-titler) */
+  askClaude(prompt: string, model: string): Promise<string | null>
+}
+
+function containerRuntime(docker: DockerService, project: Project): ChatRuntime {
+  return {
+    async ready() {
+      if (!(await docker.binaryName())) {
+        return { ok: false, reason: 'docker-missing', message: 'docker not found on PATH' }
+      }
+      // Opening a session must never start a stopped container — starting stays
+      // an explicit user action, and the placeholder that says so is also the
+      // one screen where "no history while the container is stopped" becomes
+      // visible.
+      if (!(await docker.isRunning(project))) return { ok: false, reason: 'container-stopped' }
+      return null
+    },
+    async spawn(session, conversationExists) {
+      const bin = await docker.binaryName()
+      if (!bin) return null
+      // The transcript read just told us whether the conversation exists, so
+      // execArgs picks --resume vs --session-id without a fourth docker launch.
+      const args = await docker.execArgs(project, 'chat', session.id, conversationExists)
+      try {
+        return spawn(bin, args, { windowsHide: true })
+      } catch {
+        return null
+      }
+    },
+    readTranscript: (uuid, from) => docker.readTranscript(project, uuid, from),
+    readSubagentLog: (uuid, agentId) => docker.readSubagentLog(project, uuid, agentId),
+    listCommandFiles: () => docker.listCommandFiles(project),
+    askClaude: (prompt, model) => docker.askClaude(project, prompt, model)
+  }
+}
+
+/**
+ * A host project's chat: nothing here touches docker, which is what lets a host
+ * chat render at launch like a host shell — there is no container to be stopped
+ * and no placeholder to show.
+ */
+function hostRuntime(project: Project): ChatRuntime {
+  return {
+    async ready() {
+      // Asked before the transcript read as well as at the spawn, so a missing
+      // install is a sentence rather than "spawn-failed" — and, unlike that
+      // reason, not one the renderer retries.
+      if (!(await resolveClaude())) {
+        return {
+          ok: false,
+          reason: 'claude-missing',
+          message: 'claude.exe / claude.cmd not found on PATH or in ~/.local/bin'
+        }
+      }
+      return null
+    },
+    async spawn(session, conversationExists) {
+      const claude = await resolveClaude()
+      if (!claude) return null
+      const id = session.claudeSessionId
+      const resume = id ? (conversationExists ?? (await hostConversationExists(id))) : false
+      try {
+        // In `basePath`, and only there: Claude files the transcript under the
+        // directory it was started in and refuses `--resume` from any other, so
+        // this cwd is part of the conversation's identity (see the updateProject
+        // handler, which re-ids a host project's chats when the folder moves).
+        return spawnHostClaude(claude, chatCliArgs(session, resume), project.basePath)
+      } catch {
+        return null
+      }
+    },
+    readTranscript: (uuid, from) => readHostTranscript(uuid, from),
+    readSubagentLog: (uuid, agentId) => readHostSubagentLog(uuid, agentId),
+    listCommandFiles: () => listHostCommandFiles(project.basePath),
+    askClaude: (prompt, model) => askHostClaude(prompt, model)
+  }
 }
 
 export class ChatService {
@@ -810,13 +1024,11 @@ export class ChatService {
     if (existing && !retry) return { ok: true, state: this.stateOf(existing) }
     if (existing) this.close(session.id)
 
-    if (!(await this.docker.binaryName())) {
-      return { ok: false, reason: 'docker-missing', message: 'docker not found on PATH' }
-    }
-    // Opening a session must never start a stopped container — starting stays an
-    // explicit user action, and the placeholder that says so is also the one
-    // screen where "no history while the container is stopped" becomes visible.
-    if (!(await this.docker.isRunning(project))) return { ok: false, reason: 'container-stopped' }
+    // A container chat checks docker and its container here; a host chat checks
+    // that there is a `claude` to run (see ChatRuntime).
+    const rt = isHostProject(project) ? hostRuntime(project) : containerRuntime(this.docker, project)
+    const refused = await rt.ready()
+    if (refused) return refused
 
     const l: Live = {
       session,
@@ -857,7 +1069,8 @@ export class ChatService {
       modeWarned: false,
       titleWanted: false,
       titling: false,
-      closing: false
+      closing: false,
+      rt
     }
 
     const historyError = await this.readHistory(l)
@@ -909,6 +1122,13 @@ export class ChatService {
     if (l.silence) clearTimeout(l.silence)
     if (l.streamTimer) clearTimeout(l.streamTimer)
     try {
+      // EOF first, then the kill. The kill alone reaches the process this app
+      // spawned, and for a host chat on an npm install that is cmd.exe running
+      // the `claude.cmd` shim — Windows does not take a killed process's
+      // children with it, so the CLI under it would outlive the chat. A closed
+      // stdin is what a stream-json CLI reads as "no more input" and exits on,
+      // wherever it sits in the tree.
+      l.proc?.stdin.end()
       l.proc?.kill()
     } catch {
       /* already gone */
@@ -1017,7 +1237,7 @@ export class ChatService {
       l.transcriptExists = false
       return undefined
     }
-    const r = await this.docker.readTranscript(l.project, uuid, 0)
+    const r = await l.rt.readTranscript(uuid, 0)
     if (!r.ok) return r.message || 'could not read the conversation'
     // Whole lines only — a read that lands mid-line must leave that line to the
     // next read rather than consume half of it (see completeLines).
@@ -1084,7 +1304,7 @@ export class ChatService {
   private async settleTurn(l: Live, turn: number, from: number, attempt = 0): Promise<void> {
     const uuid = l.session.claudeSessionId
     if (!uuid) return
-    const r = await this.docker.readTranscript(l.project, uuid, from)
+    const r = await l.rt.readTranscript(uuid, from)
     if (!r.ok || !r.text.trim()) return
     const { complete } = completeLines(r.text)
     if (!complete) return
@@ -1222,19 +1442,15 @@ export class ChatService {
   }
 
   // ---- process ------------------------------------------------------------
-  /** Start the CLI. `-i`, never `-it` — there is no TTY anywhere in this path. */
+  /**
+   * Start the CLI — `docker exec -i` for a container chat (`-i`, never `-it`),
+   * the host `claude` with plain pipes for a host one. No TTY anywhere in either
+   * path. The transcript read just told us whether the conversation exists, so
+   * neither side has to probe for it again.
+   */
   private async start(l: Live): Promise<boolean> {
-    const bin = await this.docker.binaryName()
-    if (!bin) return false
-    // The transcript read just told us whether the conversation exists, so
-    // execArgs picks --resume vs --session-id without a fourth docker launch.
-    const args = await this.docker.execArgs(l.project, 'chat', l.session.id, l.transcriptExists)
-    let proc: ChildProcessWithoutNullStreams
-    try {
-      proc = spawn(bin, args, { windowsHide: true })
-    } catch {
-      return false
-    }
+    const proc = await l.rt.spawn(l.session, l.transcriptExists)
+    if (!proc) return false
     l.proc = proc
     proc.stdout.setEncoding('utf8')
     proc.stdout.on('data', (chunk: string) => this.onStdout(l, chunk))
@@ -1932,7 +2148,7 @@ export class ChatService {
   private async skipTurn(l: Live, from: number): Promise<void> {
     const uuid = l.session.claudeSessionId
     if (!uuid) return
-    const r = await this.docker.readTranscript(l.project, uuid, from)
+    const r = await l.rt.readTranscript(uuid, from)
     if (!r.ok) return
     this.accounted(l, from + takeTurn(completeLines(r.text).complete).bytes)
   }
@@ -2045,7 +2261,7 @@ export class ChatService {
     l.titling = true
     l.titleWanted = false
     try {
-      const title = cleanTitle(await this.docker.askClaude(l.project, prompt, TITLE_MODEL))
+      const title = cleanTitle(await l.rt.askClaude(prompt, TITLE_MODEL))
       // Re-tested after the await, never before it: this took seconds, and
       // `manualRename` may have landed inside them.
       if (title && (force || this.mayRename(l.session))) this.rename(l, title)
@@ -2563,7 +2779,7 @@ export class ChatService {
       await new Promise((r) => setTimeout(r, 50))
     }
 
-    const read = await this.docker.readTranscript(l.project, uuid, 0)
+    const read = await l.rt.readTranscript(uuid, 0)
     if (!read.ok) {
       return { ok: false, removed: 0, prefill: null, message: read.message || 'could not read the conversation' }
     }
@@ -3036,7 +3252,7 @@ export class ChatService {
     const now = Date.now()
     if (now - l.commandsAt < COMMAND_SCAN_MS) return
     l.commandsAt = now
-    const found = commandNamesFrom(await this.docker.listCommandFiles(l.project))
+    const found = commandNamesFrom(await l.rt.listCommandFiles())
     const merged = [...new Set([...l.commands, ...found])]
     // Emitted only on a real change: this runs on every menu open, and a `meta`
     // event replaces the array the renderer memoises its typeahead rows against.
@@ -3141,7 +3357,7 @@ export class ChatService {
     if (row?.kind === 'task' && row.running) return buffered
     const uuid = l.session.claudeSessionId
     if (!uuid || !agentId) return buffered
-    const raw = await this.docker.readSubagentLog(l.project, uuid, agentId)
+    const raw = await l.rt.readSubagentLog(uuid, agentId)
     // A read that finds nothing is not final: the file may simply not be there
     // yet. Whatever the stream forwarded is still the better answer.
     if (!raw) return buffered

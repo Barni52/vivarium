@@ -13,6 +13,7 @@ import type {
   Session
 } from '@shared/types'
 import { DEFAULT_EFFORT, EFFORT_LEVELS, modelName, modelOptionLabel } from '@shared/models'
+import { isHostProject } from '@shared/projects'
 import { AGENT_PANEL_MIN, useStore } from '../../state/store'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
@@ -111,7 +112,11 @@ export function ChatView({
   visible: boolean
 }): React.ReactElement {
   const chat = useStore((s) => s.chats[session.id])
-  const running = useStore((s) => !!s.states[project.id]?.running)
+  // A host project's chat runs on Windows with no container, so it can always be
+  // opened — it comes up at launch, as a host agent or shell does (TerminalHost).
+  const host = isHostProject(project)
+  // "Can this chat be live right now": its container is up, or it has none.
+  const running = useStore((s) => host || !!s.states[project.id]?.running)
   const openChat = useStore((s) => s.openChat)
   const closeChat = useStore((s) => s.closeChat)
   const sendChat = useStore((s) => s.sendChat)
@@ -226,13 +231,16 @@ export function ChatView({
   // Retried while the store still says the container is running: a project's
   // sessions all open at once and that burst is exactly what makes `docker
   // inspect` answer non-zero, which isRunning() reads as "container stopped".
+  //
+  // Never for a host chat: nothing it opens through is a busy daemon, so a
+  // failure there is not one that waiting fixes, and a retry would spin on it.
   React.useEffect(() => {
-    if (!running || !chat) return
+    if (!running || !chat || host) return
     if (chat.open || chat.opening) return
     if (chat.reason !== 'container-stopped' && chat.reason !== 'spawn-failed') return
     const t = setTimeout(() => void openChat(project.id, session.id, true), 900)
     return () => clearTimeout(t)
-  }, [running, chat, openChat, project.id, session.id])
+  }, [running, host, chat, openChat, project.id, session.id])
 
   React.useEffect(() => {
     void window.vivarium.chatMountTree(project.id).then(setTree)
@@ -813,7 +821,7 @@ export function ChatView({
       // Electron 31 still puts the real path on the File; past 32 this becomes
       // webUtils.getPathForFile in the preload.
       const hostPath = (f as File & { path?: string }).path
-      next.push(await routeFile(f, hostPath, tree))
+      next.push(await routeFile(f, hostPath, tree, host))
     }
     setChips((c) => [...c, ...next])
   }

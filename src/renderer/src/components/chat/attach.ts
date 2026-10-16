@@ -13,6 +13,11 @@ import type { ChatAttachment, MountNode } from '@shared/types'
 // inline as base64, and a `Read` of a path outside /workspace raises no
 // permission prompt in bypass. So the host↔container boundary is optional, not
 // forced.
+//
+// A **host** chat has no boundary to route across: its CLI runs on this disk
+// as you, so every file that has a path is reachable at that path, and the chip
+// carries the Windows path verbatim. Only what has no path at all — a picture
+// pasted from the clipboard — goes inline, as it does in a container.
 
 /** A chip the composer is holding — either sendable, or a refusal wearing its reason. */
 export type PendingChip =
@@ -82,9 +87,19 @@ function looksBinary(text: string): boolean {
 export async function routeFile(
   file: File,
   hostPath: string | undefined,
-  tree: MountNode[]
+  tree: MountNode[],
+  /** a host project's chat, which reads every file where it is */
+  host = false
 ): Promise<PendingChip> {
   const name = file.name || 'pasted-image.png'
+  if (hostPath && host) {
+    return {
+      id: nextId(),
+      ok: true,
+      attachment: { kind: 'path', name, containerPath: hostPath },
+      detail: hostPath
+    }
+  }
   if (hostPath) {
     const containerPath = toContainerPath(hostPath, tree)
     if (containerPath) {
@@ -149,8 +164,13 @@ export async function routeFile(
 }
 
 /** A folder: a path chip under a mount, refused outside one — nothing inlines a tree. */
-export function routeFolder(hostPath: string, name: string, tree: MountNode[]): PendingChip {
-  const containerPath = toContainerPath(hostPath, tree)
+export function routeFolder(
+  hostPath: string,
+  name: string,
+  tree: MountNode[],
+  host = false
+): PendingChip {
+  const containerPath = host ? hostPath : toContainerPath(hostPath, tree)
   if (!containerPath) return { id: nextId(), ok: false, name, reason: UNREACHABLE }
   return {
     id: nextId(),

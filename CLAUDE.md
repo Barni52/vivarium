@@ -22,7 +22,10 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 - `dockerfiles.ts` — inline slim/full Dockerfiles, `IMAGE_VERSION`, shared volume names.
 - `pty.ts` — `PtyManager`: node-pty processes keyed by session id.
 - `chat.ts` — `ChatService`: one live `claude -p` process per `chat` session, the transcript
-  reader and its byte offset, the body cache, the todo fold, the subagent buffer.
+  reader and its byte offset, the body cache, the todo fold, the subagent buffer. All of its I/O
+  goes through a `ChatRuntime` picked at open — `docker exec` for a container project, the
+  Windows `claude` and `~/.claude` on disk for a host one — and `chatCliArgs` is the one flag list
+  both launch with.
 - `chatMapper.ts` — the one mapper turning Claude Code JSON (stream frames *and* transcript
   lines) into log rows.
 - `bridge.ts` — the agent hook bridge: a per-project host dir bind-mounted at `/vivarium` holding
@@ -31,8 +34,8 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 - `git.ts` — branch detection (reads `.git/HEAD` directly) + "Write branch diff".
 - `clipboard.ts` — Ctrl+V image paste → PNG in the project clip dir (mounted at `/clip`).
 - `claude.ts` — `ClaudeService`: npm `latest` lookup (10-min cache) + per-container version probe.
-- `host.ts` — a host project's agent: which Windows `claude` to run, and whether its conversation
-  already exists in `~/.claude`.
+- `host.ts` — a host project's agents and chats: which Windows `claude` to run, spawning it with
+  no shell, and its conversations in `~/.claude/projects` — found, read, searched, deleted.
 
 `src/preload/index.ts` — the typed `window.vivarium`. The renderer never touches `ipcRenderer`.
 
@@ -141,7 +144,8 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   holds projects/mounts/sessions/settings and is written through `ConfigStore.mutate` (atomic
   temp-file + rename). Six deliberate exceptions, all user preferences or facts that *cannot* be
   queried: `Session.model`, `Session.effort`, `Config.chatZoom`,
-  `Session.previousClaudeSessionIds` + `Config.pendingTranscriptDeletes`, `Session.rewound`, and
+  `Session.previousClaudeSessionIds` + `Config.pendingTranscriptDeletes` (and its host twin
+  `pendingHostTranscriptDeletes`), `Session.rewound`, and
   `Session.autoName` (*who* last named a chat — nothing can be asked once both answers are just a
   string in `name`). `Session.effort` is the strongest case of the lot: the CLI reports the effort
   level **nowhere** — not in `init`, and there is no control request that asks — so the pick is the
@@ -157,22 +161,30 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
 - **Delete means delete, for chat conversations.** Deleting a chat deletes its whole transcript
   chain and deleting a project cascades. The mechanism is a debt list
   (`Config.pendingTranscriptDeletes`) written in the *same atomic mutate* that removes the
-  session, drained at launch and after each container start. **There is no sweep and never will
-  be** — the `-workspace` slug holds claude-box's transcripts too. The removal is `rm -rf` with an
-  interpolated variable: the safety rests entirely on that uuid coming from `randomUUID()`.
+  session, drained at launch and after each container start. A host chat's debt goes on its own
+  list (`pendingHostTranscriptDeletes`), drained off the disk at launch and after each delete —
+  never through docker, which a host-only machine may not have. **There is no sweep and never will
+  be** — the `-workspace` slug holds claude-box's transcripts too, and `~/.claude` holds every
+  conversation the user ever had. The removal is `rm -rf` with an interpolated variable: the safety
+  rests entirely on that uuid coming from `randomUUID()`.
 
 ### Host projects
 
 - **A project is a container project unless `Project.kind === 'host'`.** Absent means container, so
   old config needs no migration; the kind is picked in Add project and **never changes** — a
-  conversation cannot follow a project across the boundary. A host project holds only `agent` and
-  `host-shell` (`@shared/projects`, enforced by the picker, the drop targets *and* main's
+  conversation cannot follow a project across the boundary. A host project holds `agent`, `chat`
+  and `host-shell` (`@shared/projects`, enforced by the picker, the drop targets *and* main's
   `addSession`/`moveSession`). Its `mounts` are empty and its `image` is an inert `slim`.
 - **A host agent is plain `claude.exe` in `basePath` — never `--dangerously-skip-permissions`.** The
   container is what made bypass a sane default; without one, the agent is the same `claude` you
   would get in your own terminal, prompts and all. Spawned directly (no shell), found by
   `resolveClaude` on PATH then `~/.local/bin`, resumed by pinned id exactly like a container agent.
-- **Host ptys drop an outer Claude Code's session markers** (`withoutParentSession`). Launch the app
+- **A host chat is the deliberate exception: it runs in `bypassPermissions`**, as every chat does.
+  The user decided it, and the chat has no permission card to answer a prompt with. Same
+  `chatCliArgs`, spawned the agent's way (`spawnHostClaude`: no shell, `withoutParentSession`) with
+  `basePath` as cwd. Its transcript is read straight off `~/.claude/projects/<slug>/`, the slug
+  found by looking, never by escaping `basePath` (`D:\vivarium` is filed under `D--Vivarium`).
+- **Host processes drop an outer Claude Code's session markers** (`withoutParentSession`). Launch the app
   from inside a Claude session and Electron inherits `CLAUDE_CODE_CHILD_SESSION` & co.; a host
   `claude` then thinks it is a child, **saves no transcript**, and every later `--resume` breaks.
   The list is explicit — `CLAUDE_CODE_*` is also where the user's own configuration lives.
@@ -182,12 +194,14 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   nothing reports the *answer*, so `TerminalView` resumes on Enter **or a digit**. The files are
   written only-if-changed: every host agent spawns at once at launch, and truncating a
   `hooks.json` a sibling `claude.exe` is parsing makes it run hookless.
-- **An agent never moves into, out of, or between host projects** (`canMoveSession`). Claude files
-  a transcript under the directory it started in and refuses `--resume` from any other, which is
-  also why changing a host project's folder gives its agents **new** conversation ids. Container
-  agents never meet this: every one runs in `/workspace`.
+- **An agent or a chat never moves into, out of, or between host projects** (`canMoveSession`).
+  Claude files a transcript under the directory it started in and refuses `--resume` from any
+  other, which is also why changing a host project's folder gives its agents and chats **new**
+  conversation ids (a chat's old id is retired onto `previousClaudeSessionIds`, so delete still
+  reaches it). Container sessions never meet this: every one runs in `/workspace`.
 - **Every docker-facing handler refuses or skips host projects in main** — the lifecycle four,
-  `claudeUpdate`, and the `containerStates` / `claudeStatus` sweeps. Their sessions render at launch
+  `claudeUpdate`, and the `containerStates` / `claudeStatus` sweeps — and a host chat's
+  `ChatRuntime` never reaches docker, nor waits at the open gate. Their sessions render at launch
   like host shells and never get the "Container stopped" placeholder.
 
 ### Terminals
@@ -256,6 +270,7 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
 
 - **A chat drives Claude Code; it is not a bespoke agent loop.** One
   `docker exec -i … claude -p --input-format stream-json --output-format stream-json` per session
+  (in a host project, the Windows `claude` with the same arguments and plain pipes)
   — **`-i`, never `-it`**, no TTY anywhere in the path. Three flags are load-bearing:
   `--permission-prompt-tool stdio` (an undocumented *sentinel*, not an MCP server; without it a
   raw `-p` run auto-denies every prompt **and** drops `AskUserQuestion` from the tool list),
@@ -275,8 +290,9 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   than bypass is said once, as an alert row in the log. The *terminal* agent's TUI keeps its own
   plan mode and the hook bridge still treats `ExitPlanMode` as a wait — that is the pty, not this.
 - **The transcript is the chat's model, not a log of it.** History is the container-side `.jsonl`
-  read over `docker exec`; there is **no host-side mirror**, which would drift from the file
-  `--resume` actually feeds the model. A turn paints from the stream, and at `result` main
+  read over `docker exec` (a host chat's own `.jsonl`, read off the disk — only the I/O differs);
+  there is **no host-side mirror**, which would drift from the file `--resume` actually feeds the
+  model. A turn paints from the stream, and at `result` main
   re-reads from its stored byte offset and *replaces* that turn's rows. Accepted cost: no history
   while the container is stopped. Four rules make the replacement safe, all because it deletes
   what it replaces — whole lines only (`completeLines`), one turn per settle (`takeTurn`), a settle

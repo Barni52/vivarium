@@ -10,7 +10,7 @@ import type {
   VolumeRemoveResult,
   VolumeReport
 } from '@shared/types'
-import { DEFAULT_EFFORT, isEffort } from '@shared/models'
+import { chatCliArgs } from './chat'
 import {
   IMAGE_VERSION,
   SLIM_IMAGE,
@@ -130,8 +130,8 @@ function parseSize(size: string): number | null {
  * out of is one long JSON object, so the half that follows is the half more
  * likely to be the sentence you were looking for.
  */
-const SNIPPET_BEFORE = 44
-const SNIPPET_AFTER = 72
+export const SNIPPET_BEFORE = 44
+export const SNIPPET_AFTER = 72
 /** How many transcripts the snippet pass will name on one command line. */
 const SNIPPET_FILES = 60
 
@@ -163,6 +163,37 @@ function cleanSnippet(fragment: string): string {
     .replace(/^�+|�+$/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+/**
+ * One `.{0,before}term.{0,after}` window out of a transcript line, as the
+ * readable line the search dialog shows — or null when nothing readable is
+ * left. Shared by the container search (a grep `-o` fragment) and the host one
+ * (the same window, cut in JS), so a hit reads the same from either side.
+ */
+export function snippetOf(fragment: string, query: string): string | null {
+  const cut = fragment.indexOf(query)
+  const lead = cut < 0 ? 0 : cut
+  const tail = cut < 0 ? 0 : fragment.length - cut - query.length
+
+  // A window this wide almost always opens mid-object —
+  // `"type":"text","text":"The WSL gateway…` — and those leading keys are
+  // the least interesting characters on the line. If the value the match
+  // sits in *starts* inside the window, start the snippet there instead.
+  // The seam is the last `":"` before the match, and it can be trusted to be
+  // structural: a quote inside a JSON string arrives escaped, so an
+  // unescaped one is punctuation. (A window that cut a `\":\"` in half can
+  // fool it, which costs a few more characters of lead and nothing else.)
+  const seam = fragment.slice(0, lead).lastIndexOf('":"')
+  const body = seam < 0 ? fragment : fragment.slice(seam + 3)
+
+  const text = cleanSnippet(body)
+  if (!text) return null
+  // Ellipses only where something was actually cut — the window hit its
+  // limit on that side, or the seam trim just dropped a key. Measured on the
+  // raw fragment, before unescaping moves every offset.
+  const before = lead >= SNIPPET_BEFORE || seam >= 0 ? '…' : ''
+  return `${before}${text}${tail >= SNIPPET_AFTER ? '…' : ''}`
 }
 
 export class DockerService {
@@ -1156,75 +1187,16 @@ export class DockerService {
     const name = this.containerName(project)
     if (kind === 'chat') {
       const session = project.sessions.find((s) => s.id === sessionId)
-      // `-i`, never `-it`: there is no TTY anywhere in this path, which is the
-      // whole point of the chat type. Everything below rides one NDJSON stream in
-      // each direction (see main/chat.ts).
-      const args = ['exec', '-i', '-w', '/workspace', name, 'claude', '-p']
-      args.push('--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose')
-      // Load-bearing and undocumented — it is not in `claude --help`. A sentinel,
-      // not a real MCP server: without it a raw `-p` run **auto-denies every
-      // prompt**, *and* AskUserQuestion is not in the session's tool list at all
-      // (verified by diffing init.tools with and without it). Every turn needs
-      // it, including a slash-command turn.
-      args.push('--permission-prompt-tool', 'stdio')
-      // Token deltas, so prose paints as it is generated rather than landing in
-      // one block at the end. Chunky over docker exec (~16 events in 5s), but real.
-      args.push('--include-partial-messages')
-      // Without this, thinking blocks reach the chat empty. A `-p` stream-json
-      // run asks the API for no display at all, and the API's default on current
-      // models is to omit the text: every block arrives as `"thinking": ""` plus a
-      // signature (verified on 2.1.283 against Opus 5.5 — one empty delta, versus
-      // a dozen `thinking_delta`s of prose with this flag). It is a *summary* of
-      // the thinking, not the raw text; `highlights` also exists but the API only
-      // accepts it from sessions Anthropic hosts. The flag rather than the
-      // `showThinkingSummaries` setting, because settings.json is shared with
-      // claude-box and would change the user's TUI sessions too.
-      args.push('--thinking-display', 'summarized')
-      // Required for the live sub-log to match the settled sibling file block for
-      // block. Without it the stream withholds a subagent's prose and thinking, so
-      // the sub-log would *grow paragraphs* at completion — a systematic twitch,
-      // which is not what the turn-end settle is meant to expose.
-      args.push('--forward-subagent-text')
-      // **Always bypassPermissions; there is no other mode.** Plan mode was
-      // removed — the chat used to offer a plan/bypass toggle and an approval card,
-      // and nobody used it. Re-checked on 2.1.283: `init` reports
-      // bypassPermissions and Write, Bash and a write under `.claude/` all run
-      // without a single `can_use_tool`. If a managed setting or a future CLI ever
-      // stops that, ChatService.init says so in the log.
-      args.push('--permission-mode', 'bypassPermissions')
-      // …and the plan tools are taken away, not merely unused. Bypass does not
-      // remove them (init.tools lists both), so the model can still enter plan
-      // mode *by itself* — and with the approval card gone there would be no way
-      // back out: ExitPlanMode would be a permission prompt nobody can answer
-      // properly. One comma-joined value, because the flag is variadic and a
-      // second bare word would be read as another of its values; verified on
-      // 2.1.283 that both disappear from init.tools and AskUserQuestion stays.
-      args.push('--disallowedTools', 'EnterPlanMode,ExitPlanMode')
-      // Vivarium owns the model: a chip reading "opus" at reopen while the process
-      // actually spawned on the CLI's configured default is a reading that lies
-      // about a live fact, in a header made entirely of readings.
-      if (session?.model) args.push('--model', session.model)
-      // How hard to think. **Always passed, even when nothing was picked** —
-      // that is what makes the header's reading true rather than a guess at the
-      // CLI's own default, which is reported nowhere and could move under us
-      // (see DEFAULT_EFFORT). An unrecognised value in config falls back rather
-      // than being forwarded: an unknown level is *not* an error the CLI
-      // refuses, it warns on stderr (which nothing here reads) and silently
-      // runs at its default, which is the one outcome the chip could not
-      // describe. `/effort` changes it on a chat that is already live; this is
-      // the launch half.
-      args.push('--effort', isEffort(session?.effort) ? session.effort : DEFAULT_EFFORT)
-      // Deliberately absent: --settings /vivarium/hooks.json and
-      // VIVARIUM_SESSION_ID. The hook bridge stays for pty agents only; a chat
-      // derives its own activity from this stream, and double-emitting would give
-      // the store two producers for one session.
       const claudeId = session?.claudeSessionId
-      if (claudeId) {
-        const resume =
-          conversationExists ?? (await this.claudeConversationExists(name, claudeId))
-        args.push(resume ? '--resume' : '--session-id', claudeId)
-      }
-      return args
+      const resume = claudeId
+        ? (conversationExists ?? (await this.claudeConversationExists(name, claudeId)))
+        : false
+      // `-i`, never `-it`: there is no TTY anywhere in this path, which is the
+      // whole point of the chat type. Everything after `claude` rides one NDJSON
+      // stream in each direction (see main/chat.ts) and is the same list a host
+      // chat is launched with — `chatCliArgs` is the one spelling of it, and
+      // where each flag's reason is written down.
+      return ['exec', '-i', '-w', '/workspace', name, 'claude', ...chatCliArgs(session, resume)]
     }
     if (kind === 'agent') {
       // VIVARIUM_SESSION_ID tags this exec's hook events with the owning
@@ -1556,29 +1528,8 @@ export class DockerService {
       // rest are the same line again.
       if (!wanted.has(file) || out.has(file)) continue
 
-      const fragment = line.slice(at + 1)
-      const cut = fragment.indexOf(query)
-      const lead = cut < 0 ? 0 : cut
-      const tail = cut < 0 ? 0 : fragment.length - cut - query.length
-
-      // A window this wide almost always opens mid-object —
-      // `"type":"text","text":"The WSL gateway…` — and those leading keys are
-      // the least interesting characters on the line. If the value the match
-      // sits in *starts* inside the window, start the snippet there instead.
-      // The seam is the last `":"` before the match, and it can be trusted to be
-      // structural: a quote inside a JSON string arrives escaped, so an
-      // unescaped one is punctuation. (A window that cut a `\":\"` in half can
-      // fool it, which costs a few more characters of lead and nothing else.)
-      const seam = fragment.slice(0, lead).lastIndexOf('":"')
-      const body = seam < 0 ? fragment : fragment.slice(seam + 3)
-
-      const text = cleanSnippet(body)
-      if (!text) continue
-      // Ellipses only where something was actually cut — the window hit its
-      // limit on that side, or the seam trim just dropped a key. Measured on the
-      // raw fragment, before unescaping moves every offset.
-      const before = lead >= SNIPPET_BEFORE || seam >= 0 ? '…' : ''
-      out.set(file, `${before}${text}${tail >= SNIPPET_AFTER ? '…' : ''}`)
+      const text = snippetOf(line.slice(at + 1), query)
+      if (text) out.set(file, text)
     }
     return out
   }

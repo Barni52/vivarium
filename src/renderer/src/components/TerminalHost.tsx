@@ -86,8 +86,8 @@ export function TerminalHost(): React.ReactElement {
   // scrollback survives switching.
   //
   //  • host shells need no container, so they come up at app launch — and so
-  //    does everything in a host project, whose agents are `claude.exe` in a
-  //    folder and have no container to wait for either;
+  //    does everything in a host project, whose agents and chats are the
+  //    Windows `claude` in a folder and have no container to wait for either;
   //  • a running container brings every one of its sessions up — on an explicit
   //    start, and at launch for a container that was already running;
   //  • a live pty outranks the probe, because unmounting runs TerminalView's

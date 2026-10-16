@@ -1,4 +1,5 @@
 import React from 'react'
+import { isHostProject } from '@shared/projects'
 import { useStore } from '../../state/store'
 import { Overlay, Panel, FooterButton } from '../ui'
 import { MONO } from '../../theme'
@@ -23,15 +24,14 @@ export function ConfirmKill(): React.ReactElement | null {
   const target = useStore((s) => s.killTarget)
   const closeDialog = useStore((s) => s.closeDialog)
   const confirmKill = useStore((s) => s.confirmKill)
-  const type = useStore(
-    (s) =>
-      s.config.projects
-        .find((p) => p.id === target?.projectId)
-        ?.sessions.find((x) => x.id === target?.sessionId)?.type
-  )
+  const project = useStore((s) => s.config.projects.find((p) => p.id === target?.projectId))
+  const type = project?.sessions.find((x) => x.id === target?.sessionId)?.type
 
   if (!target) return null
   const isChat = type === 'chat'
+  // A host project has no container to reassure anyone about, so the tail
+  // sentence is only said where it is true.
+  const tail = isHostProject(project) ? '' : ' The container keeps running.'
   const name = <span style={{ color: 'var(--fg)', fontFamily: MONO }}>{target.name}</span>
 
   return (
@@ -46,10 +46,10 @@ export function ConfirmKill(): React.ReactElement | null {
               <>
                 This removes {name} and{' '}
                 <b style={{ color: 'var(--fg)' }}>deletes its conversation</b> — you will not be
-                able to resume it from a terminal either. The container keeps running.
+                able to resume it from a terminal either.{tail}
               </>
             ) : (
-              <>This stops {name} and closes its terminal. The container keeps running.</>
+              <>This stops {name} and closes its terminal.{tail}</>
             )}
           </div>
         </div>
