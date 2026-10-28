@@ -31,7 +31,11 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 - `bridge.ts` — the agent hook bridge: a per-project host dir bind-mounted at `/vivarium` holding
   hook settings + `hook.sh`; `BridgeWatcher` tails its `events.log`.
 - `config.ts` — atomic persistence of the single `%APPDATA%/vivarium/config.json`.
-- `git.ts` — branch detection (reads `.git/HEAD` directly) + "Write branch diff".
+- `git.ts` — branch detection (reads `.git/HEAD` directly) + "Write branch diff", which writes
+  `<output>/<branch>/changes.txt` (the branch with `/` made `-`) so a branch's diff and its
+  review sit together. Agents run the same writer through the `write_branch_diff` tool, base
+  `origin/master` unless they or the output panel name another — and `isDiffBase` guards the
+  base, because git reads an argument starting with `-` as an option.
 - `clipboard.ts` — Ctrl+V image paste → PNG in the project clip dir (mounted at `/clip`).
 - `claude.ts` — `ClaudeService`: npm `latest` lookup (10-min cache) + per-container version probe.
 - `host.ts` — a host project's agents and chats: which Windows `claude` to run, spawning it with

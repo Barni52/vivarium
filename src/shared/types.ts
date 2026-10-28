@@ -307,6 +307,8 @@ export interface WindowBounds {
 export interface DiffResult {
   ok: boolean
   message: string
+  /** the branch folder under the output folder that changes.txt went into */
+  folder?: string
 }
 
 /** One node in the shared-output-folder file tree. */

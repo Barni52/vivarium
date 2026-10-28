@@ -44,7 +44,7 @@ import { BridgeWatcher, bridgeDir, ensureHostBridgeFiles, removeBridge } from '.
 import { ChatService } from './chat'
 import { McpAttachments } from './mcpServers'
 import { OrchestrationServer } from './orchestration'
-import { gitBranch, writeBranchDiff } from './git'
+import { DEFAULT_DIFF_BASE, gitBranch, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
 import { pasteImage, pruneClips, removeClips } from './clipboard'
 import { deleteHostTranscripts, resolveClaude, searchHostTranscripts } from './host'
@@ -764,7 +764,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     const p = cfg.projects.find((x) => x.id === projectId)
     if (!p) return { ok: false, message: 'not-found' }
     if (!cfg.sharedOutputFolder) return { ok: false, message: 'no-output' }
-    return writeBranchDiff(p, cfg.sharedOutputFolder, cfg.diffBase || 'origin/master')
+    return writeBranchDiff(p, cfg.sharedOutputFolder, cfg.diffBase || DEFAULT_DIFF_BASE)
   })
 
   ipcMain.handle(CH.setDiffBase, async (_e, value: string): Promise<Config> => {

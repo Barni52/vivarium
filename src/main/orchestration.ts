@@ -7,6 +7,7 @@ import { EFFORT_LEVELS, isEffort } from '@shared/models'
 import { isHostProject } from '@shared/projects'
 import type { ChatEffort, ChatOpenResult, Config, Project, Session } from '@shared/types'
 import { bridgeDir } from './bridge'
+import { DEFAULT_DIFF_BASE, gitBranch, isDiffBase, writeBranchDiff } from './git'
 import type { ChatService } from './chat'
 import { BACKEND_PORTS } from './dockerfiles'
 import type { McpAttachments } from './mcpServers'
@@ -227,6 +228,27 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { chat: TARGET_CHAT } }
   },
   {
+    name: 'write_branch_diff',
+    description:
+      "Write the diff of a project's current git branch against a base into the shared output folder, " +
+      'as changes.txt in a folder named after the branch (slashes become -). Committed changes only ' +
+      '(<base>...HEAD), limited to the folders the project mounts, after fetching origin. Returns where ' +
+      'the file is from your chat. The review-changes-html and mr-description skills read it from there.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: "The project id, as list_chats reports it. Defaults to your own chat's project."
+        },
+        base: {
+          type: 'string',
+          description: `The branch or ref to diff against. Defaults to ${DEFAULT_DIFF_BASE}.`
+        }
+      }
+    }
+  },
+  {
     name: 'delete_chat',
     description:
       'Delete a chat and its whole conversation history. This cannot be undone. Your own chat cannot be deleted.',
@@ -401,6 +423,8 @@ export class OrchestrationServer {
         return this.stopChat(args)
       case 'delete_chat':
         return this.deleteChat(args, caller)
+      case 'write_branch_diff':
+        return this.writeDiff(args, caller)
       case 'connect_mcp':
         return this.withTargetChat(args, caller, (id) =>
           this.deps.mcp.connect(id, {
@@ -517,6 +541,41 @@ export class OrchestrationServer {
     if (found.session.id === caller) return failure('Your own chat cannot be deleted.')
     await this.deps.removeChat(found.project.id, found.session.id)
     return { text: `Deleted chat "${found.session.name}" (${found.session.id}).` }
+  }
+
+  /**
+   * The UI's "Write branch diff", for an agent: the same writer, the same output
+   * folder, and the base the user set in the output panel unless the agent
+   * names one. The path handed back is the one the *caller* can open — its
+   * container's `/workspace/output/…`, or the Windows path for a host chat —
+   * whichever project the diff was taken of.
+   */
+  private async writeDiff(args: ToolArgs, caller: string): Promise<ToolResult> {
+    const config = this.deps.readConfig()
+    const output = config.sharedOutputFolder
+    if (!output) {
+      return failure('No shared output folder is set, so there is nowhere to write the diff.')
+    }
+    const callerProject = config.projects.find((p) => p.sessions.some((s) => s.id === caller))
+    const projectId = readString(args.project) || callerProject?.id || ''
+    const project = config.projects.find((p) => p.id === projectId)
+    if (!project) return failure(`No project with id ${projectId}. list_chats lists them.`)
+    const base = readString(args.base).trim() || config.diffBase || DEFAULT_DIFF_BASE
+    if (!isDiffBase(base)) return failure(`${base} is not a branch or ref name.`)
+    if (!gitBranch(project.basePath)) {
+      return failure(`Project ${project.name} is not on a git branch (no repository at its folder).`)
+    }
+    const r = await writeBranchDiff(project, output, base)
+    if (!r.ok || !r.folder) return failure(`Could not write the diff: ${r.message}`)
+    const where =
+      callerProject && !isHostProject(callerProject)
+        ? `/workspace/output/${r.folder}/changes.txt`
+        : r.message
+    return {
+      text:
+        `Wrote the diff of ${gitBranch(project.basePath)} against ${base} (project ${project.name}) ` +
+        `to ${where}.`
+    }
   }
 
   /**

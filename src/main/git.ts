@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from 'fs'
-import { writeFile } from 'fs/promises'
+import { mkdir, writeFile } from 'fs/promises'
 import { join, resolve, relative, isAbsolute, sep } from 'path'
 import { execFile } from 'child_process'
 import type { Project, DiffResult } from '@shared/types'
@@ -53,11 +53,40 @@ function run(cmd: string, args: string[], cwd: string): Promise<RunResult> {
   })
 }
 
+/** The base a diff is taken against when nothing else was picked. */
+export const DEFAULT_DIFF_BASE = 'origin/master'
+
+/**
+ * Whether `base` may go to `git diff` as `<base>...HEAD`. It is an argument of
+ * its own (no shell), but git reads one that starts with `-` as an *option* —
+ * `--output=<file>` among them — and an agent can now pass it, so only the
+ * characters a ref name is written with get through.
+ */
+export function isDiffBase(base: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/@^~-]*$/.test(base) && !base.includes('..')
+}
+
+/**
+ * The folder a branch's diff and its review go in: the branch name, with the
+ * characters a Windows folder name cannot hold made `-` — so `feature/ABC-1`
+ * is `feature-ABC-1`, one flat folder rather than a tree the skills would have
+ * to walk.
+ */
+export function branchFolderName(branch: string): string {
+  const name = branch
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+  return name || 'unknown-branch'
+}
+
 /**
  * Fetch origin, then write a diff of the current branch vs `base` (committed
- * only, `<base>...HEAD`) into `<outputFolder>/changes.txt`, scoped to the
- * project's mounted subfolders (folders outside the repo are ignored). Always
- * writes a file so the user gets feedback even on error.
+ * only, `<base>...HEAD`) into `<outputFolder>/<branch>/changes.txt`, scoped to
+ * the project's mounted subfolders (folders outside the repo are ignored).
+ * Always writes a file so the user gets feedback even on error.
+ *
+ * **One folder per branch** (`branchFolderName`), so the diff and the review
+ * written from it sit together and two branches never overwrite each other's.
  */
 export async function writeBranchDiff(
   project: Project,
@@ -66,6 +95,7 @@ export async function writeBranchDiff(
 ): Promise<DiffResult> {
   const cwd = project.basePath
   const branch = gitBranch(cwd) ?? '(unknown)'
+  if (!isDiffBase(base)) return { ok: false, message: `not a branch or ref name: ${base}` }
 
   // 1. Fetch remote — non-fatal (offline / no origin still lets a stale diff run).
   const fetched = await run('git', ['fetch', 'origin', '--prune'], cwd)
@@ -110,7 +140,10 @@ export async function writeBranchDiff(
     .filter((l) => l !== null)
     .join('\n')
 
-  const file = join(outputFolder, 'changes.txt')
+  const folder = branchFolderName(gitBranch(cwd) ?? '')
+  const dir = join(outputFolder, folder)
+  const file = join(dir, 'changes.txt')
+  await mkdir(dir, { recursive: true })
   await writeFile(file, `${header}\n${body}\n`, 'utf8')
-  return { ok: true, message: file }
+  return { ok: true, message: file, folder }
 }
