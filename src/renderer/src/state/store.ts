@@ -305,6 +305,13 @@ interface AppState {
    */
   agentPanelWidth: number | null
   /**
+   * The chat's agents and shells bands, folded to their one-line header.
+   * Session-only and one value per band for every chat, like the panel width:
+   * how much of the window the bands may take is about the window, not about a
+   * conversation.
+   */
+  bandsFolded: { agents: boolean; shells: boolean }
+  /**
    * Which theme is on.
    *
    * **Mirrored state, and the mirror is the point.** `data-theme` on `<html>` is
@@ -465,6 +472,7 @@ interface AppState {
   toggle: (projectId: string) => void
   setSidebarWidth: (n: number) => void
   setAgentPanelWidth: (n: number) => void
+  toggleBandFolded: (band: 'agents' | 'shells') => void
   toggleSidebar: () => void
   setTheme: (name: ThemeName) => void
   /** the next theme in `THEMES` order, wrapping — what Ctrl+Shift+T does */
@@ -671,6 +679,7 @@ export const useStore = create<AppState>((set, get) => ({
   sidebarWidth: 288,
   sidebarCollapsed: false,
   agentPanelWidth: null,
+  bandsFolded: { agents: false, shells: false },
   // Adopted from the attribute, never decided here — see the field's note.
   theme: currentTheme(),
   terminalFontSize: 13,
@@ -1012,6 +1021,8 @@ export const useStore = create<AppState>((set, get) => ({
   // it sits in, so a width dragged on a maximised window cannot crush the log
   // after a restore-down.
   setAgentPanelWidth: (n) => set({ agentPanelWidth: Math.max(AGENT_PANEL_MIN, Math.round(n)) }),
+  toggleBandFolded: (band) =>
+    set((s) => ({ bandsFolded: { ...s.bandsFolded, [band]: !s.bandsFolded[band] } })),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
   // The attribute (which the CSS reads and localStorage remembers) and the
@@ -1731,7 +1742,43 @@ export const useStore = create<AppState>((set, get) => ({
   //
   // Safe to land under an open rename box: the draft lives in `editDraft`, not
   // in `config`, and main stops titling a session the moment that box commits.
-  adoptConfig: (config) => set({ config }),
+  adoptConfig: (config) => {
+    // A config main pushed can be missing a session this side still holds state
+    // for — another chat deleted it through the orchestration server — so it
+    // gets the cleanup confirmKill gives a session the user deleted. Every other
+    // caller adopts a config with no session missing, where this finds nothing.
+    const s = get()
+    const ids = new Set(config.projects.flatMap((p) => p.sessions.map((x) => x.id)))
+    const gone = [
+      ...new Set([
+        ...Object.keys(s.live),
+        ...Object.keys(s.notifications),
+        ...Object.keys(s.agentSince),
+        ...Object.keys(s.agentWaitingSince),
+        ...Object.keys(s.chats)
+      ])
+    ].filter((id) => !ids.has(id))
+    if (gone.length === 0) {
+      set({ config })
+      return
+    }
+    const without = <T>(m: Record<string, T>): Record<string, T> => {
+      const next = { ...m }
+      for (const id of gone) delete next[id]
+      return next
+    }
+    set({
+      config,
+      live: without(s.live),
+      notifications: without(s.notifications),
+      agentSince: without(s.agentSince),
+      agentWaitingSince: without(s.agentWaitingSince),
+      chats: without(s.chats),
+      selectedSessionId:
+        s.selectedSessionId && ids.has(s.selectedSessionId) ? s.selectedSessionId : null
+    })
+    pushBadge(get().notifications, false)
+  },
 
   retitleChat: (sessionId) => window.vivarium.chatRetitle(sessionId),
 

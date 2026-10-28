@@ -14,6 +14,7 @@ import type {
   ChatOpenResult,
   ChatRewindRange,
   ChatRewindResult,
+  ChatShellOutput,
   ChatState,
   ChatTodo,
   ChatTurnTokens,
@@ -24,10 +25,18 @@ import { DEFAULT_EFFORT, isEffort, modelName, sameModel } from '@shared/models'
 import { isHostProject } from '@shared/projects'
 import type { DockerService } from './docker'
 import {
+  formatReplyLabel,
+  wrapMessage,
+  wrapReply,
+  type ChatReply,
+  type ReplyStatus
+} from './relay'
+import {
   askHostClaude,
   hostConversationExists,
   listHostCommandFiles,
   readHostSubagentLog,
+  readHostOutputTail,
   readHostTranscript,
   resolveClaude,
   spawnHostClaude,
@@ -591,6 +600,40 @@ interface QueuedSend {
   attachments: ChatAttachment[]
 }
 
+/**
+ * Who is waiting on a turn another chat started, and who *that* chat was
+ * working for when it asked.
+ *
+ * The second half is what makes a chain answer all the way back. A asks B; B,
+ * inside the turn A started, asks C. C's reply arrives in B as a turn of its
+ * own, and without `relay` nobody would be waiting on it — A would have heard
+ * B's "I have asked C" and never the answer that followed. So the reply turn
+ * B runs inherits the origin of the turn that asked, and its own reply goes on
+ * to A.
+ */
+export interface TurnOrigin {
+  sender: string
+  relay: TurnOrigin | null
+}
+
+/** Who wrote a message into a chat, when it was another chat rather than you. */
+export interface AgentSender {
+  id: string
+  name: string
+}
+
+/** A reply is clipped to this inline; the rest is one `read_chat` away. */
+const REPLY_MAX_CHARS = 8_000
+
+/**
+ * How much of a background command's output the panel shows: the end, because
+ * a build or a test run writes far more than anyone reads, and the end is the
+ * news. The user picked the number.
+ */
+const SHELL_OUTPUT_LINES = 500
+
+type ShellEntry = Extract<ChatEntry, { kind: 'shell' }>
+
 interface Live {
   session: Session
   project: Project
@@ -730,6 +773,13 @@ interface Live {
    */
   queue: QueuedSend[]
   /**
+   * The turns (in flight or queued) another chat started, by turn number, and
+   * who is owed a reply when each one ends. Settled at `result`, and failed —
+   * never silently dropped — wherever the turns themselves are given up on
+   * (see `dropQueue`, `close`).
+   */
+  origins: Map<number, TurnOrigin>
+  /**
    * This turn has emitted at least one frame, so the CLI is provably alive and
    * a later silence means "busy" rather than "broken" (see SILENCE_BUSY_MS).
    */
@@ -771,7 +821,11 @@ interface Live {
  * picks `--resume` over `--session-id` (the CLI refuses each in the other's
  * case). Ignored when the session has no pinned id.
  */
-export function chatCliArgs(session: Session | undefined, resume: boolean): string[] {
+export function chatCliArgs(
+  session: Session | undefined,
+  resume: boolean,
+  mcpConfig: string | null = null
+): string[] {
   const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']
   // Load-bearing and undocumented — it is not in `claude --help`. A sentinel,
   // not a real MCP server: without it a raw `-p` run **auto-denies every
@@ -822,6 +876,12 @@ export function chatCliArgs(session: Session | undefined, resume: boolean): stri
   // second bare word would be read as another of its values; verified on
   // 2.1.283 that both disappear from init.tools and AskUserQuestion stays.
   args.push('--disallowedTools', 'EnterPlanMode,ExitPlanMode')
+  // The orchestration server (main/orchestration.ts), *added* to whatever MCP
+  // servers the user has configured — never `--strict-mcp-config`, which would
+  // take theirs away. The flag is variadic like the one above, so it is
+  // followed by an option, never by a bare word it would swallow as a second
+  // config.
+  if (mcpConfig) args.push('--mcp-config', mcpConfig)
   // Vivarium owns the model: a chip reading "opus" at reopen while the process
   // actually spawned on the CLI's configured default is a reading that lies
   // about a live fact, in a header made entirely of readings.
@@ -844,6 +904,9 @@ export function chatCliArgs(session: Session | undefined, resume: boolean): stri
   if (claudeId) args.push(resume ? '--resume' : '--session-id', claudeId)
   return args
 }
+
+/** Mints a spawn's orchestration token and returns its `--mcp-config` path. */
+type PrepareMcpConfig = (project: Project, session: Session) => Promise<string | null>
 
 /**
  * Where one chat's CLI runs and where its files live — the seam between
@@ -872,11 +935,15 @@ interface ChatRuntime {
   /** start the CLI, or null when it could not be started */
   spawn(
     session: Session,
-    conversationExists: boolean | undefined
+    conversationExists: boolean | undefined,
+    /** the `--mcp-config` path as this runtime's CLI sees it, or null for none */
+    mcpConfig: string | null
   ): Promise<ChildProcessWithoutNullStreams | null>
   readTranscript(uuid: string, fromByte: number): Promise<TranscriptRead>
   readSubagentLog(uuid: string, agentId: string): Promise<string | null>
   listCommandFiles(): Promise<string[]>
+  /** the last `lines` lines of a background command's output file */
+  readOutputTail(path: string, lines: number): Promise<ChatShellOutput>
   /** a one-shot answer from a throwaway conversation (the auto-titler) */
   askClaude(prompt: string, model: string): Promise<string | null>
 }
@@ -894,12 +961,12 @@ function containerRuntime(docker: DockerService, project: Project): ChatRuntime 
       if (!(await docker.isRunning(project))) return { ok: false, reason: 'container-stopped' }
       return null
     },
-    async spawn(session, conversationExists) {
+    async spawn(session, conversationExists, mcpConfig) {
       const bin = await docker.binaryName()
       if (!bin) return null
       // The transcript read just told us whether the conversation exists, so
       // execArgs picks --resume vs --session-id without a fourth docker launch.
-      const args = await docker.execArgs(project, 'chat', session.id, conversationExists)
+      const args = await docker.execArgs(project, 'chat', session.id, conversationExists, mcpConfig)
       try {
         return spawn(bin, args, { windowsHide: true })
       } catch {
@@ -909,6 +976,7 @@ function containerRuntime(docker: DockerService, project: Project): ChatRuntime 
     readTranscript: (uuid, from) => docker.readTranscript(project, uuid, from),
     readSubagentLog: (uuid, agentId) => docker.readSubagentLog(project, uuid, agentId),
     listCommandFiles: () => docker.listCommandFiles(project),
+    readOutputTail: (path, lines) => docker.readOutputTail(project, path, lines),
     askClaude: (prompt, model) => docker.askClaude(project, prompt, model)
   }
 }
@@ -933,7 +1001,7 @@ function hostRuntime(project: Project): ChatRuntime {
       }
       return null
     },
-    async spawn(session, conversationExists) {
+    async spawn(session, conversationExists, mcpConfig) {
       const claude = await resolveClaude()
       if (!claude) return null
       const id = session.claudeSessionId
@@ -943,7 +1011,7 @@ function hostRuntime(project: Project): ChatRuntime {
         // directory it was started in and refuses `--resume` from any other, so
         // this cwd is part of the conversation's identity (see the updateProject
         // handler, which re-ids a host project's chats when the folder moves).
-        return spawnHostClaude(claude, chatCliArgs(session, resume), project.basePath)
+        return spawnHostClaude(claude, chatCliArgs(session, resume, mcpConfig), project.basePath)
       } catch {
         return null
       }
@@ -951,6 +1019,7 @@ function hostRuntime(project: Project): ChatRuntime {
     readTranscript: (uuid, from) => readHostTranscript(uuid, from),
     readSubagentLog: (uuid, agentId) => readHostSubagentLog(uuid, agentId),
     listCommandFiles: () => listHostCommandFiles(project.basePath),
+    readOutputTail: (path, lines) => readHostOutputTail(path, lines),
     askClaude: (prompt, model) => askHostClaude(prompt, model)
   }
 }
@@ -978,6 +1047,19 @@ export class ChatService {
    * already dents twice.
    */
   private models = new Map<string, ChatModelOption[]>()
+  /** see setMcpConfig; null until ipc.ts wires it, which is before any open */
+  private prepareMcpConfig: PrepareMcpConfig | null = null
+  /**
+   * Opens in progress, by session. A chat is now opened from two places — the
+   * renderer, and main itself when another chat sends it a message — and the
+   * second open used to arrive while the first was still reading the transcript,
+   * before anything was in `live` to find: two processes for one conversation.
+   */
+  private opening = new Map<string, Promise<ChatOpenResult>>()
+  /** the app is quitting; a reply has nowhere sensible to go */
+  private quitting = false
+  /** see setOpenedHook */
+  private onOpened: ((sessionId: string) => void) | null = null
 
   constructor(
     private docker: DockerService,
@@ -1007,6 +1089,51 @@ export class ChatService {
     return this.live.has(sessionId)
   }
 
+  /**
+   * Where each spawn gets its `--mcp-config` from. Handed down rather than
+   * imported, like `DockerService.setClaudeLatest`: the orchestration server
+   * reads this service's state, so the dependency is wired once in ipc.ts
+   * instead of running both ways between the modules.
+   */
+  setMcpConfig(prepare: PrepareMcpConfig): void {
+    this.prepareMcpConfig = prepare
+  }
+
+  /**
+   * Told every time a chat's process has started and is in `live` — what puts
+   * back the MCP servers an agent attached over the control channel, which died
+   * with the previous process (see Session.mcpServers). Handed down for the same
+   * reason as setMcpConfig.
+   */
+  setOpenedHook(hook: (sessionId: string) => void): void {
+    this.onOpened = hook
+  }
+
+  /**
+   * One control request to a chat's CLI, for main's other modules. Null when
+   * the chat has no live process to ask.
+   */
+  requestControl(
+    sessionId: string,
+    request: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<{ ok: boolean; response: Record<string, unknown> | null; error: string }> | null {
+    const l = this.live.get(sessionId)
+    if (!l?.proc) return null
+    return this.request(l, request, timeoutMs)
+  }
+
+  /**
+   * What a live chat is doing, in the same three words the activity events
+   * use; null when no process is running for it.
+   */
+  findActivity(sessionId: string): 'idle' | 'working' | 'waiting' | null {
+    const l = this.live.get(sessionId)
+    if (!l?.proc) return null
+    if (l.pending.size > 0) return 'waiting'
+    return l.turnRunning ? 'working' : 'idle'
+  }
+
   liveIds(): string[] {
     return [...this.live.keys()]
   }
@@ -1020,6 +1147,24 @@ export class ChatService {
    * the slot is now held for a bulk transfer.
    */
   async open(project: Project, session: Session, retry = false): Promise<ChatOpenResult> {
+    // A retry is an explicit "throw that one away", so it does not join an open
+    // in progress; everything else does.
+    const inProgress = retry ? undefined : this.opening.get(session.id)
+    if (inProgress) return inProgress
+    const opened = this.openNow(project, session, retry)
+    this.opening.set(session.id, opened)
+    try {
+      return await opened
+    } finally {
+      if (this.opening.get(session.id) === opened) this.opening.delete(session.id)
+    }
+  }
+
+  private async openNow(
+    project: Project,
+    session: Session,
+    retry: boolean
+  ): Promise<ChatOpenResult> {
     const existing = this.live.get(session.id)
     if (existing && !retry) return { ok: true, state: this.stateOf(existing) }
     if (existing) this.close(session.id)
@@ -1063,6 +1208,7 @@ export class ChatService {
       turnRunning: false,
       inFlight: [],
       queue: [],
+      origins: new Map(),
       spoke: false,
       slowTurn: false,
       interrupted: false,
@@ -1076,6 +1222,7 @@ export class ChatService {
     const historyError = await this.readHistory(l)
     if (!(await this.start(l))) return { ok: false, reason: 'spawn-failed' }
     this.live.set(session.id, l)
+    this.onOpened?.(session.id)
     // A process that has just been spawned is running nothing — nothing is even
     // emitted until the first user message — so this is the one moment the
     // reading is known without being told. Said out loud because the store keeps
@@ -1118,6 +1265,10 @@ export class ChatService {
   close(sessionId: string): void {
     const l = this.live.get(sessionId)
     if (!l) return
+    // Before `closing`, which nothing after it may undo: whoever sent this chat
+    // a message is told it will not be answered, rather than waiting on a reply
+    // from a process that is about to stop existing.
+    this.failOrigins(l, 'The chat was closed before it answered.')
     l.closing = true
     if (l.silence) clearTimeout(l.silence)
     if (l.streamTimer) clearTimeout(l.streamTimer)
@@ -1137,6 +1288,7 @@ export class ChatService {
   }
 
   closeAll(): void {
+    this.quitting = true
     for (const id of [...this.live.keys()]) this.close(id)
   }
 
@@ -1449,7 +1601,10 @@ export class ChatService {
    * neither side has to probe for it again.
    */
   private async start(l: Live): Promise<boolean> {
-    const proc = await l.rt.spawn(l.session, l.transcriptExists)
+    const mcpConfig = this.prepareMcpConfig
+      ? await this.prepareMcpConfig(l.project, l.session)
+      : null
+    const proc = await l.rt.spawn(l.session, l.transcriptExists, mcpConfig)
     if (!proc) return false
     l.proc = proc
     proc.stdout.setEncoding('utf8')
@@ -1971,10 +2126,14 @@ export class ChatService {
     const named = str(f.tool_use_id)
     if (subtype === 'task_started') {
       if (taskId && named) l.taskIds.set(taskId, named)
+      // A background command learns its task id here if its launch result has
+      // not said it yet — it is what the stop button sends.
+      const shell = named ? this.findShell(l, named, '') : null
+      if (shell && taskId && !shell.entry.taskId) shell.entry.taskId = taskId
       return
     }
     const toolUseId = named || (taskId ? l.taskIds.get(taskId) : undefined)
-    if (!toolUseId) return
+    if (!toolUseId && !taskId) return
 
     let status: string | null = null
     if (subtype === 'task_notification') status = str(f.status) || 'completed'
@@ -1987,6 +2146,26 @@ export class ChatService {
     }
     if (!status) return
 
+    // A background command ends on the same frames as an agent, and is shipped
+    // the same way for the same reason (see below).
+    const shell = this.findShell(l, toolUseId ?? '', taskId)
+    if (shell) {
+      const { entry: row, parent: owner } = shell
+      if (!row.running) return
+      const summary = str(f.summary)
+      row.running = false
+      row.status = status
+      row.summary = summary || row.summary
+      row.outputFile = str(f.output_file) || row.outputFile
+      const code = /exit code (-?\d+)/.exec(summary)
+      if (code) row.exitCode = Number(code[1])
+      row.endedAt = Date.now()
+      if (owner) this.emit({ kind: 'task', sessionId: l.session.id, toolUseId: owner, entries: [row] })
+      else this.upsert(l, [row])
+      return
+    }
+
+    if (!toolUseId) return
     const found = this.findTask(l, toolUseId)
     if (!found || !found.entry.running) return
     const { entry, parent } = found
@@ -2003,6 +2182,56 @@ export class ChatService {
     // that sub-log's rows always do.
     if (parent) this.emit({ kind: 'task', sessionId: l.session.id, toolUseId: parent, entries: [entry] })
     else this.upsert(l, [entry])
+  }
+
+  /**
+   * A `shell` row by the call that launched it or, failing that, by the CLI's
+   * task id — in the log or one level down in a sub-log, exactly like
+   * `findTask`, because a subagent runs background commands too.
+   */
+  private findShell(
+    l: Live,
+    toolUseId: string,
+    taskId: string
+  ): { entry: ShellEntry; parent: string | null } | null {
+    const matches = (e: ChatEntry): e is ShellEntry =>
+      e.kind === 'shell' &&
+      ((!!toolUseId && e.toolUseId === toolUseId) || (!!taskId && e.taskId === taskId))
+    for (const e of l.entries) if (matches(e)) return { entry: e, parent: null }
+    for (const [parent, rows] of l.subagents) {
+      for (const e of rows) if (matches(e)) return { entry: e, parent }
+    }
+    return null
+  }
+
+  /**
+   * The end of a background command's output, for the panel. Read from the
+   * file the CLI writes, through the chat's runtime — `docker exec` or the
+   * disk — so it works for a command that is still running and for one that
+   * finished before the app restarted, for as long as the file is there.
+   */
+  async readShellOutput(sessionId: string, toolUseId: string): Promise<ChatShellOutput> {
+    const l = this.live.get(sessionId)
+    if (!l) return { ok: false, text: '', truncated: false, message: 'the chat is not running' }
+    const file = this.findShell(l, toolUseId, '')?.entry.outputFile
+    if (!file) {
+      return { ok: false, text: '', truncated: false, message: 'no output file is known for it yet' }
+    }
+    return l.rt.readOutputTail(file, SHELL_OUTPUT_LINES)
+  }
+
+  /**
+   * Stop a background command with the CLI's own `stop_task`, so the model is
+   * told it was stopped exactly as if it had stopped it itself. The row ends
+   * when the CLI's task frames say so, not here.
+   */
+  async stopShell(sessionId: string, toolUseId: string): Promise<boolean> {
+    const l = this.live.get(sessionId)
+    if (!l?.proc) return false
+    const row = this.findShell(l, toolUseId, '')?.entry
+    if (!row?.running || !row.taskId) return false
+    const r = await this.request(l, { subtype: 'stop_task', task_id: row.taskId }, 10_000)
+    return r.ok
   }
 
   /**
@@ -2115,6 +2344,17 @@ export class ChatService {
     // get_context_usage fails the meter derives from result.usage and goes
     // approximate rather than absent.
     void this.refreshContext(l, obj(f.usage))
+
+    // Whoever sent the message this turn answered gets the answer. `result` is
+    // the turn's final message as the CLI itself reports it, so it needs no
+    // waiting on the settle. Before `startNext` below, so a reply into a chat
+    // that is this one's own sender is queued in order with everything else.
+    const origin = l.origins.get(turn)
+    if (origin) {
+      l.origins.delete(turn)
+      const status: ReplyStatus = aborted ? 'stopped' : f.is_error === true ? 'failed' : 'done'
+      this.deliverReply(origin, l, status, str(f.result))
+    }
 
     if (!aborted) void this.settleTurn(l, turn, from)
     // An aborted turn keeps its streamed rows — there is nothing better to
@@ -2445,7 +2685,113 @@ export class ChatService {
   async send(sessionId: string, text: string, attachments: ChatAttachment[]): Promise<boolean> {
     const l = this.live.get(sessionId)
     if (!l?.proc) return false
+    this.enqueue(l, text, text, attachments)
+    return true
+  }
 
+  /**
+   * A message from another chat: wrapped so the receiving model knows an agent
+   * wrote it (main/relay.ts), drawn under the sender's name, and — `origin` —
+   * owed back to whoever is waiting when its turn ends. Otherwise exactly a
+   * typed message, queue and all: a message landing on a busy chat waits its
+   * turn rather than being steered into one (see Live.queue).
+   */
+  sendFromAgent(sessionId: string, text: string, from: AgentSender, origin: TurnOrigin): boolean {
+    const l = this.live.get(sessionId)
+    if (!l?.proc) return false
+    this.enqueue(l, wrapMessage(from.id, from.name, text), text, [], `from ${from.name}`, origin)
+    return true
+  }
+
+  /**
+   * Who the chat's running turn is owed to, if another chat started it — what a
+   * message this chat sends *during* that turn carries along as its `relay`
+   * (see TurnOrigin). Null for a turn you started, or none at all.
+   */
+  findTurnOrigin(sessionId: string): TurnOrigin | null {
+    const l = this.live.get(sessionId)
+    if (!l?.turnRunning) return null
+    return l.origins.get(activeTurn(l)) ?? null
+  }
+
+  /**
+   * The prose of a chat's last `count` turns — what was said to it and what it
+   * said back, without the tool calls and thinking in between — for another
+   * chat to read. Null when the chat is not open.
+   */
+  formatRecentTurns(sessionId: string, count: number): string | null {
+    const l = this.live.get(sessionId)
+    if (!l) return null
+    const turns = new Map<number, string[]>()
+    for (const e of l.entries) {
+      if (e.kind !== 'text' || !e.md.trim()) continue
+      const who = e.role === 'you' ? (e.from ?? 'you') : 'claude'
+      const lines = turns.get(e.turn) ?? []
+      lines.push(`[${who}]\n${e.md.trim()}`)
+      turns.set(e.turn, lines)
+    }
+    const picked = [...turns.entries()].sort((a, b) => a[0] - b[0]).slice(-Math.max(1, count))
+    if (picked.length === 0) return 'This chat has no messages yet.'
+    return picked
+      .map(([turn, lines]) => {
+        const running = l.turnRunning && l.inFlight.includes(turn) ? ' (still running)' : ''
+        return `## turn ${turn}${running}\n\n${lines.join('\n\n')}`
+      })
+      .join('\n\n')
+  }
+
+  /**
+   * Hand a finished turn's reply to whoever is waiting on it: into the sending
+   * chat, as a message of its own that opens a turn there (queued behind one
+   * already running, like anything else). The reply turn inherits the relay, so
+   * a chain answers all the way back (see TurnOrigin).
+   *
+   * Dropped when the sender is not open — nothing is persisted for a reply, and
+   * a chat that comes back can still `read_chat` what it missed — and while the
+   * app is quitting, when writing into a pipe about to be closed would only
+   * leave a half-run turn in the sender's transcript.
+   */
+  private deliverReply(origin: TurnOrigin, l: Live, status: ReplyStatus, text: string): void {
+    if (this.quitting) return
+    const sender = this.live.get(origin.sender)
+    if (!sender?.proc || sender.closing) return
+    const whole = text.trim() || '(no text in the reply)'
+    const clipped =
+      whole.length > REPLY_MAX_CHARS
+        ? `${whole.slice(0, REPLY_MAX_CHARS)}\n\n[clipped at ${REPLY_MAX_CHARS} characters; read_chat has the rest]`
+        : whole
+    const reply: ChatReply = { chat: l.session.id, name: l.session.name, status, text: clipped }
+    const label = formatReplyLabel(reply.name, status)
+    this.enqueue(sender, wrapReply(reply), clipped, [], label, origin.relay)
+  }
+
+  /**
+   * Every turn of this chat that someone is waiting on has been given up on —
+   * the process died or went silent, the conversation was cleared or rewound
+   * out from under it, or the chat is being closed. Each waiting chat is told,
+   * once: the entry goes as it is reported.
+   */
+  private failOrigins(l: Live, why: string): void {
+    for (const [turn, origin] of [...l.origins]) {
+      l.origins.delete(turn)
+      this.deliverReply(origin, l, 'failed', why)
+    }
+  }
+
+  /**
+   * The one way a message enters a chat. `written` is what reaches the pipe,
+   * `shown` what the optimistic row says until the settle replaces it with the
+   * mapper's reading of the same line — which, for a relayed one, unwraps to
+   * the same text under the same label.
+   */
+  private enqueue(
+    l: Live,
+    written: string,
+    shown: string,
+    attachments: ChatAttachment[],
+    from?: string,
+    origin?: TurnOrigin | null
+  ): void {
     // The number is taken now whether or not the turn starts now: it is what
     // this message's row id is built from, and turns run in the order they were
     // typed, so a queued turn's number is the number of the turn it becomes.
@@ -2464,8 +2810,9 @@ export class ChatService {
         at,
         turn,
         kind: 'text',
-        md: text,
+        md: shown,
         queued: queued ? 'waiting' : undefined,
+        from,
         // The picture is on screen from the moment you press Enter, not from the
         // settle a turn later: the bytes are right here in the attachment, so
         // they go into the same store the transcript's copy will land in. The
@@ -2484,17 +2831,17 @@ export class ChatService {
     // sidebar would flicker through your prompts. Never reached by a queued
     // message, which by definition is not the first one in the conversation.
     if (this.mayRename(l.session) && isDefaultName(l.session.name)) {
-      const slice = provisionalTitle(text)
+      const slice = provisionalTitle(shown)
       if (slice) this.rename(l, slice)
       l.titleWanted = true
     }
 
+    if (origin) l.origins.set(turn, origin)
     if (queued) {
-      l.queue.push({ turn, text, attachments })
-      return true
+      l.queue.push({ turn, text: written, attachments })
+      return
     }
-    this.startTurn(l, { turn, text, attachments })
-    return true
+    this.startTurn(l, { turn, text: written, attachments })
   }
 
   /**
@@ -2684,6 +3031,12 @@ export class ChatService {
    * text with it, where one that says so can still be read and copied back out.
    */
   private dropQueue(l: Live): void {
+    // Every caller has just given up on the in-flight turns as well as the
+    // queued ones, so this is where a chat waiting on any of them is told.
+    this.failOrigins(
+      l,
+      'The chat stopped before it answered (it crashed, timed out, or was cleared).'
+    )
     if (l.queue.length === 0) return
     const rows: ChatEntry[] = []
     for (const q of l.queue) {

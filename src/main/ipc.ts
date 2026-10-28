@@ -16,6 +16,7 @@ import type {
   ChatModelOption,
   ChatOpenResult,
   ChatRewindResult,
+  ChatShellOutput,
   ClaudeStatus,
   ClaudeUpdateResult,
   Config,
@@ -26,6 +27,7 @@ import type {
   NewProjectInput,
   OutputNode,
   Project,
+  Session,
   SessionType,
   SpawnResult,
   TranscriptHit,
@@ -40,6 +42,8 @@ import { ConfigStore } from './config'
 import { DockerService, SNIPPET_AFTER, SNIPPET_BEFORE, snippetOf } from './docker'
 import { BridgeWatcher, bridgeDir, ensureHostBridgeFiles, removeBridge } from './bridge'
 import { ChatService } from './chat'
+import { McpAttachments } from './mcpServers'
+import { OrchestrationServer } from './orchestration'
 import { gitBranch, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
 import { pasteImage, pruneClips, removeClips } from './clipboard'
@@ -148,13 +152,58 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
           }
           return cfg
         })
-        // The only config change that pushes: the renderer did not ask for this
-        // one, so it cannot adopt a return value.
-        .then((cfg) => emit(CH.sessionRenamed, cfg))
+        // A config change that pushes: the renderer did not ask for this one,
+        // so it cannot adopt a return value.
+        .then((cfg) => emit(CH.configPushed, cfg))
     },
     (five, seven) => usage.applyStreamLimits(five, seven)
   )
   ;(win as unknown as { __chat?: ChatService }).__chat = chat
+
+  // ---- chat-to-chat orchestration -----------------------------------------
+  // The MCP server every chat is handed (see main/orchestration.ts). What it
+  // does to config goes through the same functions the UI's handlers use, and
+  // is pushed to the renderer afterwards: an agent's create or delete starts in
+  // main, so there is no invoke for the renderer to adopt a return value from.
+  // MCP servers an agent attached to a chat live on the session and go back on
+  // every time its process starts (see main/mcpServers.ts). Not pushed: nothing
+  // in the renderer shows them, and the renderer never writes a session back.
+  const mcp = new McpAttachments({
+    chat,
+    readConfig: () => store.get(),
+    writeServers: async (sessionId, servers) => {
+      await store.mutate((cfg) => {
+        for (const p of cfg.projects) {
+          const s = p.sessions.find((x) => x.id === sessionId)
+          if (s) s.mcpServers = servers
+        }
+        return cfg
+      })
+    }
+  })
+  chat.setOpenedHook((sessionId) => mcp.restore(sessionId))
+
+  const orchestration = new OrchestrationServer({
+    readConfig: () => store.get(),
+    chat,
+    isContainerRunning: (project) => docker.isRunning(project),
+    // A host chat skips the gate, as it does when the renderer opens one.
+    openChat: (project, session) =>
+      isHostProject(project)
+        ? chat.open(project, session)
+        : openGate(() => chat.open(project, session)),
+    createChat: async (projectId, name, model, effort) => {
+      const { config, session } = await createSession(projectId, 'chat', name, model, effort)
+      emit(CH.configPushed, config)
+      return session
+    },
+    removeChat: async (projectId, sessionId) => {
+      emit(CH.configPushed, await removeSession(projectId, sessionId))
+    },
+    mcp
+  })
+  chat.setMcpConfig((project, session) => orchestration.prepareConfig(project, session))
+  orchestration.start(docker.detectHostIp())
 
   // ---- claude plan usage --------------------------------------------------
   // Polled by the renderer (TitleBar chips); all token/HTTP logic lives in
@@ -494,42 +543,60 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     return cfg
   })
 
+  /**
+   * Add a session to a project. The UI's add, and an agent's `create_chat`,
+   * which may also pick the model and effort a new chat starts on. Returns the
+   * session as written, or null when the project is gone or cannot hold the type.
+   */
+  async function createSession(
+    projectId: string,
+    type: SessionType,
+    name: string,
+    model?: string,
+    effort?: ChatEffort
+  ): Promise<{ config: Config; session: Session | null }> {
+    const id = randomUUID()
+    // Both agent kinds get a second UUID pinned as Claude Code's conversation id
+    // so the conversation can be resumed across container/app restarts (see
+    // Session.claudeSessionId + docker.execArgs). Shell sessions have no
+    // conversation to resume, so they don't get one.
+    const owns = type === 'agent' || type === 'chat'
+    const claudeSessionId = owns ? randomUUID() : undefined
+    const config = await store.mutate((cfg) => {
+      const p = cfg.projects.find((x) => x.id === projectId)
+      // The picker only offers what the project can hold; this is the same
+      // rule applied to a type that arrived over IPC (see @shared/projects).
+      if (p && projectHolds(p, type)) {
+        p.sessions.push({
+          id,
+          name,
+          type,
+          claudeSessionId,
+          // A new chat starts on a model of this app's choosing rather than the
+          // CLI's. Chat only: nothing reads `Session.model` for a terminal
+          // agent — that one is `--model`-less on purpose and
+          // takes its model from the CLI's own config and its own `/model` —
+          // so writing one there would be a stored preference with no effect.
+          model: type === 'chat' ? (model ?? DEFAULT_CHAT_MODEL) : undefined,
+          // Written out rather than left to the fallback, on the same terms as
+          // the model above: this seeds, and the picker overwrites it. A chat
+          // that predates the setting has nothing here and is launched at the
+          // same level anyway (see DEFAULT_EFFORT), so the two agree.
+          effort: type === 'chat' ? (effort ?? DEFAULT_EFFORT) : undefined
+        })
+      }
+      return cfg
+    })
+    const session = config.projects
+      .find((p) => p.id === projectId)
+      ?.sessions.find((s) => s.id === id)
+    return { config, session: session ?? null }
+  }
+
   ipcMain.handle(
     CH.addSession,
-    async (_e, projectId: string, type: SessionType, name: string): Promise<Config> => {
-      const id = randomUUID()
-      // Both agent kinds get a second UUID pinned as Claude Code's conversation id
-      // so the conversation can be resumed across container/app restarts (see
-      // Session.claudeSessionId + docker.execArgs). Shell sessions have no
-      // conversation to resume, so they don't get one.
-      const owns = type === 'agent' || type === 'chat'
-      const claudeSessionId = owns ? randomUUID() : undefined
-      return store.mutate((cfg) => {
-        const p = cfg.projects.find((x) => x.id === projectId)
-        // The picker only offers what the project can hold; this is the same
-        // rule applied to a type that arrived over IPC (see @shared/projects).
-        if (p && projectHolds(p, type)) {
-          p.sessions.push({
-            id,
-            name,
-            type,
-            claudeSessionId,
-            // A new chat starts on a model of this app's choosing rather than the
-            // CLI's. Chat only: nothing reads `Session.model` for a terminal
-            // agent — that one is `--model`-less on purpose and
-            // takes its model from the CLI's own config and its own `/model` —
-            // so writing one there would be a stored preference with no effect.
-            model: type === 'chat' ? DEFAULT_CHAT_MODEL : undefined,
-            // Written out rather than left to the fallback, on the same terms as
-            // the model above: this seeds, and the picker overwrites it. A chat
-            // that predates the setting has nothing here and is launched at the
-            // same level anyway (see DEFAULT_EFFORT), so the two agree.
-            effort: type === 'chat' ? DEFAULT_EFFORT : undefined
-          })
-        }
-        return cfg
-      })
-    }
+    async (_e, projectId: string, type: SessionType, name: string): Promise<Config> =>
+      (await createSession(projectId, type, name)).config
   )
 
   ipcMain.handle(
@@ -554,22 +621,26 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     }
   )
 
+  /** The UI's delete, and an agent's `delete_chat`: one cascade for both. */
+  async function removeSession(projectId: string, sessionId: string): Promise<Config> {
+    pty.kill(sessionId)
+    chat.close(sessionId)
+    const project = store.getProject(projectId)
+    const owed = conversationIds(project, sessionId)
+    const cfg = await store.mutate((cfg) => {
+      const p = cfg.projects.find((x) => x.id === projectId)
+      if (p) p.sessions = p.sessions.filter((s) => s.id !== sessionId)
+      owe(cfg, project, owed)
+      return cfg
+    })
+    drainAllTranscriptDeletes()
+    return cfg
+  }
+
   ipcMain.handle(
     CH.removeSession,
-    async (_e, projectId: string, sessionId: string): Promise<Config> => {
-      pty.kill(sessionId)
-      chat.close(sessionId)
-      const project = store.getProject(projectId)
-      const owed = conversationIds(project, sessionId)
-      const cfg = await store.mutate((cfg) => {
-        const p = cfg.projects.find((x) => x.id === projectId)
-        if (p) p.sessions = p.sessions.filter((s) => s.id !== sessionId)
-        owe(cfg, project, owed)
-        return cfg
-      })
-      drainAllTranscriptDeletes()
-      return cfg
-    }
+    (_e, projectId: string, sessionId: string): Promise<Config> =>
+      removeSession(projectId, sessionId)
   )
 
   // Clamped here as well as in the store, because config.json is a text file a
@@ -1054,6 +1125,16 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     CH.chatSend,
     (_e, sessionId: string, text: string, attachments: ChatAttachment[]): Promise<boolean> =>
       chat.send(sessionId, text, attachments ?? [])
+  )
+
+  ipcMain.handle(
+    CH.chatTaskOutput,
+    (_e, sessionId: string, toolUseId: string): Promise<ChatShellOutput> =>
+      chat.readShellOutput(sessionId, toolUseId)
+  )
+
+  ipcMain.handle(CH.chatStopTask, (_e, sessionId: string, toolUseId: string): Promise<boolean> =>
+    chat.stopShell(sessionId, toolUseId)
   )
 
   ipcMain.handle(CH.chatInterrupt, (_e, sessionId: string): Promise<void> =>

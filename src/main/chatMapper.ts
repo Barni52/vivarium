@@ -11,6 +11,7 @@ import type {
   ChatToolStatus
 } from '@shared/types'
 import { modelName, sameModel } from '@shared/models'
+import { readRelayed } from './relay'
 
 // The chat log's one mapper: Claude Code's own JSON → the rows the window draws.
 //
@@ -116,6 +117,8 @@ export function commandLine(text: string): string | null {
  */
 export function typedText(raw: string): string {
   const text = raw.replace(STRIP_TAGS, '').trim()
+  const relayed = readRelayed(text)
+  if (relayed) return relayed.md
   return commandLine(text) ?? text.replace(ATTACH_RE, '').trim()
 }
 
@@ -151,6 +154,30 @@ const TASK_NOTE_RE = /<task-notification>([\s\S]*?)<\/task-notification>/
 /** One `<name>…</name>` out of a task notification, trimmed; '' when absent. */
 function noteTag(body: string, name: string): string {
   return new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(body)?.[1]?.trim() ?? ''
+}
+
+type ShellEntry = Extract<ChatEntry, { kind: 'shell' }>
+
+/** The statuses that end a background command; anything else is news from one still running. */
+const SHELL_ENDED = new Set(['completed', 'failed', 'killed', 'stopped'])
+
+/**
+ * The task id and output file out of a background launch's result. The CLI's
+ * wording, read off 2.1.311 — `Command running in background with ID: <id>.
+ * Output is being written to: <file>.`, the same two facts in the "moved to
+ * the background (ID: <id>)" variants, and `Monitor started (task <id>, …)`.
+ */
+function readShellLaunch(text: string): { taskId: string | null; outputFile: string | null } {
+  const id =
+    /\bID:?\s*([A-Za-z0-9_-]+)/.exec(text)?.[1] ?? /\(task ([A-Za-z0-9_-]+)/.exec(text)?.[1] ?? null
+  const file = /Output is being written to:\s*(\S+?)\.?(?:\s|$)/.exec(text)?.[1] ?? null
+  return { taskId: id, outputFile: file }
+}
+
+/** `… (exit code 2)` in a notification's summary. */
+function readExitCode(summary: string): number | null {
+  const m = /exit code (-?\d+)/.exec(summary)
+  return m ? Number(m[1]) : null
 }
 
 /**
@@ -527,6 +554,8 @@ export class ChatMapper {
    * launch has already been answered.
    */
   private taskRows = new Map<string, Extract<ChatEntry, { kind: 'task' }>>()
+  /** The `shell` rows, kept for the same reason as `taskRows`: they outlive their launch. */
+  private shellRows = new Map<string, ShellEntry>()
   /**
    * One sub-mapper per subagent, kept for the life of this mapper.
    *
@@ -577,7 +606,11 @@ export class ChatMapper {
    * updates the object main and the renderer are already holding.
    */
   adoptTasks(entries: ChatEntry[]): void {
-    for (const e of entries) if (e.kind === 'task') this.taskRows.set(e.toolUseId, e)
+    for (const e of entries) {
+      if (e.kind === 'task') this.taskRows.set(e.toolUseId, e)
+      // A background command outlives its turn exactly as an agent does.
+      else if (e.kind === 'shell') this.shellRows.set(e.toolUseId, e)
+    }
   }
 
   private id(prefix: string): string {
@@ -922,6 +955,24 @@ export class ChatMapper {
       return
     }
 
+    // Another chat talking: a message it sent this one, or the reply to one this
+    // one sent it. Still a `you`-role row — it opens a turn exactly as a typed
+    // message does — but drawn under the sender's name instead of `you`, and
+    // with the wrapper taken off (see main/relay.ts).
+    const relayed = readRelayed(text)
+    if (relayed) {
+      this.push({
+        id,
+        role: 'you',
+        at,
+        turn: this.turn,
+        kind: 'text',
+        md: relayed.md,
+        from: relayed.from
+      })
+      return
+    }
+
     // A slash command and its local output are *machinery*, and both arrive on
     // ordinary user lines — sometimes on the same one. Rendering either as a
     // `you` row is a lie in the same way the interrupt marker above is: the
@@ -1120,6 +1171,35 @@ export class ChatMapper {
       return
     }
 
+    // A command launched into the background is not a call that finishes when
+    // its result lands — the result only says it started. It gets the row a
+    // background agent gets, in its own kind (see the `shell` entry).
+    const background = /^(Bash|PowerShell)$/.test(name) && input.run_in_background === true
+    if (background || name === 'Monitor') {
+      const command = str(input.command)
+      const entry = this.push({
+        id,
+        role: 'bash',
+        at,
+        turn: this.turn,
+        kind: 'shell',
+        toolUseId,
+        taskId: null,
+        tool: name === 'Monitor' ? 'monitor' : 'bash',
+        command,
+        description: str(input.description) || compact(command, 80) || name,
+        outputFile: null,
+        status: 'running',
+        exitCode: null,
+        endedAt: null,
+        summary: '',
+        running: true
+      })
+      this.tools.set(toolUseId, { entry, name, input })
+      this.shellRows.set(toolUseId, entry as ShellEntry)
+      return
+    }
+
     if (name === 'AskUserQuestion') {
       const entry = this.push({
         id,
@@ -1189,6 +1269,12 @@ export class ChatMapper {
    */
   private taskNotification(body: string, id: string, at: number, touched: ChatEntry[]): void {
     const toolUseId = noteTag(body, 'tool-use-id')
+    const shell = this.findShellRow(toolUseId, noteTag(body, 'task-id'))
+    if (shell) {
+      this.shellNotification(shell, body, at)
+      touched.push(shell)
+      return
+    }
     const entry = this.taskRows.get(toolUseId)
     const status = noteTag(body, 'status') || 'completed'
     const usage = /<usage>([\s\S]*?)<\/usage>/.exec(body)?.[1] ?? ''
@@ -1215,6 +1301,36 @@ export class ChatMapper {
     // The row is older than this line, so nothing appended — say so explicitly
     // or the renderer never hears that the agent stopped.
     touched.push(entry)
+  }
+
+  /**
+   * A shell row by the call that launched it, or — when a notification names
+   * no call — by the CLI's own task id, which the launch result reported.
+   */
+  private findShellRow(toolUseId: string, taskId: string): ShellEntry | undefined {
+    const byCall = toolUseId ? this.shellRows.get(toolUseId) : undefined
+    if (byCall || !taskId) return byCall
+    for (const e of this.shellRows.values()) if (e.taskId === taskId) return e
+    return undefined
+  }
+
+  /**
+   * A background command reporting in. The output file is taken whenever one
+   * is named — a `Monitor`'s events may be the first to say where it writes —
+   * and the row is only *ended* by a terminal status: a monitor notifies once
+   * per event while it keeps running.
+   */
+  private shellNotification(entry: ShellEntry, body: string, at: number): void {
+    entry.taskId = entry.taskId || noteTag(body, 'task-id') || null
+    entry.outputFile = noteTag(body, 'output-file') || entry.outputFile
+    const status = noteTag(body, 'status')
+    if (!SHELL_ENDED.has(status)) return
+    const summary = noteTag(body, 'summary')
+    entry.running = false
+    entry.status = status
+    entry.summary = summary || entry.summary
+    entry.exitCode = readExitCode(summary) ?? entry.exitCode
+    entry.endedAt = at
   }
 
   /** A tool_result completes the card its tool_use already produced. */
@@ -1284,6 +1400,24 @@ export class ChatMapper {
       return entry
     }
 
+    if (entry.kind === 'shell') {
+      // The launch answered: what it is called and where it writes. A launch
+      // that failed outright (a bad command, a refused tool) never ran, and
+      // there is no notification coming to say so later. A result merely worded
+      // in a way this does not parse is *not* taken as a failure — the
+      // notification still ends the row, and a reopen ends it regardless.
+      const launch = readShellLaunch(text)
+      entry.taskId = launch.taskId ?? entry.taskId
+      entry.outputFile = launch.outputFile ?? entry.outputFile
+      if (isError) {
+        entry.running = false
+        entry.status = 'failed'
+        entry.summary = firstLine(text) || 'the command did not start'
+        entry.endedAt = at
+      }
+      return entry
+    }
+
     if (entry.kind === 'ask') {
       entry.pending = false
       // Keyed against the questions off the tool_use we already mapped — the
@@ -1304,6 +1438,36 @@ export class ChatMapper {
     entry.result = isError ? firstLine(text) || 'error' : result
     entry.body = body
     if (body.text) this.bodies.set(entry.id, body.text)
+    // A foreground command the CLI moved to the background — past its timeout,
+    // or to let a message through — has an ordinary call card already, and its
+    // result says it is now a background task. It becomes the row a background
+    // launch would have been, in place, as a Skill becomes a `cmd` row below.
+    const moved = roleForTool(name) === 'bash' && !isError ? readShellLaunch(text) : null
+    if (moved?.taskId && /moved to the background/.test(text)) {
+      const command = str(input.command)
+      const replacement: ShellEntry = {
+        id: entry.id,
+        role: 'bash',
+        at: entry.at,
+        turn: entry.turn,
+        kind: 'shell',
+        toolUseId,
+        taskId: moved.taskId,
+        tool: 'bash',
+        command,
+        description: str(input.description) || compact(command, 80) || name,
+        outputFile: moved.outputFile,
+        status: 'running',
+        exitCode: null,
+        endedAt: null,
+        summary: '',
+        running: true
+      }
+      const i = this.entries.indexOf(entry)
+      if (i >= 0) this.entries[i] = replacement
+      this.shellRows.set(toolUseId, replacement)
+      return replacement
+    }
     if (roleForTool(name) === 'cmd') {
       // A Skill tool_use reads identically whether you typed it or Claude reached
       // for it — same `cmd` row either way.
@@ -1457,6 +1621,12 @@ export class ChatMapper {
       if (e.kind === 'task' && e.running) {
         e.running = false
         e.status = 'no report'
+      }
+      // Same argument for a background command: whatever ran it is gone, and no
+      // line in the file says how it ended.
+      if (e.kind === 'shell' && e.running) {
+        e.running = false
+        e.status = 'unknown'
       }
     }
     for (let i = this.entries.length - 1; i >= 0; i--) {

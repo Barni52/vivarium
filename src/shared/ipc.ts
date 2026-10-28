@@ -10,13 +10,14 @@ export const CH = {
   addSession: 'session:add',
   renameSession: 'session:rename',
   removeSession: 'session:remove',
-  // A session renamed by *main* rather than by the sidebar — today only the chat
-  // auto-titler. The one config channel that pushes: every other config change
-  // starts in the renderer and adopts the Config it gets back, but a generated
-  // title starts in ChatService, so main is the writer and the renderer adopts.
+  // A config change *main* made rather than the renderer — the chat auto-titler
+  // naming a chat, and another chat creating or deleting one through the
+  // orchestration server. The one config channel that pushes: every other
+  // config change starts in the renderer and adopts the Config it gets back,
+  // but these start in main, so main is the writer and the renderer adopts.
   // The whole Config rides along, exactly like an invoke's return value, so the
   // store keeps having one way to take a config update.
-  sessionRenamed: 'session:renamed',
+  configPushed: 'config:pushed',
   // The chat window's zoom factor. A setting rather than a chat channel: it is
   // global to the app and outlives every session, so it is written straight to
   // config.json and read back at launch.
@@ -75,6 +76,11 @@ export const CH = {
   chatOpen: 'chat:open',
   chatSend: 'chat:send',
   chatInterrupt: 'chat:interrupt',
+  // A background command's output (the end of the file the CLI writes it to),
+  // and the CLI's own `stop_task` for one. Asked for by the shell panel only
+  // while it is open: output is read on demand, never streamed.
+  chatTaskOutput: 'chat:task-output',
+  chatStopTask: 'chat:stop-task',
   chatRewind: 'chat:rewind',
   chatAnswer: 'chat:answer',
   chatSetModel: 'chat:set-model',

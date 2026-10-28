@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { access, mkdir, open, readFile, readdir, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
+import type { ChatShellOutput } from '@shared/types'
+import { isTaskOutputPath, takeLastLines } from './taskOutput'
 
 // A host project's agents and chats: the Windows Claude Code, run straight in
 // the project folder with no container in between. What lives here is what
@@ -193,6 +195,44 @@ export async function readHostTranscript(uuid: string, fromByte = 0): Promise<Tr
     await fh?.close().catch(() => {})
   }
 }
+
+/**
+ * The host side of `DockerService.readOutputTail`: the end of a host chat's
+ * background command output, straight off the disk.
+ *
+ * Only the last `TAIL_BYTES` are read — an output file grows without bound and
+ * the panel shows the end of it — which is also how "there was more above" is
+ * known: a file bigger than the read was truncated by definition.
+ */
+export async function readHostOutputTail(path: string, lines: number): Promise<ChatShellOutput> {
+  if (!isTaskOutputPath(path)) {
+    return { ok: false, text: '', truncated: false, message: 'not a task output file' }
+  }
+  let fh: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    fh = await open(path, 'r')
+    const { size } = await fh.stat()
+    const length = Math.min(size, TAIL_BYTES)
+    const buf = Buffer.alloc(length)
+    const { bytesRead } = await fh.read(buf, 0, length, size - length)
+    const text = buf.subarray(0, bytesRead).toString('utf8')
+    // A partial read starts mid-line, so its first fragment is dropped.
+    const partial = size > length
+    const out = takeLastLines(partial ? text.slice(text.indexOf('\n') + 1) : text, lines)
+    return partial ? { ...out, truncated: true } : out
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, text: '', truncated: false, message: 'the output file is gone' }
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    return { ok: false, text: '', truncated: false, message }
+  } finally {
+    await fh?.close().catch(() => {})
+  }
+}
+
+/** What readHostOutputTail reads at most — ample for 500 lines of ordinary output. */
+const TAIL_BYTES = 256 * 1024
 
 /**
  * One subagent's sibling log — `<slug>/<uuid>/subagents/agent-<id>.jsonl`, the

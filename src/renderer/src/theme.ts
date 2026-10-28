@@ -691,6 +691,12 @@ export const CHAT = {
   stop: 'var(--role-stop)',
   /** a subagent — its card's rail, its band line, its panel */
   agent: 'var(--role-agent)',
+  /**
+   * a background command — the same three places a subagent has. The "process
+   * is up" green under a second name rather than a new hue: a shell is a
+   * process that is up, and a new token would need a value in all three themes.
+   */
+  shell: 'var(--ok)',
   /** plan / question — the "hold on" register */
   hold: 'var(--str)',
   /** a find-in-chat match; the current row additionally takes a `you` rail */

@@ -7,6 +7,7 @@ import type {
   ChatEffort,
   ChatModelOption,
   ChatQuestion,
+  ChatShellOutput,
   ChatTodo,
   MountNode,
   Project,
@@ -29,7 +30,7 @@ import {
   ZoomIn,
   ZoomOut
 } from '../Icons'
-import { AgentStatus, LogRow, agentProgress, type LogHandlers } from './ChatLog'
+import { AgentStatus, LogRow, ShellStatus, agentProgress, type LogHandlers } from './ChatLog'
 import { FindContext, matcherFor, searchTextOf, type FindQuery } from './find'
 import { Md, Preview, clock as clockOf } from './Markdown'
 import { chipForNode, flattenTree, routeFile, type PendingChip } from './attach'
@@ -563,19 +564,36 @@ export function ChatView({
    * turn's rows at the end of the list, so the last `you` row can belong to the
    * turn *before* the one that is running. Turn numbers only ever grow.
    */
-  const bandAgents = React.useMemo(() => {
+  const bandTurn = React.useMemo(() => {
     let sent = -1
     let clocked = -1
     for (const e of entries) {
       if (e.kind === 'text' && e.role === 'you' && !e.queued) sent = Math.max(sent, e.turn)
       else if (e.kind === 'turn') clocked = Math.max(clocked, e.turn)
     }
-    const latest = sent >= 0 ? sent : clocked
-    return entries.filter(
-      (e): e is Extract<ChatEntry, { kind: 'task' }> =>
-        e.kind === 'task' && (!!e.running || e.turn === latest)
-    )
+    return sent >= 0 ? sent : clocked
   }, [entries])
+  const bandAgents = React.useMemo(
+    () =>
+      entries.filter(
+        (e): e is TaskEntry => e.kind === 'task' && (!!e.running || e.turn === bandTurn)
+      ),
+    [entries, bandTurn]
+  )
+  /**
+   * The shells band, on the agents band's rule exactly: everything still
+   * running, plus whatever the latest turn started. A background command is the
+   * other thing that outlives its turn and ends up forty rows up, still going.
+   */
+  const bandShells = React.useMemo(
+    () =>
+      entries.filter(
+        (e): e is ShellEntry => e.kind === 'shell' && (e.running || e.turn === bandTurn)
+      ),
+    [entries, bandTurn]
+  )
+  const bandsFolded = useStore((s) => s.bandsFolded)
+  const toggleBandFolded = useStore((s) => s.toggleBandFolded)
 
   /**
    * Agents launched together, as `{ index, size }` by row id.
@@ -1437,6 +1455,7 @@ export function ChatView({
       </div>
         {agentStack.length > 0 && chat ? (
           <AgentPanel
+            sessionId={session.id}
             path={agentStack}
             entries={entries}
             subagents={chat.subagents}
@@ -1481,6 +1500,17 @@ export function ChatView({
               subagents={chat?.subagents ?? {}}
               open={rootAgent}
               onOpen={openAgent}
+              folded={bandsFolded.agents}
+              onFold={() => toggleBandFolded('agents')}
+            />
+          )}
+          {bandShells.length > 0 && (
+            <ShellStrip
+              shells={bandShells}
+              open={rootAgent}
+              onOpen={openAgent}
+              folded={bandsFolded.shells}
+              onFold={() => toggleBandFolded('shells')}
             />
           )}
           {/* A question is the one blocking card that is *not* a bar and not
@@ -2211,6 +2241,7 @@ function TodoStrip({ todos }: { todos: ChatTodo[] }): React.ReactElement {
 }
 
 type TaskEntry = Extract<ChatEntry, { kind: 'task' }>
+type ShellEntry = Extract<ChatEntry, { kind: 'shell' }>
 
 /**
  * What the agent panel always leaves the log, however far it is dragged. About
@@ -2243,38 +2274,38 @@ const BAND_ROWS = 5
  * moves but the dots and the clock** (the compaction band's argument — a third
  * animation is the one that reads as a flash). A line never changes height as
  * its agent finishes: the step goes and the status takes its place, on one line.
+ *
+ * Background commands have a band of their own under this one (`ShellStrip`),
+ * and either can be folded to its header line — two sections of up to five
+ * lines each would otherwise take the log's last screenful.
  */
 function AgentStrip({
   agents,
   subagents,
   open,
-  onOpen
+  onOpen,
+  folded,
+  onFold
 }: {
   agents: TaskEntry[]
   subagents: Record<string, ChatEntry[]>
   /** the agent the panel shows, so its line can say so */
   open: string | null
   onOpen: (toolUseId: string) => void
+  folded: boolean
+  onFold: () => void
 }): React.ReactElement {
   const ordered = [...agents.filter((a) => a.running), ...agents.filter((a) => !a.running)]
   const shown = ordered.length > BAND_ROWS ? ordered.slice(0, BAND_ROWS - 1) : ordered
   const more = ordered.length - shown.length
   return (
-    <div
-      style={{
-        flex: 'none',
-        marginBottom: 10,
-        padding: '4px 0',
-        background: CHAT.card,
-        border: `1px solid ${CHAT.borderCard}`,
-        // The log card's rail, so the band and the rows it summarises are
-        // visibly the same kind of thing.
-        borderLeft: `2px solid ${CHAT.agent}`,
-        borderRadius: CHAT.radiusCard,
-        fontFamily: MONO,
-        fontSize: 11.5,
-        color: CHAT.dim3
-      }}
+    <BandFrame
+      hue={CHAT.agent}
+      label="agents"
+      running={agents.filter((a) => a.running).length}
+      total={agents.length}
+      folded={folded}
+      onFold={onFold}
     >
       {shown.map((a) => {
         const p = agentProgress(subagents[a.toolUseId])
@@ -2284,15 +2315,7 @@ function AgentStrip({
             onClick={() => onOpen(a.toolUseId)}
             data-click=""
             title={`${a.agentType} — ${a.description}`}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              minWidth: 0,
-              padding: '3px 12px',
-              cursor: 'pointer',
-              background: a.toolUseId === open ? CHAT.hover : undefined
-            }}
+            style={{ ...bandLine, background: a.toolUseId === open ? CHAT.hover : undefined }}
           >
             <span aria-hidden style={{ color: CHAT.agent, flex: 'none' }}>
               ◆
@@ -2309,8 +2332,137 @@ function AgentStrip({
           +{more} more finished — in the log above
         </div>
       )}
+    </BandFrame>
+  )
+}
+
+/**
+ * The shells band: background commands, on the agents band's rules — running
+ * ones first, the latest turn's finished ones after, five lines at most — one
+ * line each: `$  description  status`, a click opening it in the panel.
+ */
+function ShellStrip({
+  shells,
+  open,
+  onOpen,
+  folded,
+  onFold
+}: {
+  shells: ShellEntry[]
+  open: string | null
+  onOpen: (toolUseId: string) => void
+  folded: boolean
+  onFold: () => void
+}): React.ReactElement {
+  const ordered = [...shells.filter((x) => x.running), ...shells.filter((x) => !x.running)]
+  const shown = ordered.length > BAND_ROWS ? ordered.slice(0, BAND_ROWS - 1) : ordered
+  const more = ordered.length - shown.length
+  return (
+    <BandFrame
+      hue={CHAT.shell}
+      label="shells"
+      running={shells.filter((x) => x.running).length}
+      total={shells.length}
+      folded={folded}
+      onFold={onFold}
+    >
+      {shown.map((x) => (
+        <div
+          key={x.toolUseId}
+          onClick={() => onOpen(x.toolUseId)}
+          data-click=""
+          title={x.command}
+          style={{ ...bandLine, background: x.toolUseId === open ? CHAT.hover : undefined }}
+        >
+          <span aria-hidden style={{ color: CHAT.shell, flex: 'none' }}>
+            $
+          </span>
+          <span style={{ ...bandText, color: x.running ? CHAT.text : CHAT.dim3 }}>{x.description}</span>
+          <ShellStatus entry={x} />
+        </div>
+      ))}
+      {more > 0 && (
+        <div style={{ padding: '3px 12px', color: CHAT.dim4 }}>
+          +{more} more finished — in the log above
+        </div>
+      )}
+    </BandFrame>
+  )
+}
+
+/**
+ * One band section: the card with its role rail, a header line that folds it,
+ * and its lines under that.
+ *
+ * **Folded, the header is the whole band**, and it still says what matters —
+ * how many are running and how many there are — so folding hides the detail,
+ * never the fact that something is going. The header is one line whether folded
+ * or not, so folding moves the composer by exactly the lines it hides.
+ */
+function BandFrame({
+  hue,
+  label,
+  running,
+  total,
+  folded,
+  onFold,
+  children
+}: {
+  hue: string
+  label: string
+  running: number
+  total: number
+  folded: boolean
+  onFold: () => void
+  children: React.ReactNode
+}): React.ReactElement {
+  const done = total - running
+  return (
+    <div
+      style={{
+        flex: 'none',
+        marginBottom: 10,
+        padding: '4px 0',
+        background: CHAT.card,
+        border: `1px solid ${CHAT.borderCard}`,
+        // The log card's rail, so the band and the rows it summarises are
+        // visibly the same kind of thing.
+        borderLeft: `2px solid ${hue}`,
+        borderRadius: CHAT.radiusCard,
+        fontFamily: MONO,
+        fontSize: 11.5,
+        color: CHAT.dim3
+      }}
+    >
+      <div
+        onClick={onFold}
+        data-click=""
+        title={folded ? `Show the ${label}` : `Fold the ${label} to this line`}
+        style={{ ...bandLine, color: CHAT.dim3 }}
+      >
+        <Chevron size={10} style={{ flex: 'none', transform: folded ? undefined : 'rotate(90deg)' }} />
+        <span style={{ color: hue, letterSpacing: '.04em', textTransform: 'uppercase', flex: 'none' }}>
+          {label}
+        </span>
+        <span style={bandText}>
+          {[running > 0 ? `${running} running` : null, done > 0 ? `${done} done` : null]
+            .filter(Boolean)
+            .join(' · ')}
+        </span>
+      </div>
+      {!folded && children}
     </div>
   )
+}
+
+/** One line of a band: the agents band's own line, shared by every section. */
+const bandLine: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  minWidth: 0,
+  padding: '3px 12px',
+  cursor: 'pointer'
 }
 
 /** A band column that gives way first: shares what is left, then ellipsises. */
@@ -2331,10 +2483,12 @@ function findTask(
   id: string,
   entries: ChatEntry[],
   subagents: Record<string, ChatEntry[]>
-): TaskEntry | null {
-  for (const e of entries) if (e.kind === 'task' && e.toolUseId === id) return e
+): TaskEntry | ShellEntry | null {
+  const hit = (e: ChatEntry): e is TaskEntry | ShellEntry =>
+    (e.kind === 'task' || e.kind === 'shell') && e.toolUseId === id
+  for (const e of entries) if (hit(e)) return e
   for (const list of Object.values(subagents)) {
-    for (const e of list) if (e.kind === 'task' && e.toolUseId === id) return e
+    for (const e of list) if (hit(e)) return e
   }
   return null
 }
@@ -2365,6 +2519,7 @@ function findTask(
  * this is reading — a report is as much the conversation as the log is.
  */
 function AgentPanel({
+  sessionId,
   path,
   entries,
   subagents,
@@ -2373,7 +2528,8 @@ function AgentPanel({
   onPath,
   onJump
 }: {
-  /** tool_use ids, the agent opened from the log first */
+  sessionId: string
+  /** tool_use ids, the agent opened from the log first — the last may be a shell */
   path: string[]
   entries: ChatEntry[]
   subagents: Record<string, ChatEntry[]>
@@ -2400,9 +2556,11 @@ function AgentPanel({
   React.useEffect(() => {
     ask.current = handlers
   })
+  // A shell has no sub-log to ask for; its output is the detail's own business.
+  const agentId = entry?.kind === 'task' ? entry.agentId : null
   React.useEffect(() => {
-    if (entry) ask.current.onExpandTask(entry.toolUseId, entry.agentId)
-  }, [entry?.toolUseId, entry?.agentId, entry?.running]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (entry?.kind === 'task') ask.current.onExpandTask(entry.toolUseId, entry.agentId)
+  }, [entry?.toolUseId, agentId, entry?.running]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A different agent starts at its top — except one still running, whose news
   // is at the bottom, so that one starts following the tail.
@@ -2520,12 +2678,12 @@ function AgentPanel({
         <span
           style={{
             flex: 'none',
-            color: CHAT.agent,
+            color: entry?.kind === 'shell' ? CHAT.shell : CHAT.agent,
             letterSpacing: '.04em',
             textTransform: 'uppercase'
           }}
         >
-          ◆ agent
+          {entry?.kind === 'shell' ? `$ ${entry.tool === 'monitor' ? 'monitor' : 'shell'}` : '◆ agent'}
         </span>
         {/* The way back up from a nested agent. Each crumb is the agent's type,
             which is what tells two levels apart; the description is in the body. */}
@@ -2541,10 +2699,10 @@ function AgentPanel({
                     title={c?.description}
                     style={{ cursor: 'pointer', color: CHAT.dim2 }}
                   >
-                    {c?.agentType ?? 'agent'}
+                    {crumbName(c)}
                   </span>
                 ) : (
-                  <span style={{ color: CHAT.text }}>{c?.agentType ?? 'agent'}</span>
+                  <span style={{ color: CHAT.text }}>{crumbName(c)}</span>
                 )}
               </React.Fragment>
             ))}
@@ -2554,13 +2712,13 @@ function AgentPanel({
           <span
             onClick={() => crumbs[0] && onJump(crumbs[0].id)}
             data-click=""
-            title="Scroll the log to where this agent was launched"
+            title="Scroll the log to where this was launched"
             style={{ flex: 'none', padding: '2px 6px', color: CHAT.dim2, cursor: 'pointer' }}
           >
             in log
           </span>
         )}
-        <FindBtn title="Close the agent panel" onClick={() => onPath([])}>
+        <FindBtn title="Close the panel" onClick={() => onPath([])}>
           <Close size={12} />
         </FindBtn>
       </div>
@@ -2574,12 +2732,14 @@ function AgentPanel({
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
         <div ref={contentRef} style={{ zoom, padding: '14px 16px 28px' }}>
-          {entry ? (
+          {entry?.kind === 'shell' ? (
+            <ShellDetail key={id} entry={entry} sessionId={sessionId} />
+          ) : entry ? (
             <AgentDetail key={id} entry={entry} handlers={inner} sub={subagents[id]} />
           ) : (
             <div style={{ fontSize: TYPE.prose, lineHeight: TYPE.proseLine, color: CHAT.dim3 }}>
-              This agent is no longer in the loaded conversation — a <code>/clear</code> or a
-              revert removed the message that launched it.
+              This is no longer in the loaded conversation — a <code>/clear</code> or a revert
+              removed the message that launched it.
             </div>
           )}
         </div>
@@ -2707,6 +2867,170 @@ function AgentDetail({
       </PanelSection>
     </>
   )
+}
+
+/** A breadcrumb's word: an agent's type, or what a shell is. */
+function crumbName(c: TaskEntry | ShellEntry | null): string {
+  if (!c) return 'agent'
+  return c.kind === 'task' ? c.agentType : c.tool === 'monitor' ? 'monitor' : 'shell'
+}
+
+/**
+ * How often the panel re-reads a running command's output. Not a display
+ * tick (`Elapsed` stays the only one of those): this is one small file read
+ * per second, and only for the one command the panel is showing.
+ */
+const SHELL_POLL_MS = 1000
+
+/**
+ * What the panel says about one background command: what it is, how it
+ * stands — with a stop button while it runs — the command, and its output.
+ *
+ * **The output is read, never streamed.** It is the end of the file the CLI
+ * writes (`SHELL_OUTPUT_LINES` in main), asked for when the panel opens, once a
+ * second while the command runs, and once more when it ends — so a command
+ * nobody is looking at costs nothing, and one that finished before a restart
+ * still shows its output for as long as the file is there. The panel already
+ * follows the tail when you are at the bottom, so new lines scroll into view.
+ */
+function ShellDetail({
+  entry,
+  sessionId
+}: {
+  entry: ShellEntry
+  sessionId: string
+}): React.ReactElement {
+  const [output, setOutput] = React.useState<ChatShellOutput | null>(null)
+  const [stopping, setStopping] = React.useState(false)
+
+  React.useEffect(() => {
+    let alive = true
+    // One read at a time: a slow `docker exec` must not stack up behind a
+    // one-second timer.
+    let busy = false
+    const read = (): void => {
+      if (busy) return
+      busy = true
+      void window.vivarium
+        .chatTaskOutput(sessionId, entry.toolUseId)
+        .then((o) => {
+          if (alive) setOutput(o)
+        })
+        .finally(() => {
+          busy = false
+        })
+    }
+    read()
+    if (!entry.running) {
+      return () => {
+        alive = false
+      }
+    }
+    const timer = setInterval(read, SHELL_POLL_MS)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [sessionId, entry.toolUseId, entry.running, entry.outputFile])
+
+  const stop = (): void => {
+    setStopping(true)
+    void window.vivarium.chatStopTask(sessionId, entry.toolUseId).then((ok) => {
+      // On success the row ends when the CLI's task frames say so; the button
+      // goes with `running`. On a refusal it comes back.
+      if (!ok) setStopping(false)
+    })
+  }
+
+  return (
+    <>
+      <div style={{ fontFamily: MONO, fontSize: TYPE.gutter, color: CHAT.shell }}>
+        $ {entry.tool === 'monitor' ? 'monitor' : 'background command'}
+      </div>
+      <div
+        style={{
+          marginTop: 4,
+          fontSize: TYPE.prose + 1,
+          lineHeight: TYPE.proseLine,
+          color: CHAT.text,
+          overflowWrap: 'anywhere'
+        }}
+      >
+        {entry.description}
+      </div>
+      <div
+        style={{
+          marginTop: 6,
+          fontFamily: MONO,
+          fontSize: TYPE.mono,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12
+        }}
+      >
+        <ShellStatus entry={entry} verbose />
+        {entry.running && entry.taskId && (
+          <button
+            onClick={stop}
+            disabled={stopping}
+            title="Stop this command — Claude is told it was stopped"
+            style={{
+              fontFamily: MONO,
+              fontSize: TYPE.gutter,
+              padding: '2px 10px',
+              color: stopping ? CHAT.dim3 : CHAT.text,
+              background: CHAT.card,
+              border: `1px solid ${CHAT.borderCard}`,
+              cursor: stopping ? 'default' : 'pointer'
+            }}
+          >
+            {stopping ? 'stopping…' : 'stop'}
+          </button>
+        )}
+      </div>
+      {entry.summary && (
+        <div style={{ marginTop: 6, fontFamily: MONO, fontSize: TYPE.mono, color: CHAT.dim3 }}>
+          {entry.summary}
+        </div>
+      )}
+
+      {entry.command && (
+        <PanelSection label="command">
+          <div style={shellBox}>{entry.command}</div>
+        </PanelSection>
+      )}
+
+      <PanelSection label={output?.truncated ? 'output · last 500 lines' : 'output'}>
+        {output?.ok ? (
+          output.text ? (
+            <div style={shellBox}>{output.text}</div>
+          ) : (
+            <div style={{ fontFamily: MONO, fontSize: TYPE.mono, color: CHAT.dim3 }}>
+              {entry.running ? 'no output yet' : 'it wrote no output'}
+            </div>
+          )
+        ) : (
+          <div style={{ fontFamily: MONO, fontSize: TYPE.mono, color: CHAT.dim3 }}>
+            {output ? output.message : 'reading…'}
+          </div>
+        )}
+      </PanelSection>
+    </>
+  )
+}
+
+/** A command or its output: terminal text, kept as written and wrapped only where it must. */
+const shellBox: React.CSSProperties = {
+  fontFamily: MONO,
+  fontSize: TYPE.mono,
+  lineHeight: 1.5,
+  color: CHAT.text,
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'anywhere',
+  padding: '8px 12px',
+  background: CHAT.inset,
+  border: `1px solid ${CHAT.borderCard}`,
+  borderRadius: CHAT.radiusCard
 }
 
 /** A labelled stretch of the agent panel: a small-caps word on a hairline. */

@@ -258,7 +258,7 @@ export const LogRow = React.memo(function LogRow({
     case 'text':
       if (entry.role === 'you') {
         return (
-          <Line at={entry.at} role="you" color={CHAT.you} band>
+          <Line at={entry.at} role={entry.from ?? 'you'} color={CHAT.you} band>
             {entry.md && (
               <div
                 style={{
@@ -522,6 +522,9 @@ export const LogRow = React.memo(function LogRow({
       return (
         <TaskRow entry={entry} handlers={handlers} groupIndex={groupIndex} groupSize={groupSize} />
       )
+
+    case 'shell':
+      return <ShellRow entry={entry} handlers={handlers} />
 
     case 'todo':
       // Always one line — it changed nothing on disk; the *fold* (current state)
@@ -1413,12 +1416,13 @@ function SlowClock({ since }: { since: number }): React.ReactElement | null {
 export function agentProgress(sub: ChatEntry[] | undefined): { tools: number; latest: string | null } {
   if (!sub || sub.length === 0) return { tools: 0, latest: null }
   let tools = 0
-  for (const e of sub) if (e.kind === 'tool' || e.kind === 'task') tools++
+  for (const e of sub) if (e.kind === 'tool' || e.kind === 'task' || e.kind === 'shell') tools++
   let latest: string | null = null
   for (let i = sub.length - 1; i >= 0 && latest === null; i--) {
     const e = sub[i]
     if (e.kind === 'tool') latest = `${e.role} ${e.title}`
     else if (e.kind === 'task') latest = `◆ ${e.agentType} ${e.description}`
+    else if (e.kind === 'shell') latest = `$ ${e.description}`
     else if (e.kind === 'cmd') latest = e.title || 'command'
     else if (e.kind === 'thinking') latest = 'thinking'
     else if (e.kind === 'text' && e.role === 'claude' && e.md.trim()) {
@@ -1594,6 +1598,103 @@ function TaskRow({
   // The rest of a fan-out: `Line`'s side padding without its meta line, and
   // nothing on top, so the lanes sit 6px apart — one block, not three rows.
   return <div style={{ padding: '0 10px 6px' }}>{card}</div>
+}
+
+/**
+ * A background command's outcome in one line — the shell's `AgentStatus`, and
+ * shared by the log card, the band and the panel for the same reason: the three
+ * must never disagree about whether it finished.
+ *
+ * A non-zero exit is a failure whatever the status word says, because that is
+ * what a shell means by one; `stopped` / `killed` get the neutral mark, since
+ * someone ended it on purpose.
+ */
+export function ShellStatus({
+  entry,
+  verbose = false
+}: {
+  entry: Extract<ChatEntry, { kind: 'shell' }>
+  verbose?: boolean
+}): React.ReactElement {
+  if (entry.running) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none', color: CHAT.dim2 }}>
+        <Dots color={CHAT.shell} />
+        <Elapsed since={entry.at} />
+      </span>
+    )
+  }
+  const failed = entry.status === 'failed' || (entry.exitCode !== null && entry.exitCode !== 0)
+  const done = entry.status === 'completed' && !failed
+  const stats = [
+    verbose || (!done && !failed) ? entry.status : null,
+    entry.exitCode !== null && (failed || verbose) ? `exit ${entry.exitCode}` : null,
+    entry.endedAt !== null ? secs(Math.max(0, entry.endedAt - entry.at)) : null
+  ].filter(Boolean)
+  return (
+    <span style={{ flex: 'none', color: failed ? CHAT.danger : CHAT.dim2 }}>
+      {done ? '✓ ' : failed ? '✗ ' : '■ '}
+      {stats.join(' · ')}
+    </span>
+  )
+}
+
+/**
+ * A background command, as a card in the log — `TaskRow`'s idiom in the shell
+ * hue: a rail, a `$`, what it is for and how it stands, and the command itself
+ * on a line under it. Like an agent's card it does not expand; clicking opens
+ * the panel, which is where its output is.
+ */
+function ShellRow({
+  entry,
+  handlers
+}: {
+  entry: Extract<ChatEntry, { kind: 'shell' }>
+  handlers: LogHandlers
+}): React.ReactElement {
+  const on = handlers.openAgent === entry.toolUseId
+  const command = entry.command.slice(0, 400).replace(/\s+/g, ' ').trim()
+  return (
+    <Line at={entry.at} role={entry.tool === 'monitor' ? 'monitor' : 'shell'} color={CHAT.shell}>
+      <div
+        onClick={() => handlers.onOpenAgent(entry.toolUseId)}
+        data-click=""
+        title={on ? 'Showing in the panel — click to close it' : 'Open this command and its output'}
+        style={{
+          ...mono,
+          minWidth: 0,
+          padding: '8px 12px',
+          background: CHAT.inset,
+          // Longhands, for the reason TaskRow gives: the lit border changes on
+          // a re-render and a shorthand would wipe the rail.
+          borderStyle: 'solid',
+          borderWidth: '1px 1px 1px 2px',
+          borderTopColor: on ? CHAT.shell : CHAT.borderCard,
+          borderRightColor: on ? CHAT.shell : CHAT.borderCard,
+          borderBottomColor: on ? CHAT.shell : CHAT.borderCard,
+          borderLeftColor: CHAT.shell,
+          borderRadius: CHAT.radiusCard,
+          color: CHAT.dim,
+          cursor: 'pointer'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <span aria-hidden style={{ color: CHAT.shell, flex: 'none' }}>
+            $
+          </span>
+          <span style={{ ...oneLine, flex: 1, color: CHAT.text }}>
+            <Hi>{entry.description}</Hi>
+          </span>
+          <ShellStatus entry={entry} />
+        </div>
+        {command && command !== entry.description && (
+          <div style={{ ...oneLine, color: CHAT.dim3, marginTop: 3 }}>
+            <Hi>{command}</Hi>
+          </div>
+        )}
+      </div>
+    </Line>
+  )
 }
 
 const oneLine: React.CSSProperties = {

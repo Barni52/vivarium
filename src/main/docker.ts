@@ -3,6 +3,7 @@ import { existsSync, promises as fsp } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import type {
+  ChatShellOutput,
   ClaudeVersionInfo,
   ContainerState,
   Project,
@@ -24,6 +25,7 @@ import {
 import type { MountTarget } from '@shared/mounts'
 import { mountTargets, sanitize, shortHash } from '@shared/mounts'
 import { bridgeDir, ensureBridgeFiles } from './bridge'
+import { isTaskOutputPath, takeLastLines } from './taskOutput'
 import { clipDir, pruneClips } from './clipboard'
 
 export type LineSink = (chunk: string) => void
@@ -419,7 +421,9 @@ export class DockerService {
   }
 
   // ---- Windows host IP (ref 229-250) -------------------------------------
-  private async detectHostIp(): Promise<string | null> {
+  // Public because the orchestration server listens on the same address the
+  // containers are pointed at, and a second detection could disagree with this one.
+  async detectHostIp(): Promise<string | null> {
     if (this.hostIp !== undefined) return this.hostIp
     let ip: string | null = null
 
@@ -1182,7 +1186,9 @@ export class DockerService {
      * one gate slot (probe, transcript read, exec client); letting it re-probe
      * here would quietly make it four.
      */
-    conversationExists?: boolean
+    conversationExists?: boolean,
+    /** chat only: the orchestration server's `--mcp-config` path, in-container */
+    mcpConfig: string | null = null
   ): Promise<string[]> {
     const name = this.containerName(project)
     if (kind === 'chat') {
@@ -1196,7 +1202,15 @@ export class DockerService {
       // stream in each direction (see main/chat.ts) and is the same list a host
       // chat is launched with — `chatCliArgs` is the one spelling of it, and
       // where each flag's reason is written down.
-      return ['exec', '-i', '-w', '/workspace', name, 'claude', ...chatCliArgs(session, resume)]
+      return [
+        'exec',
+        '-i',
+        '-w',
+        '/workspace',
+        name,
+        'claude',
+        ...chatCliArgs(session, resume, mcpConfig)
+      ]
     }
     if (kind === 'agent') {
       // VIVARIUM_SESSION_ID tags this exec's hook events with the owning
@@ -1291,6 +1305,32 @@ export class DockerService {
       if (msg) return { ok: false, text: '', bytes: 0, message: msg }
     }
     return { ok: true, text: r.stdout.toString('utf8'), bytes: r.stdout.length }
+  }
+
+  /**
+   * The last `lines` lines of a background command's output file, for the
+   * shell panel.
+   *
+   * The path is parsed out of a tool result, so it is model-adjacent data, and
+   * it is checked against the one shape the CLI writes (`…/tasks/<id>.output`)
+   * before it goes anywhere. It goes to `tail` as an argument of its own, never
+   * through `sh -c`, so there is no quoting to get right either. One more line
+   * than asked for is read, which is how "there was more above" is known without
+   * a second exec to count.
+   */
+  async readOutputTail(project: Project, path: string, lines: number): Promise<ChatShellOutput> {
+    if (!isTaskOutputPath(path)) {
+      return { ok: false, text: '', truncated: false, message: 'not a task output file' }
+    }
+    const r = await this.execBuf(
+      ['exec', this.containerName(project), 'tail', '-n', String(lines + 1), path],
+      15_000
+    )
+    if (r.code !== 0) {
+      const message = r.stderr.toString().trim().split('\n')[0] || `tail exited ${r.code}`
+      return { ok: false, text: '', truncated: false, message }
+    }
+    return takeLastLines(r.stdout.toString('utf8'), lines)
   }
 
   /**

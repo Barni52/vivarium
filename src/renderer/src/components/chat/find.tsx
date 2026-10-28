@@ -105,6 +105,8 @@ export function searchTextOf(entry: ChatEntry): string {
       // which the log never draws: a hit on a row with no visible match in it
       // reads as the find bar being wrong.
       return `${entry.agentType}\n${entry.description}\n${entry.status}\n${entry.prompt}`
+    case 'shell':
+      return `${entry.description}\n${entry.command}\n${entry.status}\n${entry.summary}`
     case 'todo':
       return entry.text
     case 'stop':

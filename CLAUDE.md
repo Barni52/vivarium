@@ -36,6 +36,19 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 - `claude.ts` — `ClaudeService`: npm `latest` lookup (10-min cache) + per-container version probe.
 - `host.ts` — a host project's agents and chats: which Windows `claude` to run, spawning it with
   no shell, and its conversations in `~/.claude/projects` — found, read, searched, deleted.
+- `orchestration.ts` — `OrchestrationServer`: an MCP server over plain `node:http` that every chat
+  gets through `--mcp-config`, so chats can list, create, message, read, stop and delete each
+  other. Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0; a per-spawn token is
+  the caller's identity. What it changes in config goes through the same functions as the UI's
+  handlers (`createSession`, `removeSession` in `ipc.ts`).
+- `mcpServers.ts` — `McpAttachments`: MCP servers an agent attaches to a chat (`connect_mcp`),
+  applied with the CLI's `mcp_set_servers`, saved on `Session.mcpServers` and put back by
+  `restore` at every spawn.
+- `mcpLogin.ts` — the browser half of an MCP server's OAuth login: a hidden window that fills
+  the login form and catches the redirect to the CLI's callback.
+- `relay.ts` — the two wrappers one chat's words travel in (`<chat-message>` into the target,
+  `<chat-notification>` back to the sender) and the reader the mapper unwraps them with. No
+  electron import, so the mapper's offline harness still bundles.
 
 `src/preload/index.ts` — the typed `window.vivarium`. The renderer never touches `ipcRenderer`.
 
@@ -85,10 +98,12 @@ discriminated `ChatEvent` union, because a turn's appends, the turn-end replacem
 rows, blocking cards, task/todo, `rewound` and exit are strictly ordered — and Electron guarantees
 ordering **within** a channel, not across channels.
 
-**`session:renamed` is the one config channel that pushes.** Every other config change starts in
-the renderer and adopts the `Config` its invoke returns; a chat that has named itself starts in
-main, so there is no return value to adopt. It carries the whole `Config` anyway, into
-`adoptConfig`, so the store keeps having exactly one way to take a config update.
+**`config:pushed` is the one config channel that pushes.** Every other config change starts in
+the renderer and adopts the `Config` its invoke returns; a chat that has named itself, and a chat
+another chat created or deleted, start in main, so there is no return value to adopt. It carries
+the whole `Config` anyway, into `adoptConfig`, so the store keeps having exactly one way to take a
+config update — and `adoptConfig` drops the per-session state of any session the new config no
+longer holds, because an agent's delete gets no `confirmKill` to do it.
 
 ## Invariants — do not break
 
@@ -142,8 +157,9 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   kinds write the same container-side transcript — so only the in-flight turn is lost.
 - Runtime state (container running, live ptys) is **queried live, never persisted**. `config.json`
   holds projects/mounts/sessions/settings and is written through `ConfigStore.mutate` (atomic
-  temp-file + rename). Six deliberate exceptions, all user preferences or facts that *cannot* be
-  queried: `Session.model`, `Session.effort`, `Config.chatZoom`,
+  temp-file + rename). Seven deliberate exceptions, all user preferences or facts that *cannot* be
+  queried: `Session.model`, `Session.effort`, `Config.chatZoom`, `Session.mcpServers` (attached
+  over a control channel that ends with the process, logins included),
   `Session.previousClaudeSessionIds` + `Config.pendingTranscriptDeletes` (and its host twin
   `pendingHostTranscriptDeletes`), `Session.rewound`, and
   `Session.autoName` (*who* last named a chat — nothing can be asked once both answers are just a
@@ -468,6 +484,40 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   as a cost the turn did not incur), and subagent tokens are excluded because `result.usage`
   excludes them.
 
+### Chat orchestration
+
+- **Every chat can reach every chat, by the user's decision.** All projects, host ones included,
+  any depth, always on, no hop limit — and that knowingly steps around the selective mounts (a
+  chat without the backend can ask one that has it). Two refusals only: messaging or deleting
+  your own chat, and a stopped container, which an agent never starts.
+- **Replies are pushed, never polled.** `send_to_chat` returns at once; the target's turn is
+  tagged with a `TurnOrigin` (`Live.origins`) and its `result` writes the answer into the sender
+  as a `<chat-notification>` message, queued like anything else. A blocking wait would hold the
+  sender's turn silent across the whole other turn and trip its own `SILENCE_BUSY_MS`. Only
+  agent-started turns notify — a chat you type into never reports to anyone.
+- **A reply turn inherits the relay.** B, working for A, asks C; C's answer opens a turn in B
+  owed to A, so a chain answers all the way back. Every path that gives up on turns (`dropQueue`,
+  `close`) fails their origins out loud rather than leaving a sender waiting; replies are never
+  persisted, so one landing across a restart is lost and `read_chat` is the recovery.
+- **Relayed words are the fifth thing that is not something you typed.** Both wrappers stay in
+  the transcript (the receiving model must know an agent wrote it), and the mapper unwraps them
+  into a `you`-role row carrying `from` — drawn as `from <name>` / `reply · <name>` in place of
+  `you`. Read unrecognised, either is a bubble of markup the user never typed.
+- **An agent attaches MCP servers itself, and logs in with nobody at the keyboard.**
+  `connect_mcp` sends `mcp_set_servers` (the Agent SDK's `setMcpServers`), which replaces only the
+  servers added that way — the `--mcp-config` `vivarium` server is in a different list and is never
+  touched. A server at `needs-auth` is logged in through the CLI's own flow: `mcp_authenticate`
+  returns the login page, `mcpLogin.ts` fills it in a hidden window with its own throwaway
+  session, and the redirect to the CLI's callback port is **cancelled and handed over** with
+  `mcp_oauth_callback_url` — that listener is on the container's localhost, which a Windows page
+  cannot reach, so catching the URL is the whole trick. The CLI keeps and refreshes the tokens;
+  Vivarium only ever holds the username and password the agent passed. **Pass the fixed OAuth
+  client when there is one** (`clientId`, `callbackPort`, as in `.mcp.json`'s `oauth` block):
+  without it the CLI registers a client on the fly, and the dev Keycloak's "Trusted Hosts"
+  registration policy refuses that with a 403 before any password is checked.
+- **A chat can now be opened by main as well as the renderer**, so `ChatService.open` joins an
+  open already in progress (`opening`) instead of racing it to a second process.
+
 ### The chat window
 
 - **The `AskUserQuestion` card is the whole tool, and it is the last row of the log.** Not a
@@ -491,6 +541,20 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
   one level down behind a breadcrumb. The sub-log used to pour into the log under its card,
   which moved the conversation by every step the agent took; do not bring that back. The live
   `↳` step and tool count are read off the `task` buffer the store already holds — no IPC.
+- **A background command is a `shell` row, a sibling of `task` and drawn like one.** A `Bash` /
+  `PowerShell` with `run_in_background`, a foreground one the CLI moved to the background (its
+  result says so; the tool card is replaced in place, as a Skill's becomes a `cmd` row), or a
+  `Monitor`. Card in the log with a `$` and a `--ok` rail (`CHAT.shell` — an alias, not a new
+  token), its own **shells band** under the agents band, and the agent panel's slot for its
+  detail. It ends on the CLI's task frames or its `<task-notification>`, matched by call id or
+  task id, and is adopted across turns by reference like an agent. Its **output is read, never
+  streamed**: the panel asks main for the last 500 lines of the file the CLI writes, once a
+  second while the command runs and only while the panel shows it (`chat:task-output`, path
+  checked against `…/tasks/<id>.output` and handed to `tail` without a shell). Stop is the CLI's
+  own `stop_task` (`chat:stop-task`), so the model is told.
+- **The agents and shells bands fold separately**, to a header line that still counts running and
+  done — folding hides detail, never the fact that something is going. `bandsFolded` is
+  session-only and shared by every chat, like the panel width.
 - **A `you` row is a raised `--card` bubble *and* a `--role-you` left rail *and* a gap above it.**
   The surface alone was one step over the page and read as one more tool card; the rail and the
   gap are what make a turn findable when scrolling back through mostly machinery.
@@ -585,7 +649,7 @@ main, so there is no return value to adopt. It carries the whole `Config` anyway
 ## Commands
 
 ```
-npm install          # postinstall rebuilds node-pty against Electron
+npm install          # no native build: node-pty's N-API prebuild loads as shipped
 npm run dev          # electron-vite dev server + Electron
 npm run dev:cdp      # the same, plus CDP on 9366 and a visible window
 npm run typecheck    # tsc for both tsconfig.node.json and tsconfig.web.json

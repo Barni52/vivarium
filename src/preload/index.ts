@@ -12,6 +12,7 @@ import type {
   ChatModelOption,
   ChatOpenResult,
   ChatRewindResult,
+  ChatShellOutput,
   ClaudeStatus,
   ClaudeUpdateResult,
   Config,
@@ -158,6 +159,10 @@ const api = {
     ipcRenderer.invoke(CH.chatSend, sessionId, text, attachments),
   chatInterrupt: (sessionId: string): Promise<void> =>
     ipcRenderer.invoke(CH.chatInterrupt, sessionId),
+  chatTaskOutput: (sessionId: string, toolUseId: string): Promise<ChatShellOutput> =>
+    ipcRenderer.invoke(CH.chatTaskOutput, sessionId, toolUseId),
+  chatStopTask: (sessionId: string, toolUseId: string): Promise<boolean> =>
+    ipcRenderer.invoke(CH.chatStopTask, sessionId, toolUseId),
   chatRewind: (sessionId: string, entryId: string): Promise<ChatRewindResult> =>
     ipcRenderer.invoke(CH.chatRewind, sessionId, entryId),
   chatAnswer: (sessionId: string, requestId: string, answer: ChatAnswer): Promise<void> =>
@@ -241,11 +246,11 @@ const api = {
     return () => ipcRenderer.removeListener(CH.quitRequested, h)
   },
   // The window became the active one (taskbar/start-menu click, alt-tab, restore).
-  /** Main renamed a session by itself (the chat auto-titler). */
-  onSessionRenamed: (cb: (config: Config) => void): (() => void) => {
+  /** Main changed config by itself (the chat auto-titler, an agent's create or delete). */
+  onConfigPushed: (cb: (config: Config) => void): (() => void) => {
     const h = (_: unknown, p: Config): void => cb(p)
-    ipcRenderer.on(CH.sessionRenamed, h)
-    return () => ipcRenderer.removeListener(CH.sessionRenamed, h)
+    ipcRenderer.on(CH.configPushed, h)
+    return () => ipcRenderer.removeListener(CH.configPushed, h)
   },
   onWindowFocused: (cb: () => void): (() => void) => {
     const h = (): void => cb()

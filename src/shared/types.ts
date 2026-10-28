@@ -114,6 +114,41 @@ export interface Session {
    * would point into the retired one.
    */
   rewound?: ChatRewindRange[]
+  /**
+   * chat only. The MCP servers an agent attached to this chat with
+   * `connect_mcp`, re-attached every time its process starts.
+   *
+   * Another deliberate exception to "queried live, never persisted", and an
+   * unavoidable one: they are attached over the control channel
+   * (`mcp_set_servers`), which lasts exactly as long as the process — so after
+   * a restart nothing anywhere remembers them but this. The login is kept with
+   * them because the CLI's own refresh token can run out, and re-attaching a
+   * server that then sits at "needs login" would be a chat set up for testing
+   * that silently is not. Plain text in config.json: these are dev logins, and
+   * the user chose having the agent pass them.
+   */
+  mcpServers?: McpServerEntry[]
+}
+
+/** One server `connect_mcp` attached to a chat (see Session.mcpServers). */
+export interface McpServerEntry {
+  /** the CLI's name for it, the `<name>` in `mcp__<name>__<tool>` */
+  name: string
+  url: string
+  username?: string
+  password?: string
+  /**
+   * A fixed OAuth client to log in with — `oauth.clientId` in a `.mcp.json`
+   * entry. Without it the CLI registers a client of its own on the fly, which an
+   * identity provider is free to refuse (Keycloak's "Trusted Hosts" policy does).
+   */
+  clientId?: string
+  /** the redirect port that client is registered with, when it is a fixed one */
+  callbackPort?: number
+  /** sent with every request, as `.mcp.json`'s `headers` (Merlin wants `ClientKey`) */
+  headers?: Record<string, string>
+  /** the CLI's per-server tool call timeout in milliseconds, as `.mcp.json`'s `timeout` */
+  timeout?: number
 }
 
 /**
@@ -126,6 +161,17 @@ export interface Session {
 export interface ChatRewindRange {
   from: number
   to: number
+}
+
+/** What `chat:task-output` answers: the end of a background command's output file. */
+export interface ChatShellOutput {
+  ok: boolean
+  /** the last lines, joined — at most SHELL_OUTPUT_LINES of them */
+  text: string
+  /** there was more above what `text` holds */
+  truncated: boolean
+  /** why there is nothing to show, when `ok` is false */
+  message?: string
 }
 
 /** What `chat:rewind` answers: what came off, and what to put in the composer. */
@@ -683,6 +729,14 @@ export type ChatEntry =
       md: string
       chips?: ChatChip[]
       queued?: 'waiting' | 'unsent'
+      /**
+       * Set on a `you`-role row that another chat wrote, not you — a message it
+       * sent (`from <name>`) or the reply to one this chat sent
+       * (`reply · <name>`). Drawn in place of the word `you`. Main derives it
+       * from the wrapper in the line itself (main/relay.ts), so it survives a
+       * reopen with nothing persisted beside the transcript.
+       */
+      from?: string
     })
   /** collapsed to its first line with a `▸ show` */
   | (ChatEntryBase & { kind: 'thinking'; md: string })
@@ -743,6 +797,38 @@ export type ChatEntry =
       running?: boolean
     })
   | (ChatEntryBase & { kind: 'todo'; text: string })
+  /**
+   * A command running in the background: a `Bash` (or a host chat's
+   * `PowerShell`) with `run_in_background`, one the CLI moved to the background
+   * itself after a timeout, or a `Monitor`.
+   *
+   * **A sibling of `task`, not a variant of it**, because the two are drawn in
+   * separate sections of the band and their panels share nothing but the slot:
+   * a shell has a command and an output file where an agent has a prompt, a
+   * report and a sub-log. It lives the same way an agent does, though — opened
+   * by its launch, completed by a `<task-notification>` (or the CLI's live task
+   * frames first), and adopted by reference across turns, because it routinely
+   * outlives the turn that started it.
+   */
+  | (ChatEntryBase & {
+      kind: 'shell'
+      toolUseId: string
+      /** the CLI's id for it — what `stop_task` takes; null until the launch result names it */
+      taskId: string | null
+      tool: 'bash' | 'monitor'
+      command: string
+      description: string
+      /** where the CLI writes its output, on the chat's own machine; null until known */
+      outputFile: string | null
+      /** `running`, then `completed` / `failed` / `stopped` / `killed`, or `unknown` */
+      status: string
+      exitCode: number | null
+      /** when it ended, for its duration; null while running and when never reported */
+      endedAt: number | null
+      /** the CLI's one-line account of how it ended */
+      summary: string
+      running: boolean
+    })
   /**
    * An interrupt, a crash, a timeout or a desync. `alert` is the one place
    * colour appears in the log body — an interrupt is something the user just
