@@ -35,7 +35,10 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
   `<output>/<branch>/changes.txt` (the branch with `/` made `-`) so a branch's diff and its
   review sit together. Agents run the same writer through the `write_branch_diff` tool, base
   `origin/master` unless they or the output panel name another — and `isDiffBase` guards the
-  base, because git reads an argument starting with `-` as an option.
+  base, because git reads an argument starting with `-` as an option. `commit_changes` stages and
+  commits on the same mount scope (`git add -A` / `git commit -- <mounts>`, so a hand-staged file
+  elsewhere stays out), only when the checkout is on the branch the agent names; it never checks
+  out and never pushes.
 - `clipboard.ts` — Ctrl+V image paste → PNG in the project clip dir (mounted at `/clip`).
 - `claude.ts` — `ClaudeService`: npm `latest` lookup (10-min cache) + per-container version probe.
 - `host.ts` — a host project's agents and chats: which Windows `claude` to run, spawning it with

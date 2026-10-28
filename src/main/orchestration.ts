@@ -7,7 +7,13 @@ import { EFFORT_LEVELS, isEffort } from '@shared/models'
 import { isHostProject } from '@shared/projects'
 import type { ChatEffort, ChatOpenResult, Config, Project, Session } from '@shared/types'
 import { bridgeDir } from './bridge'
-import { DEFAULT_DIFF_BASE, gitBranch, isDiffBase, writeBranchDiff } from './git'
+import {
+  DEFAULT_DIFF_BASE,
+  commitBranchChanges,
+  gitBranch,
+  isDiffBase,
+  writeBranchDiff
+} from './git'
 import type { ChatService } from './chat'
 import { BACKEND_PORTS } from './dockerfiles'
 import type { McpAttachments } from './mcpServers'
@@ -249,6 +255,26 @@ const TOOLS = [
     }
   },
   {
+    name: 'commit_changes',
+    description:
+      "Stage and commit every change in a project's git checkout, on the branch it is on. branch must " +
+      'name that branch: it is a check against committing to the wrong one, and nothing is switched. ' +
+      'Limited to the folders the project mounts, or the whole repository when it mounts none. Runs ' +
+      "with the user's git identity and hooks; a refusing hook fails the commit. Does not push.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        branch: { type: 'string', description: 'The branch the checkout is expected to be on.' },
+        message: { type: 'string', description: 'The commit message.' },
+        project: {
+          type: 'string',
+          description: "The project id, as list_chats reports it. Defaults to your own chat's project."
+        }
+      },
+      required: ['branch', 'message']
+    }
+  },
+  {
     name: 'delete_chat',
     description:
       'Delete a chat and its whole conversation history. This cannot be undone. Your own chat cannot be deleted.',
@@ -425,6 +451,8 @@ export class OrchestrationServer {
         return this.deleteChat(args, caller)
       case 'write_branch_diff':
         return this.writeDiff(args, caller)
+      case 'commit_changes':
+        return this.commitChanges(args, caller)
       case 'connect_mcp':
         return this.withTargetChat(args, caller, (id) =>
           this.deps.mcp.connect(id, {
@@ -576,6 +604,21 @@ export class OrchestrationServer {
         `Wrote the diff of ${gitBranch(project.basePath)} against ${base} (project ${project.name}) ` +
         `to ${where}.`
     }
+  }
+
+  /** `git add` + `git commit` in a project's checkout (see commitBranchChanges). */
+  private async commitChanges(args: ToolArgs, caller: string): Promise<ToolResult> {
+    const branch = readString(args.branch).trim()
+    const message = readString(args.message).trim()
+    if (!branch || !message) return failure('branch and message are required.')
+    const config = this.deps.readConfig()
+    const callerProject = config.projects.find((p) => p.sessions.some((s) => s.id === caller))
+    const projectId = readString(args.project) || callerProject?.id || ''
+    const project = config.projects.find((p) => p.id === projectId)
+    if (!project) return failure(`No project with id ${projectId}. list_chats lists them.`)
+    const r = await commitBranchChanges(project, branch, message)
+    const text = `${project.name}: ${r.message}`
+    return r.ok ? { text } : failure(text)
   }
 
   /**
