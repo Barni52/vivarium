@@ -6,6 +6,10 @@ directories:
 files:
   - out/**/*
   - package.json
+# node-pty >= 1.1 ships N-API prebuilds (prebuilds/win32-x64), which load in any Electron
+# without compiling. Rebuilding from source needs the MSVC C++ toolchain, which this machine
+# does not have, and gains nothing.
+npmRebuild: false
 asarUnpack:
   - "**/node_modules/node-pty/**"
 win:

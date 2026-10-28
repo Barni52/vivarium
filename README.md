@@ -45,7 +45,7 @@ container — only the project's explicit stop control does.
 ## Development
 
 ```powershell
-npm install        # also rebuilds node-pty against Electron (postinstall)
+npm install        # no compiler needed: node-pty ships an N-API prebuild
 npm run dev        # electron-vite dev server + Electron
 ```
 
