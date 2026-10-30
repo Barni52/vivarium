@@ -311,19 +311,46 @@ export function MountList({
                 borderLeft: '2px solid var(--accent)'
               }}
             >
-              <span style={{ color: 'var(--dim)', display: 'flex' }}>
+              <span style={{ color: 'var(--dim)', display: 'flex', flex: 'none' }}>
                 <Folder size={13} />
               </span>
-              <span style={{ flex: 1, fontFamily: MONO, fontSize: 12.5, color: 'var(--fg)' }}>
+              <span
+                title={m}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontFamily: MONO,
+                  fontSize: 12.5,
+                  color: 'var(--fg)'
+                }}
+              >
                 {relLabel(basePath, m)}
               </span>
-              <span style={{ fontSize: 11.5, color: 'var(--dim)', fontFamily: MONO }}>
+              <span
+                title={targets[i]?.target}
+                style={{
+                  flex: '0 1 auto',
+                  minWidth: 0,
+                  maxWidth: '45%',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontSize: 11.5,
+                  color: 'var(--dim)',
+                  fontFamily: MONO
+                }}
+              >
                 → {targets[i]?.target}
               </span>
               {editable && onRemove && (
                 <button
                   onClick={() => onRemove(i)}
+                  title="Remove"
                   style={{
+                    flex: 'none',
                     width: 28,
                     height: 28,
                     border: 0,

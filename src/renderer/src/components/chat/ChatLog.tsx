@@ -1,4 +1,5 @@
 import React from 'react'
+import { createPortal } from 'react-dom'
 import type { ChatEntry, ChatToolStatus, ChatTurnTokens } from '@shared/types'
 import { CHAT, CHAT_TEXT as TYPE, MONO } from '../../theme'
 import { Hi } from './find'
@@ -731,10 +732,18 @@ function ClaudeText({
  * for it on mount (see ChatChip.imageId): a screenshot is a megabyte or two of
  * base64, and a `you` row is copied and re-shipped every time its turn updates.
  *
- * Click to swap between a thumbnail and the full width of the column. There is
- * no "open externally" — the picture only exists as a `data:` URL, and this
- * app's `openExternal` allows http/https/mailto precisely so that a URL from a
- * model can never reach the shell. So the log is where it opens.
+ * Click to open it in `ImageViewer`, over the whole window. It used to grow in
+ * place to 70vh, which moved every row under it and still left a screenshot
+ * smaller than the screen it was taken of. There is no "open externally" — the
+ * picture only exists as a `data:` URL, and this app's `openExternal` allows
+ * http/https/mailto precisely so that a URL from a model can never reach the
+ * shell. So the app is where it opens.
+ *
+ * It is not `data-click`. That rule lifts with a brightness filter, which is
+ * tuned for a near-`--card` surface; on a picture it is applied to the pixels
+ * themselves, and a screenshot of a light page went white and unreadable under
+ * the pointer. So the hover lights the frame instead and leaves the picture
+ * alone — a colour change, never a height (see the log's tail pinning).
  */
 function Thumb({
   imageId,
@@ -743,7 +752,8 @@ function Thumb({
   imageId: string
   handlers: LogHandlers
 }): React.ReactElement {
-  const [big, setBig] = React.useState(false)
+  const [open, setOpen] = React.useState(false)
+  const [lit, setLit] = React.useState(false)
   const url = handlers.images[imageId]
   const { onImage } = handlers
   React.useEffect(() => {
@@ -760,29 +770,110 @@ function Thumb({
     return <span style={{ color: CHAT.dim4 }}>▣ …</span>
   }
   return (
-    <img
-      src={url}
-      alt="attached image"
-      onClick={() => setBig((v) => !v)}
-      data-click=""
-      title={big ? 'Click to shrink' : 'Click to enlarge'}
-      style={{
-        display: 'block',
-        // Capped in both directions so a panorama cannot set the row's height and
-        // a tall screenshot cannot own the window. `contain` rather than `cover`:
-        // a cropped thumbnail of a screenshot is unreadable, which defeats it.
-        maxWidth: '100%',
-        maxHeight: big ? '70vh' : 150,
-        objectFit: 'contain',
-        border: `1px solid ${CHAT.borderCard}`,
-        borderRadius: CHAT.radius,
-        // The band behind a `you` row is a surface; a transparent PNG dropped on
-        // it would read as whatever happens to be underneath, so it gets a ground
-        // of its own.
-        background: CHAT.inset,
-        cursor: 'pointer'
-      }}
-    />
+    <>
+      <img
+        src={url}
+        alt="attached image"
+        onClick={() => setOpen(true)}
+        onMouseEnter={() => setLit(true)}
+        onMouseLeave={() => setLit(false)}
+        title="Click to view"
+        style={{
+          display: 'block',
+          // Capped in both directions so a panorama cannot set the row's height and
+          // a tall screenshot cannot own the window. `contain` rather than `cover`:
+          // a cropped thumbnail of a screenshot is unreadable, which defeats it.
+          maxWidth: '100%',
+          maxHeight: 150,
+          objectFit: 'contain',
+          border: `1px solid ${lit ? CHAT.dim3 : CHAT.borderCard}`,
+          borderRadius: CHAT.radius,
+          // The band behind a `you` row is a surface; a transparent PNG dropped on
+          // it would read as whatever happens to be underneath, so it gets a ground
+          // of its own.
+          background: CHAT.inset,
+          cursor: 'zoom-in',
+          transition: 'border-color .12s'
+        }}
+      />
+      {open && <ImageViewer src={url} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+/**
+ * One picture over the whole window, the way Discord opens an attachment: a
+ * dark scrim, the image as large as fits and never scaled up past its own
+ * pixels (a small screenshot blown up is blurrier, not more readable), and
+ * any click off the picture or Esc to close.
+ *
+ * Portalled to `body`, because the log columns carry CSS `zoom`, which would
+ * scale a fixed box inside them along with its edges — the same trap the
+ * chat-zoom rule documents for the view root — and a picture must open at the
+ * window's size whatever the log is zoomed to. It covers the title bar too, so
+ * it opts out of the title bar's drag region, which would otherwise swallow a
+ * click on the top strip of the scrim before the page ever saw it.
+ *
+ * Esc is taken in the **capture** phase and `preventDefault`ed. ChatView's
+ * window-level listener reads Esc as "interrupt the turn" (and a second as "open
+ * the revert picker"), skips anything already defaultPrevented, and is not a
+ * dialog in the store's sense — so without this, closing a picture would stop
+ * whatever Claude was doing.
+ *
+ * A portal moves the DOM, not the React tree: events still bubble to the log's
+ * own handlers. The one that matters is the log's `onContextMenu`, which would
+ * open its Copy/Find menu *under* this scrim, so the right-click stops here.
+ */
+function ImageViewer({ src, onClose }: { src: string; onClose: () => void }): React.ReactElement {
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+
+  return createPortal(
+    <div
+      onClick={onClose}
+      onContextMenu={(e) => e.stopPropagation()}
+      style={
+        {
+          position: 'fixed',
+          inset: 0,
+          zIndex: 100,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'var(--viewer)',
+          cursor: 'zoom-out',
+          animation: 'vover .12s ease',
+          WebkitAppRegion: 'no-drag'
+        } as React.CSSProperties
+      }
+    >
+      <img
+        src={src}
+        alt="attached image"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: 'block',
+          maxWidth: 'calc(100vw - 80px)',
+          maxHeight: 'calc(100vh - 80px)',
+          objectFit: 'contain',
+          borderRadius: CHAT.radius,
+          // The thumbnail's reason again: a transparent PNG needs a ground of
+          // its own, and on this scrim dark text in one would simply vanish.
+          background: CHAT.inset,
+          boxShadow: '0 24px 60px -20px var(--shadow)',
+          cursor: 'default'
+        }}
+      />
+    </div>,
+    document.body
   )
 }
 

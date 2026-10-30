@@ -154,6 +154,10 @@ const MIDNIGHT = {
   'on-accent2': '#12141c',
   /** the dialog scrim */
   overlay: 'rgba(8,9,13,.66)',
+  /** the image viewer's scrim. Darker than `--overlay` on purpose: a dialog
+   *  scrim only has to push the page back, this one has to make the page
+   *  disappear, or a screenshot competes with the chat it was lifted out of. */
+  viewer: 'rgba(5,6,9,.9)',
   /** keyboard focus, lifted off `--accent` so the ring reads on top of it */
   focus: '#5b83e0',
   'focus-soft': 'rgba(47,95,208,.28)',
@@ -241,6 +245,7 @@ const GRAPHITE: Tokens = {
   // black `--accent-fg` uses.
   'on-accent2': '#1a1305',
   overlay: 'rgba(0,0,0,.66)',
+  viewer: 'rgba(0,0,0,.9)',
   focus: '#d9a13b',
   'focus-soft': 'rgba(217,161,59,.26)',
   selection: 'rgba(184,121,43,.32)',
@@ -311,6 +316,9 @@ const PAPER: Tokens = {
   // Grey the page rather than darken it — 66% black over cream is a different
   // colour, not a dimmer one.
   overlay: 'rgba(44,43,38,.42)',
+  // Dark on paper too, unlike `--overlay`: a picture is judged against black,
+  // and a light wash leaves the cream log reading through a white screenshot.
+  viewer: 'rgba(20,19,16,.88)',
   focus: '#1f5f8b',
   'focus-soft': 'rgba(31,95,139,.22)',
   // Lower alpha than the dark themes: the band is a *dark* wash over dark text
