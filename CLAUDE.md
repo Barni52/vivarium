@@ -30,7 +30,10 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
   lines) into log rows.
 - `bridge.ts` — the agent hook bridge: a per-project host dir bind-mounted at `/vivarium` holding
   hook settings + `hook.sh`; `BridgeWatcher` tails its `events.log`.
-- `config.ts` — atomic persistence of the single `%APPDATA%/vivarium/config.json`.
+- `config.ts` — atomic persistence of the single `%APPDATA%/vivarium/config.json`, shared by every
+  running instance: `mutate` re-reads it under a lock, `watch` reports a sibling's changes.
+- `instance.ts` — several Vivariums at once: `claimInstance` takes a slot before `ready`,
+  `SessionLeases` keeps each conversation in one instance.
 - `git.ts` — branch detection (reads `.git/HEAD` directly) + "Write branch diff", which writes
   `<output>/<branch>/changes.txt` (the branch with `/` made `-`) so a branch's diff and its
   review sit together. Agents run the same writer through the `write_branch_diff` tool. The base
@@ -47,8 +50,9 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
   no shell, and its conversations in `~/.claude/projects` — found, read, searched, deleted.
 - `orchestration.ts` — `OrchestrationServer`: an MCP server over plain `node:http` that every chat
   gets through `--mcp-config`, so chats can list, create, message, read, stop and delete each
-  other. Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0; a per-spawn token is
-  the caller's identity. What it changes in config goes through the same functions as the UI's
+  other. Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0, on 47821 plus the
+  instance's slot; a per-spawn token is the caller's identity, which is why instances cannot share
+  a port. What it changes in config goes through the same functions as the UI's
   handlers (`createSession`, `removeSession` in `ipc.ts`).
 - `mcpServers.ts` — `McpAttachments`: MCP servers an agent attaches to a chat (`connect_mcp`),
   applied with the CLI's `mcp_set_servers`, saved on `Session.mcpServers` and put back by
@@ -113,8 +117,9 @@ rows, blocking cards, task/todo, `rewound` and exit are strictly ordered — and
 ordering **within** a channel, not across channels.
 
 **`config:pushed` is the one config channel that pushes.** Every other config change starts in
-the renderer and adopts the `Config` its invoke returns; a chat that has named itself, and a chat
-another chat created or deleted, start in main, so there is no return value to adopt. It carries
+the renderer and adopts the `Config` its invoke returns; a chat that has named itself, a chat
+another chat created or deleted, and anything a sibling instance wrote start in main, so there is
+no return value to adopt. It carries
 the whole `Config` anyway, into `adoptConfig`, so the store keeps having exactly one way to take a
 config update — and `adoptConfig` drops the per-session state of any session the new config no
 longer holds, because an agent's delete gets no `confirmKill` to do it.
@@ -233,6 +238,48 @@ longer holds, because an agent's delete gets no `confirmKill` to do it.
   `claudeUpdate`, and the `containerStates` / `claudeStatus` sweeps — and a host chat's
   `ChatRuntime` never reaches docker, nor waits at the open gate. Their sessions render at launch
   like host shells and never get the "Container stopped" placeholder.
+
+### Several instances
+
+Developing Vivarium in Vivarium means the app and a fresh build side by side. `instance.ts` holds
+the reasoning.
+
+- **`userData` is shared, `sessionData` is not.** config.json, `bridge/` and `clip/` are the same
+  for every instance, so every window shows the same projects and chats. Chromium's profile cannot
+  be shared at all: on one profile a second process took 6.1s instead of 0.2s, logged `Gpu Cache
+  Creation failed: -2`, and read back an empty localStorage. So anything of this app's goes under
+  `getPath('userData')` and nothing of Chromium's may.
+- **Slot 0 is the root directory, unchanged, and a lone instance is exactly what it always was.**
+  Extra instances take the lowest free `instances/<n>/` and keep it, so their caches stay warm.
+- **`UV_FS_O_EXLOCK` (share mode 0) is the lock, never a pid file and never
+  `requestSingleInstanceLock`.** Windows releases it with the handle, so a crash leaves nothing
+  stale. `requestSingleInstanceLock` is keyed on the app's name, which differs between a dev run
+  and a packaged one, the two builds this exists for. A build from before slots takes no lock, but
+  LevelDB holds `Local Storage/leveldb/LOCK`, so slot 0 also checks that.
+- **One conversation, one process.** Sessions open themselves, so without a lease a second window
+  `--resume`s everything the first has, and each CLI keeps its own in-memory copy of the
+  conversation. A lease is a file under `instances/held/` holding the holder's pid. An `agent` or
+  `chat` claims one as it opens; shells have no conversation and take none. A chat held elsewhere
+  is opened with `proc: null`, so its transcript is readable and every write path already refuses
+  it, and it re-reads when selected or when the window regains focus. An agent held elsewhere has
+  no pty at all.
+- **"Move here" rewrites the lease, and there is no channel between instances.** The holder's
+  watcher sees the file change and lets go. Both a handover and a sibling closing reach the renderer
+  as `session:held`, and `ChatView` reconciles `readOnly` (what the last open got) against
+  `elsewhere` (who holds it now). **Never fire that on `elsewhere` changing**: the open that first
+  finds a chat held is what sets it, and every held chat would read its transcript twice at launch.
+- **An agent never moves a chat.** `send_to_chat` to a chat held elsewhere is refused, and
+  `list_chats` reports it as `elsewhere`. Moving one is the user's act, like starting a container.
+  So orchestration reaches every chat this instance holds, not every chat there is.
+- **`ConfigStore.mutate` applies the mutator to the file, under a lock, not to the cache.** Each
+  instance keeps the config in memory, so writing that copy undoes a sibling's change. A change
+  absorbed by one of the fire-and-forget saves leaves file and cache agreeing by the time the
+  watcher looks, which is why `unreported` is a flag and not a comparison made there. `window` and
+  `instanceWindows` are ignored by that test, or dragging one window redraws the other.
+- **"Nothing can be alive at launch" is only true of a lone instance.** A launch step that relies
+  on it asks `otherInstancesRunning()`. Only the host `events.log` truncate does today.
+- **`before-quit` reads `mainWindow`, never `getAllWindows()`,** which is empty by then: closing
+  the last window is what quits the app.
 
 ### Terminals
 
@@ -502,8 +549,9 @@ longer holds, because an agent's delete gets no `confirmKill` to do it.
 
 - **Every chat can reach every chat, by the user's decision.** All projects, host ones included,
   any depth, always on, no hop limit — and that knowingly steps around the selective mounts (a
-  chat without the backend can ask one that has it). Two refusals only: messaging or deleting
-  your own chat, and a stopped container, which an agent never starts.
+  chat without the backend can ask one that has it). Three refusals only: messaging or deleting
+  your own chat, a stopped container, which an agent never starts, and a chat running in another
+  Vivarium window, which an agent never moves.
 - **Replies are pushed, never polled.** `send_to_chat` returns at once; the target's turn is
   tagged with a `TurnOrigin` (`Live.origins`) and its `result` writes the answer into the sender
   as a `<chat-notification>` message, queued like anything else. A blocking wait would hold the
@@ -726,6 +774,10 @@ There is **no test suite, by design — don't add one.**
    - Not every chip is a button: the four session types under the empty state are a *legend*.
    - **Never `browser_close`** — it closes the app, not a tab. And it drives the *real* app, so it
      will start containers and spend tokens if you click the things that do that.
+   - To run the real build without the real config, launch `electron.exe D:\vivarium
+     --user-data-dir=<scratch>` with `VIVARIUM_CDP_PORT` set and a hand-written `config.json` in
+     that folder. Several of them on one folder is how to exercise instances. A chat's `claude`
+     spends nothing until it is sent a message.
 3. For mapper/parser work, prefer an offline harness over the UI: bundle with
    `esbuild src/main/chatMapper.ts --bundle --format=esm --platform=node --alias:@shared=./src/shared`
    and feed it real transcript lines pulled out with `docker exec`. It is faster, it is exact, and

@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { promises as fs } from 'fs'
+import { constants, promises as fs, watch } from 'fs'
 import { join, dirname } from 'path'
 import type { Config, Project } from '@shared/types'
 
@@ -11,8 +11,34 @@ import type { Config, Project } from '@shared/types'
 // uuids the delete cascade owes, and the rewind ranges without which a reopened
 // chat renders turns the model has forgotten. Losing it is not "resets to
 // defaults", it is losing the record of what the app was ever told.
+//
+// **It is shared by every running instance** (see main/instance.ts), and that is
+// what `mutate` and `watch` are for: each instance keeps this file's contents in
+// memory, so a plain write would publish that copy and silently undo whatever a
+// sibling had changed since it was taken.
 
 const EMPTY: Config = { version: 1, projects: [] }
+
+/** See O_EXLOCK in main/instance.ts: a lock Windows drops if the holder dies. */
+const O_EXLOCK = 0x10000000
+
+/**
+ * How long a write queues behind a sibling's before going ahead regardless. A
+ * holder is doing one small read and one small write, so this is only ever reached
+ * by something being stuck, and then a change on disk beats a change lost.
+ */
+const LOCK_WAIT_MS = 3_000
+
+/**
+ * What a sibling's write has to change before this instance reacts to it. Each
+ * instance saves its own window rectangle here, per drag, and telling the renderer
+ * about that would redraw the sidebar of one window for moving the other.
+ */
+function withoutWindows(config: Config): string {
+  return JSON.stringify(config, (key, value) =>
+    key === 'window' || key === 'instanceWindows' ? undefined : value
+  )
+}
 
 /** A parsed config, or null when the text is not one. */
 function parseConfig(raw: string): Config | null {
@@ -30,6 +56,17 @@ export class ConfigStore {
   /** The previous good version, kept one deep — see `write`. */
   private backupPath: string
   private cache: Config = EMPTY
+  /** The text `cache` was parsed from or written as: what a sibling changing it looks like. */
+  private text: string | null = null
+  /**
+   * The cache holds something of a sibling's that `watch` has not reported yet.
+   *
+   * A flag, because the comparison cannot be made where the report is. A mutate
+   * adopts the file before it writes, so when the sibling's change was absorbed by
+   * one of the fire-and-forget saves here, the file and the cache already agree by
+   * the time the watcher looks, and that change never reached the renderer.
+   */
+  private unreported = false
   /**
    * Every write, in order.
    *
@@ -91,6 +128,7 @@ export class ConfigStore {
       const parsed = parseConfig(raw)
       if (parsed) {
         this.cache = parsed
+        this.text = raw
         return this.cache
       }
       // Present and unreadable. Moved rather than overwritten: it is the only
@@ -112,22 +150,92 @@ export class ConfigStore {
     return this.cache.projects.find((p) => p.id === id)
   }
 
-  async save(config: Config): Promise<void> {
-    await this.enqueue(async () => {
-      await this.write(config)
-    })
-  }
-
   async mutate(fn: (config: Config) => Config): Promise<Config> {
     // The mutator runs *inside* the queue, so it clones a cache that already
     // includes every write ahead of it. Running it at call time (as this used
     // to) means two overlapping mutates both branch off the same base and the
     // second one's write drops the first one's change.
-    return this.enqueue(async () => {
-      const next = fn(structuredClone(this.cache))
-      await this.write(next)
-      return next
-    })
+    //
+    // The lock and the re-read are that same argument one level out. The queue
+    // orders this process's writes, and a sibling instance has a queue of its own,
+    // so the base has to be the file rather than the cache, read while nobody else
+    // can be writing it. A mutator is a function for exactly this reason: it can be
+    // applied to a config nobody had when it was written.
+    return this.enqueue(() =>
+      this.locked(async () => {
+        await this.adoptDisk()
+        const next = fn(structuredClone(this.cache))
+        await this.write(next)
+        return next
+      })
+    )
+  }
+
+  /**
+   * Tell `onChange` when a sibling instance changes the file.
+   *
+   * The directory rather than the file, because every write here is a rename
+   * *over* config.json and a watch on the file itself would stay on the replaced
+   * one. This instance's own writes come through as well, which is how a change
+   * absorbed by one of them gets reported (see `unreported`), and otherwise find
+   * the text they just wrote. In the queue so that it can never land between a
+   * mutate's re-read and its write.
+   */
+  watch(onChange: (config: Config) => void): void {
+    const name = 'config.json'
+    let timer: ReturnType<typeof setTimeout> | null = null
+    try {
+      watch(dirname(this.path), (_event, file) => {
+        if (file && file !== name) return
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          void this.enqueue(async () => {
+            await this.adoptDisk()
+            if (!this.unreported) return
+            this.unreported = false
+            onChange(this.cache)
+          })
+        }, 80)
+      })
+    } catch {
+      /* the windows simply stop agreeing until the next launch */
+    }
+  }
+
+  /**
+   * Replace the cache with the file, if the file differs. A file that does not
+   * parse is ignored: `load` deals with that, and it is no reason to discard a
+   * working copy halfway through a write.
+   */
+  private async adoptDisk(): Promise<void> {
+    const raw = await fs.readFile(this.path, 'utf-8').catch(() => null)
+    if (raw === null || raw === this.text) return
+    const parsed = parseConfig(raw)
+    if (!parsed) return
+    if (withoutWindows(parsed) !== withoutWindows(this.cache)) this.unreported = true
+    this.cache = parsed
+    this.text = raw
+  }
+
+  /** Run `op` holding the lock every instance writes under. */
+  private async locked<T>(op: () => Promise<T>): Promise<T> {
+    await fs.mkdir(dirname(this.path), { recursive: true })
+    const flags = constants.O_RDWR | constants.O_CREAT | O_EXLOCK
+    const giveUp = Date.now() + LOCK_WAIT_MS
+    let lock: fs.FileHandle | null = null
+    while (!lock) {
+      try {
+        lock = await fs.open(`${this.path}.lock`, flags)
+      } catch {
+        if (Date.now() > giveUp) break
+        await new Promise((r) => setTimeout(r, 10))
+      }
+    }
+    try {
+      return await op()
+    } finally {
+      await lock?.close().catch(() => {})
+    }
   }
 
   /** Run `op` after every write already queued, whether those succeeded or not. */
@@ -154,10 +262,11 @@ export class ConfigStore {
     // instance — which has its own queue and knows nothing about ours — from
     // resurrecting the interleaving through a shared path.
     const tmp = `${this.path}.${process.pid}.${this.tmpSeq++}.tmp`
+    const text = JSON.stringify(config, null, 2)
     try {
       // Atomic publish: write the whole document to a temp file, then rename it
       // over the real one, so a crash mid-write leaves config.json untouched.
-      await fs.writeFile(tmp, JSON.stringify(config, null, 2), 'utf-8')
+      await fs.writeFile(tmp, text, 'utf-8')
       await fs.rename(tmp, this.path)
       // **After** the rename, never before it. The cache is what every later
       // `get`, `getProject` and `mutate` clone reads, so adopting a config the
@@ -170,6 +279,7 @@ export class ConfigStore {
       // means the change is lost now, loudly and to the caller, rather than
       // quietly at the next start.
       this.cache = config
+      this.text = text
     } catch (err) {
       // A temp file left behind would never be cleaned up by anything else, and
       // it sits next to the config in the user's own AppData folder.

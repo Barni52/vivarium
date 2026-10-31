@@ -7,6 +7,7 @@ import { EFFORT_LEVELS, isEffort } from '@shared/models'
 import { isDiffBase, isHostProject } from '@shared/projects'
 import type { ChatEffort, ChatOpenResult, Config, Project, Session } from '@shared/types'
 import { bridgeDir } from './bridge'
+import { instanceSlot } from './instance'
 import {
   commitBranchChanges,
   formatStats,
@@ -55,8 +56,17 @@ import type { McpAttachments } from './mcpServers'
  * Fixed rather than ephemeral so a container shell can `curl` the server with
  * a number it already knows. Every chat is respawned with the app, so nothing
  * outlives a change to it.
+ *
+ * One port per running instance, this one and upward by slot (main/instance.ts):
+ * the token is the caller's identity and each server knows only its own, so a
+ * second instance sharing this port left its chats pointed at a server that
+ * answers every one of their calls 401. By slot rather than by trying the next
+ * free one because a slot is already exclusive, and the lone instance keeps the
+ * number a shell knows.
  */
-export const ORCHESTRATION_PORT = 47821
+const ORCHESTRATION_PORT = 47821
+
+const port = (): number => ORCHESTRATION_PORT + instanceSlot()
 
 /** A request body bigger than this is refused rather than buffered. */
 const MAX_BODY_BYTES = 1_000_000
@@ -118,8 +128,9 @@ const TOOLS = [
     name: 'list_chats',
     description:
       'List every project and the chats in it. Each chat has an id (the other chat tools take it), ' +
-      'a name, its model and a status: idle, working, waiting (blocked on a question to the user), or ' +
-      'offline (no process running; sending to it starts one if its project is available). ' +
+      'a name, its model and a status: idle, working, waiting (blocked on a question to the user), ' +
+      'offline (no process running; sending to it starts one if its project is available), or ' +
+      'elsewhere (running in another Vivarium window, so it cannot be messaged or stopped from here). ' +
       'Your own chat is marked self.',
     inputSchema: { type: 'object', properties: {} }
   },
@@ -340,7 +351,7 @@ export class OrchestrationServer {
       mcpServers: {
         vivarium: {
           type: 'http',
-          url: `http://${address}:${ORCHESTRATION_PORT}/mcp`,
+          url: `http://${address}:${port()}/mcp`,
           headers: { Authorization: `Bearer ${token}` }
         }
       }
@@ -363,9 +374,9 @@ export class OrchestrationServer {
     // were before. Said on main's stdout, which is where anyone debugging this
     // is already looking.
     server.on('error', (e) => {
-      console.error(`[vivarium] orchestration listener ${host}:${ORCHESTRATION_PORT}: ${e.message}`)
+      console.error(`[vivarium] orchestration listener ${host}:${port()}: ${e.message}`)
     })
-    server.listen(ORCHESTRATION_PORT, host)
+    server.listen(port(), host)
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -669,10 +680,19 @@ export class OrchestrationServer {
 
   /** null once the chat has a live process; otherwise why it cannot have one */
   private async ensureOpen(project: Project, session: Session): Promise<ToolResult | null> {
-    if (this.deps.chat.has(session.id)) return null
+    const { chat } = this.deps
+    // Asked after the open as well: a chat with no process here has not been
+    // found held yet, and an agent must never be what moves one. That stays the
+    // user's act, like starting a container.
+    const elsewhere = failure(
+      `"${session.name}" is running in another Vivarium window; the user has to move it here.`
+    )
+    if (chat.isElsewhere(session.id)) return elsewhere
+    if (chat.has(session.id)) return null
     const stopped = await this.checkStopped(project)
     if (stopped) return stopped
     const r = await this.deps.openChat(project, session)
+    if (chat.isElsewhere(session.id)) return elsewhere
     if (r.ok) return null
     const why = r.message ?? r.reason ?? 'unknown reason'
     return failure(`Could not open "${session.name}": ${why}.`)

@@ -24,6 +24,7 @@ import type {
 import { DEFAULT_EFFORT, isEffort, modelName, sameModel } from '@shared/models'
 import { isHostProject } from '@shared/projects'
 import type { DockerService } from './docker'
+import type { SessionLeases } from './instance'
 import {
   formatReplyLabel,
   wrapMessage,
@@ -637,6 +638,12 @@ type ShellEntry = Extract<ChatEntry, { kind: 'shell' }>
 interface Live {
   session: Session
   project: Project
+  /**
+   * Another running instance holds this conversation (main/instance.ts), so this
+   * is its transcript and nothing else: `proc` stays null, and every write path
+   * already refuses on that. Re-read by reopening.
+   */
+  elsewhere: boolean
   proc: ChildProcessWithoutNullStreams | null
   /** partial NDJSON line carried between stdout chunks */
   stdout: string
@@ -1060,6 +1067,8 @@ export class ChatService {
   private quitting = false
   /** see setOpenedHook */
   private onOpened: ((sessionId: string) => void) | null = null
+  /** see setLeases; null until ipc.ts wires it, which is before any open */
+  private leases: Pick<SessionLeases, 'claim' | 'release'> | null = null
 
   constructor(
     private docker: DockerService,
@@ -1109,6 +1118,28 @@ export class ChatService {
     this.onOpened = hook
   }
 
+  /** Which instance runs which conversation (main/instance.ts). */
+  setLeases(leases: Pick<SessionLeases, 'claim' | 'release'>): void {
+    this.leases = leases
+  }
+
+  /** Open here for reading only, because another instance runs it. */
+  isElsewhere(sessionId: string): boolean {
+    return !!this.live.get(sessionId)?.elsewhere
+  }
+
+  /**
+   * A sibling instance changed this session's name, so the arrangement
+   * `manualRename` describes applies to a rename no handler here saw. `autoName`
+   * still set means that instance's titler wrote it, which ends nothing.
+   */
+  adoptName(sessionId: string, name: string, autoName: boolean | undefined): void {
+    const l = this.live.get(sessionId)
+    if (!l || l.session.name === name) return
+    if (autoName) l.session = { ...l.session, name, autoName }
+    else this.manualRename(sessionId, name)
+  }
+
   /**
    * One control request to a chat's CLI, for main's other modules. Null when
    * the chat has no live process to ask.
@@ -1127,8 +1158,9 @@ export class ChatService {
    * What a live chat is doing, in the same three words the activity events
    * use; null when no process is running for it.
    */
-  findActivity(sessionId: string): 'idle' | 'working' | 'waiting' | null {
+  findActivity(sessionId: string): 'idle' | 'working' | 'waiting' | 'elsewhere' | null {
     const l = this.live.get(sessionId)
+    if (l?.elsewhere) return 'elsewhere'
     if (!l?.proc) return null
     if (l.pending.size > 0) return 'waiting'
     return l.turnRunning ? 'working' : 'idle'
@@ -1167,7 +1199,9 @@ export class ChatService {
   ): Promise<ChatOpenResult> {
     const existing = this.live.get(session.id)
     if (existing && !retry) return { ok: true, state: this.stateOf(existing) }
-    if (existing) this.close(session.id)
+    // Not `close`: a respawn keeps its lease, and between the two a sibling
+    // watching the directory would see the conversation free and take it.
+    if (existing) this.teardown(session.id)
 
     // A container chat checks docker and its container here; a host chat checks
     // that there is a `claude` to run (see ChatRuntime).
@@ -1175,9 +1209,14 @@ export class ChatService {
     const refused = await rt.ready()
     if (refused) return refused
 
+    // Ahead of the read, so a conversation handed over a moment ago is read
+    // knowing the holder has been told to stop writing it.
+    const elsewhere = this.leases ? !this.leases.claim(session.id) : false
+
     const l: Live = {
       session,
       project,
+      elsewhere,
       proc: null,
       stdout: '',
       entries: [],
@@ -1220,7 +1259,19 @@ export class ChatService {
     }
 
     const historyError = await this.readHistory(l)
-    if (!(await this.start(l))) return { ok: false, reason: 'spawn-failed' }
+    // Held by another instance: everything up to here, none of what follows. It
+    // goes in `live` with no process, which every path that talks to the CLI
+    // already treats as a chat that cannot be talked to.
+    if (elsewhere) {
+      this.live.set(session.id, l)
+      const state = this.stateOf(l)
+      if (historyError) state.historyError = historyError
+      return { ok: true, state }
+    }
+    if (!(await this.start(l))) {
+      this.leases?.release(session.id)
+      return { ok: false, reason: 'spawn-failed' }
+    }
     this.live.set(session.id, l)
     this.onOpened?.(session.id)
     // A process that has just been spawned is running nothing — nothing is even
@@ -1263,6 +1314,14 @@ export class ChatService {
   }
 
   close(sessionId: string): void {
+    this.teardown(sessionId)
+    // Outside it, and with or without a `live` entry: a process that exited on its
+    // own left `live` but not the lease, which it keeps until now so the retry
+    // gets this conversation back. A chat held elsewhere has no lease to drop.
+    this.leases?.release(sessionId)
+  }
+
+  private teardown(sessionId: string): void {
     const l = this.live.get(sessionId)
     if (!l) return
     // Before `closing`, which nothing after it may undo: whoever sent this chat
@@ -1305,7 +1364,8 @@ export class ChatService {
       effort: isEffort(l.session.effort) ? l.session.effort : DEFAULT_EFFORT,
       commands: l.commands,
       context: l.context,
-      blocking: [...l.pending.values()][0] ?? null
+      blocking: [...l.pending.values()][0] ?? null,
+      ...(l.elsewhere ? { elsewhere: true } : {})
     }
   }
 
@@ -3314,6 +3374,9 @@ export class ChatService {
   async setModel(sessionId: string, model: string): Promise<boolean> {
     const l = this.live.get(sessionId)
     if (!l) return true // persisted anyway; it applies as --model at the next spawn
+    // The instance holding it is what decides this, and its copy of the session
+    // would go on asserting the old pick (see holdModel). The picker is off here.
+    if (l.elsewhere) return false
     // A placeholder for a model this CLI cannot run (see ChatModelOption.disabled).
     // The menu never offers it, but the value arrives over IPC, and persisting it
     // would put it on `--model` at every later spawn.
@@ -3425,6 +3488,7 @@ export class ChatService {
     if (!isEffort(effort)) return false
     const l = this.live.get(sessionId)
     if (!l) return true
+    if (l.elsewhere) return false // the same reason as setModel
     // On the same snapshot `setModel` writes the model to, and before the send:
     // `l.session` is a snapshot from open time, and it is what a later spawn and
     // `stateOf` read the level out of.

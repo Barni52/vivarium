@@ -6,6 +6,7 @@ import { ACCENT, MONO, SESSION_TYPES, typeLabel } from '../theme'
 import { TypeIcon } from './Icons'
 import { Logo } from './Logo'
 import { Elapsed, formatElapsed } from './Elapsed'
+import { HeldElsewhere } from './HeldElsewhere'
 import { TerminalView } from './TerminalView'
 import { ChatView } from './chat/ChatView'
 
@@ -123,6 +124,7 @@ export function TerminalHost(): React.ReactElement {
   // not auto-start the container — see main/ipc.ts openSession). Nothing that
   // runs on the host has a container to be stopped.
   const selBlocked = !!sel && !selOnHost && !running
+  const heldAgent = useStore((s) => !!sel && sel.session.type === 'agent' && !!s.elsewhere[sel.session.id])
 
   return (
     <div
@@ -243,6 +245,24 @@ export function TerminalHost(): React.ReactElement {
           )
         )}
         {selBlocked && sel && <StoppedPlaceholder project={sel.project} session={sel.session} />}
+        {/* A chat says this over its composer, with its log still readable. An
+            agent's terminal has nothing to show until it has a pty, so here it is
+            the whole body — over the view, which has to stay mounted to open one. */}
+        {heldAgent && sel && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 40,
+              background: 'var(--bg)'
+            }}
+          >
+            <HeldElsewhere sessionId={sel.session.id} kind="agent" />
+          </div>
+        )}
         {!sel && <EmptyState />}
       </div>
     </div>

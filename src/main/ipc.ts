@@ -50,8 +50,16 @@ import { diffRefs, gitBranch, resolveDiffBase, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
 import { pasteImage, pruneClips, removeClips } from './clipboard'
 import { deleteHostTranscripts, resolveClaude, searchHostTranscripts } from './host'
+import { SessionLeases, instanceSlot, otherInstancesRunning } from './instance'
 import { UsageService } from './usage'
 import { ClaudeService } from './claude'
+
+/**
+ * How long a handover gives the old holder before this side reads the transcript
+ * and spawns: its watcher has to fire (60 ms coalesced) and its CLI has to die, so
+ * that the new `--resume` starts from a file nothing is still appending to.
+ */
+const HANDOVER_MS = 300
 
 /**
  * What a new chat is spawned on, until someone picks something else.
@@ -78,15 +86,29 @@ const DEFAULT_CHAT_MODEL = 'claude-opus-5-5'
 /**
  * `store` is passed in rather than made here: main/index.ts reads the saved
  * window size out of it before `new BrowserWindow`, so by the time this runs the
- * one store already exists and is loaded. Two instances would be two caches over
- * one file, each overwriting the other's writes.
+ * one store already exists and is loaded.
  */
 export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   const docker = new DockerService()
   const emit = (channel: string, payload: unknown): void => {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
   }
-  const pty = new PtyManager(docker, emit)
+  // Which instance runs which conversation (main/instance.ts). The two callbacks
+  // reach `chat` and `pty` only once a sibling has changed something, which is
+  // after both exist.
+  const leases = new SessionLeases(
+    (sessionId) => {
+      chat.close(sessionId)
+      pty.kill(sessionId)
+    },
+    (sessionId, held) => emit(CH.sessionHeld, { sessionId, held })
+  )
+  // An agent's conversation is free again the moment its terminal ends, however
+  // it ended. A shell never held one, and for it this does nothing.
+  const pty = new PtyManager(docker, (channel, payload) => {
+    if (channel === CH.ptyExit) leases.release((payload as { sessionId: string }).sessionId)
+    emit(channel, payload)
+  })
   const usage = new UsageService(docker)
   const claude = new ClaudeService(docker)
   // A freshly created container is born with whatever Claude Code the cached
@@ -161,6 +183,9 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     (five, seven) => usage.applyStreamLimits(five, seven)
   )
   ;(win as unknown as { __chat?: ChatService }).__chat = chat
+  chat.setLeases(leases)
+  leases.start()
+  ;(win as unknown as { __leases?: SessionLeases }).__leases = leases
 
   // ---- chat-to-chat orchestration -----------------------------------------
   // The MCP server every chat is handed (see main/orchestration.ts). What it
@@ -256,7 +281,12 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     }
     for (const id of ids) {
       if (!bridges.has(id)) {
-        const w = new BridgeWatcher(bridgeDir(id), (e) => emit(CH.agentActivity, e))
+        // The log belongs to the project, and every running instance tails it.
+        // Only the one running the agent speaks for it, or finishing a turn in
+        // one window would raise an attention badge in the other as well.
+        const w = new BridgeWatcher(bridgeDir(id), (e) => {
+          if (pty.has(e.sessionId)) emit(CH.agentActivity, e)
+        })
         bridges.set(id, w)
         void w.start()
       }
@@ -383,29 +413,34 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
 
   // ---- config / projects / sessions -------------------------------------
   ipcMain.handle(CH.loadConfig, async (): Promise<Config> => {
-    const cfg = await store.load()
+    const loaded = await store.load()
     // Backfill: give any pre-existing agent session (created before the
     // resume feature) a pinned Claude conversation id so it too gets
     // resume-on-reopen from now on. Persist only if something changed.
-    let changed = false
-    for (const p of cfg.projects) {
-      for (const s of p.sessions) {
-        if (s.type === 'agent' && !s.claudeSessionId) {
-          s.claudeSessionId = randomUUID()
-          changed = true
-        }
-      }
-    }
-    if (changed) await store.save(cfg)
+    const unpinned = (s: Session): boolean => s.type === 'agent' && !s.claudeSessionId
+    const cfg = loaded.projects.some((p) => p.sessions.some(unpinned))
+      ? await store.mutate((next) => {
+          for (const p of next.projects) {
+            for (const s of p.sessions) if (unpinned(s)) s.claudeSessionId = randomUUID()
+          }
+          return next
+        })
+      : loaded
     // A host project's side of the two things a container start does for its
     // project (see DockerService.start): fresh bridge files with an empty log,
     // and a clip prune. Launch is the host's equivalent of that moment for the
     // same reason — quitting killed every local pty, so no host agent can be
     // mid-turn holding a clip path or appending to the log. Ahead of
     // syncBridgeWatchers, so a watcher starting now starts on the empty file.
+    //
+    // **Unless another instance is running**, when host agents may be doing
+    // exactly that. Its log is left alone and a sibling's watcher keeps reading
+    // it, and a stale line is never replayed (BridgeWatcher starts at the end).
+    // The prune stays: a clip it removes is a week old.
+    const empty = !otherInstancesRunning()
     for (const p of cfg.projects) {
       if (!isHostProject(p)) continue
-      await ensureHostBridgeFiles(p.id, true).catch(() => {})
+      await ensureHostBridgeFiles(p.id, empty).catch(() => {})
       void pruneClips(p.id)
     }
     // Apply the persisted shared output folder to docker + start watching it.
@@ -874,6 +909,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
 
   // ---- shared output folder ---------------------------------------------
   let outputWatcher: FSWatcher | null = null
+  let outputFolder: string | undefined
   let watchDebounce: ReturnType<typeof setTimeout> | null = null
 
   function startOutputWatcher(): void {
@@ -886,6 +922,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       outputWatcher = null
     }
     const folder = store.get().sharedOutputFolder
+    outputFolder = folder
     if (!folder) return
     try {
       // recursive watch is supported on Windows; debounce to coalesce bursts.
@@ -1145,6 +1182,18 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       // Already live → just re-attach (renderer keeps the xterm).
       if (pty.has(sessionId)) return { ok: true }
 
+      // An agent is a conversation, and one conversation runs in one instance.
+      // Last of every check on both paths below, so that nothing which could still
+      // refuse the open holds a lease for it, and a refused spawn gives it back.
+      const spawn = async (): Promise<SpawnResult> => {
+        if (s.type === 'agent' && !leases.claim(sessionId)) {
+          return { ok: false, reason: 'elsewhere' }
+        }
+        if (await pty.spawn(s, p, cols, rows)) return { ok: true }
+        leases.release(sessionId)
+        return { ok: false, reason: 'spawn-failed' }
+      }
+
       // Nothing that runs on the host touches docker, so none of it waits at
       // the gate: a host shell anywhere, and everything in a host project.
       if (s.type === 'host-shell' || isHostProject(p)) {
@@ -1158,8 +1207,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
             message: 'claude.exe / claude.cmd not found on PATH or in ~/.local/bin'
           }
         }
-        const ok = await pty.spawn(s, p, cols, rows)
-        return ok ? { ok: true } : { ok: false, reason: 'spawn-failed' }
+        return spawn()
       }
 
       return openGate(async () => {
@@ -1176,11 +1224,20 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
         // Re-check: this open may have waited behind others at the gate, and a
         // sibling could have opened the same session in the meantime.
         if (pty.has(sessionId)) return { ok: true }
-        const ok = await pty.spawn(s, p, cols, rows)
-        return ok ? { ok: true } : { ok: false, reason: 'spawn-failed' }
+        return spawn()
       })
     }
   )
+
+  // "Move here". Taken by rewriting the lease, which the instance holding it hears
+  // about through its watcher. The renderer reopens on the event, by the same path
+  // a session a sibling let go of comes back by, so this has no open of its own.
+  ipcMain.handle(CH.sessionTake, async (_e, sessionId: string): Promise<void> => {
+    if (!store.get().projects.some((p) => p.sessions.some((s) => s.id === sessionId))) return
+    leases.take(sessionId)
+    await new Promise((r) => setTimeout(r, HANDOVER_MS))
+    emit(CH.sessionHeld, { sessionId, held: false })
+  })
 
   ipcMain.on(CH.writeSession, (_e, sessionId: string, data: string) => pty.write(sessionId, data))
   ipcMain.on(CH.resizeSession, (_e, sessionId: string, cols: number, rows: number) =>
@@ -1517,6 +1574,7 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     CH.appInfo,
     (): AppInfo => ({
       version: app.getVersion(),
+      instance: instanceSlot(),
       electron: process.versions.electron,
       chrome: process.versions.chrome,
       node: process.versions.node
@@ -1647,5 +1705,30 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     // directly, and a minimized window brought back by its taskbar/start-menu
     // entry is exactly the case that has to work.
     emit(CH.windowFocused, {})
+  })
+
+  // ---- other instances ----------------------------------------------------
+  // A sibling changed config.json (see ConfigStore.watch). What this process has
+  // built on the old copy follows it first and the renderer adopts it after, the
+  // same `config:pushed` an agent's change arrives by. The processes come first
+  // because a session deleted over there is not one to leave a CLI running for:
+  // its transcript is on its way out, and only this instance can close that.
+  store.watch((cfg) => {
+    const sessions = new Map(cfg.projects.flatMap((p) => p.sessions.map((s) => [s.id, s])))
+    for (const id of new Set([...chat.liveIds(), ...pty.liveIds()])) {
+      const s = sessions.get(id)
+      if (s) {
+        chat.adoptName(id, s.name, s.autoName)
+      } else {
+        chat.close(id)
+        pty.kill(id)
+      }
+    }
+    syncBridgeWatchers()
+    if (cfg.sharedOutputFolder !== outputFolder) {
+      docker.setSharedOutput(cfg.sharedOutputFolder)
+      startOutputWatcher()
+    }
+    emit(CH.configPushed, cfg)
   })
 }

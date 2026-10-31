@@ -254,6 +254,9 @@ function AppVersion(): React.ReactElement | null {
       }}
     >
       v{info.version}
+      {/* Which window this is, when there is more than one to mix up: the same
+          app beside the same app, down to the theme. Silent on the first. */}
+      {info.instance > 0 && ` · window ${info.instance + 1}`}
     </span>
   )
 }

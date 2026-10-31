@@ -26,6 +26,7 @@ import type {
   OutputNode,
   PtyDataEvent,
   PtyExitEvent,
+  SessionHeldEvent,
   SessionType,
   SpawnResult,
   TranscriptSearchResult,
@@ -261,6 +262,13 @@ const api = {
     ipcRenderer.on(CH.configPushed, h)
     return () => ipcRenderer.removeListener(CH.configPushed, h)
   },
+  onSessionHeld: (cb: (e: SessionHeldEvent) => void): (() => void) => {
+    const h = (_: unknown, p: SessionHeldEvent): void => cb(p)
+    ipcRenderer.on(CH.sessionHeld, h)
+    return () => ipcRenderer.removeListener(CH.sessionHeld, h)
+  },
+  /** Bring a session held by another instance here. `onSessionHeld` says when it is. */
+  sessionTake: (sessionId: string): Promise<void> => ipcRenderer.invoke(CH.sessionTake, sessionId),
   onWindowFocused: (cb: () => void): (() => void) => {
     const h = (): void => cb()
     ipcRenderer.on(CH.windowFocused, h)

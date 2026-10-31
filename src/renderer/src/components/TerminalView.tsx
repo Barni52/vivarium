@@ -167,6 +167,20 @@ export function TerminalView({
 }): React.ReactElement {
   const hostRef = React.useRef<HTMLDivElement>(null)
   const termRef = React.useRef<Terminal | null>(null)
+  /** see the effect below; the open itself closes over the terminal it writes to */
+  const reopenRef = React.useRef<(() => void) | null>(null)
+
+  // Another instance let go of this agent, or "Move here" took it from one. A
+  // mounted view is what opens a pty, and nothing remounts this one, so it has to
+  // be told. Only that edge: the opposite one arrives with a pty exit of its own.
+  const elsewhere = useStore((s) => !!s.elsewhere[session.id])
+  const wasElsewhere = React.useRef(elsewhere)
+  React.useEffect(() => {
+    const was = wasElsewhere.current
+    wasElsewhere.current = elsewhere
+    if (was && !elsewhere) reopenRef.current?.()
+  }, [elsewhere])
+
   // the guarded fit (see fitNow below) — every resize path goes through it
   const fitNowRef = React.useRef<() => void>(() => {})
   const visibleRef = React.useRef(visible)
@@ -585,6 +599,14 @@ export function TerminalView({
         setLive(session.id, true)
         return
       }
+      // Not a failure, and nothing to print into a terminal that may hold the
+      // scrollback of the agent this window just handed over. TerminalHost draws
+      // over the view, and the effect below reopens when the session comes back.
+      if (res.reason === 'elsewhere') {
+        setLive(session.id, false)
+        useStore.getState().setElsewhere(session.id, true)
+        return
+      }
       const transient = res.reason === 'container-stopped' || res.reason === 'spawn-failed'
       const stillUp = !!useStore.getState().states[project.id]?.running
       if (transient && stillUp && attempt < 3) {
@@ -612,6 +634,7 @@ export function TerminalView({
       }
     }
     void openPty(1)
+    reopenRef.current = (): void => void openPty(1)
 
     // debounced resize on element/window size changes (~100ms) — the TUI
     // corrupts without this (plan: Resize papercut).

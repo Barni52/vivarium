@@ -3,10 +3,15 @@ import { join } from 'path'
 import { existsSync } from 'fs'
 import { registerIpc } from './ipc'
 import { ConfigStore } from './config'
+import { claimInstance, type SessionLeases } from './instance'
 import { DEFAULT_THEME, THEME_BG } from '@shared/theme'
-import type { WindowBounds } from '@shared/types'
+import type { Config, WindowBounds } from '@shared/types'
 import type { PtyManager } from './pty'
 import type { ChatService } from './chat'
+
+// First, and at the top level rather than in `whenReady`: which Chromium profile
+// this process gets has to be settled before Electron opens one.
+const slot = claimInstance()
 
 // Optional smoke-test hook: when VIVARIUM_CDP_PORT is set, expose the Chrome
 // DevTools Protocol on that port and keep the window hidden so an automated
@@ -75,12 +80,30 @@ function restoreBounds(saved: WindowBounds | undefined): {
   return onScreen ? { ...size, x, y } : size
 }
 
+/**
+ * Where this instance last was. An extra one that has never been anywhere opens
+ * cascaded off the first, rather than exactly on top of the window it is there to
+ * be compared with, where it would look like nothing had opened at all.
+ */
+function savedBounds(cfg: Config): WindowBounds | undefined {
+  if (slot === 0) return cfg.window
+  const own = cfg.instanceWindows?.[slot]
+  if (own || !cfg.window) return own
+  const step = 32 * slot
+  return {
+    ...cfg.window,
+    x: (cfg.window.x ?? 0) + step,
+    y: (cfg.window.y ?? 0) + step,
+    maximized: false
+  }
+}
+
 function createWindow(store: ConfigStore): void {
   // Dev/taskbar icon. Packaged builds get their icon from the exe (electron-
   // builder reads build/icon.ico), which isn't inside the asar, so guard it.
   const iconPath = join(app.getAppPath(), 'build', 'icon.ico')
 
-  const saved = store.get().window
+  const saved = savedBounds(store.get())
 
   mainWindow = new BrowserWindow({
     ...restoreBounds(saved),
@@ -129,8 +152,10 @@ function createWindow(store: ConfigStore): void {
     const win = mainWindow
     if (!win || win.isDestroyed() || win.isMinimized()) return
     const { x, y, width, height } = win.getNormalBounds()
+    const bounds = { x, y, width, height, maximized: win.isMaximized() }
     void store.mutate((cfg) => {
-      cfg.window = { x, y, width, height, maximized: win.isMaximized() }
+      if (slot === 0) cfg.window = bounds
+      else cfg.instanceWindows = { ...cfg.instanceWindows, [slot]: bounds }
       return cfg
     })
   }
@@ -190,7 +215,10 @@ function createWindow(store: ConfigStore): void {
   })
 
   // electron-vite exposes the dev server URL in dev, the built file in prod.
-  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  // Only when unpackaged, because this is an inherited variable: a host shell in
+  // a dev run hands it down, and a packaged build launched from that shell would
+  // otherwise quietly show the renderer of the dev run it was launched from.
+  const devUrl = app.isPackaged ? undefined : process.env['ELECTRON_RENDERER_URL']
   if (devUrl) {
     mainWindow.loadURL(devUrl)
   } else {
@@ -220,12 +248,21 @@ app.whenReady().then(async () => {
 // process is a `docker exec -i` client, so ending it costs exactly what ending a
 // pty costs: an in-flight turn, and nothing else. The *conversation* is on the
 // creds volume and comes back on the next open.
+//
+// `mainWindow` rather than `getAllWindows()`, which is empty by now on the usual
+// path: closing the last window is what quits the app, so this runs after it has
+// gone. The object outlives the native window and still holds these.
 app.on('before-quit', () => {
-  for (const win of BrowserWindow.getAllWindows()) {
-    const w = win as unknown as { __pty?: PtyManager; __chat?: ChatService }
-    w.__pty?.killAll()
-    w.__chat?.closeAll()
-  }
+  const w = mainWindow as unknown as {
+    __pty?: PtyManager
+    __chat?: ChatService
+    __leases?: SessionLeases
+  } | null
+  w?.__pty?.killAll()
+  w?.__chat?.closeAll()
+  // Last, once nothing is left running them, and now rather than left to the
+  // pid check: this is what tells a sibling these sessions are free to bring up.
+  w?.__leases?.releaseAll()
 })
 
 app.on('window-all-closed', () => {

@@ -19,6 +19,7 @@ import { AGENT_PANEL_MIN, useStore } from '../../state/store'
 import { outputFileFrom } from '../../outputPaths'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
+import { HeldElsewhere } from '../HeldElsewhere'
 import {
   Check,
   Chevron,
@@ -267,6 +268,31 @@ export function ChatView({
     const t = setTimeout(() => void openChat(project.id, session.id, true), 900)
     return () => clearTimeout(t)
   }, [running, host, chat, openChat, project.id, session.id])
+
+  // Another instance took this chat, or let go of it (see SessionLeases). Either
+  // way the same reopen is the answer: taken, it reads the transcript with no
+  // process; free, it claims the conversation and spawns. A retry, because a
+  // plain open would be answered with the `Live` this one is replacing.
+  //
+  // Reconciled against what the last open got, not fired on `elsewhere` changing:
+  // an open finding a chat held is itself what first sets `elsewhere`, and every
+  // such chat would then read its whole transcript twice at launch.
+  const elsewhere = useStore((s) => !!s.elsewhere[session.id])
+  const settled = !!chat?.open && !chat.opening
+  const stale = settled && !!chat?.readOnly !== elsewhere
+  React.useEffect(() => {
+    if (stale && running) void openChat(project.id, session.id, true)
+  }, [stale, running, openChat, project.id, session.id])
+
+  // Nothing tells this side a chat held elsewhere has moved on, so it catches up
+  // when it is looked at: when selected, and when this window is come back to.
+  // On view rather than on a timer, because it is a whole transcript read.
+  React.useEffect(() => {
+    if (!elsewhere || !visible || !running) return
+    const refresh = (): void => void openChat(project.id, session.id, true)
+    refresh()
+    return window.vivarium.onWindowFocused(refresh)
+  }, [elsewhere, visible, running, openChat, project.id, session.id])
 
   React.useEffect(() => {
     void window.vivarium.chatMountTree(project.id).then(setTree)
@@ -1162,8 +1188,11 @@ export function ChatView({
         project={project}
         model={chat?.model ?? null}
         context={chat?.context ?? null}
-        live={!!chat?.open}
-        onModelClick={() => void openModelMenu()}
+        live={!!chat?.open && !elsewhere}
+        onModelClick={() => {
+          // The window holding it decides what it runs on (see ChatService.setModel).
+          if (!elsewhere) void openModelMenu()
+        }}
         onCloseModelMenu={() => setModelMenu(false)}
         modelMenu={modelMenu}
         models={models}
@@ -1403,7 +1432,7 @@ export function ChatView({
               </div>
             ))}
           </FindContext.Provider>
-          {entries.length === 0 && chat?.open && (
+          {entries.length === 0 && chat?.open && !elsewhere && (
             <div
               style={{
                 padding: '48px 10px',
@@ -1578,8 +1607,13 @@ export function ChatView({
             />
           )}
 
+          {elsewhere && <HeldElsewhere sessionId={session.id} kind="chat" />}
+
           <div
             style={{
+              // Hidden rather than unmounted: the draft is local to this view, and
+              // a chat that moves here should find what was being typed before.
+              display: elsewhere ? 'none' : undefined,
               padding: '14px 16px 12px',
               background: CHAT.composer,
               // --border-strong at rest and --accent on focus. The box you type

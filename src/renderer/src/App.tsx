@@ -27,6 +27,7 @@ export function App(): React.ReactElement {
   const handleAgentActivity = useStore((s) => s.handleAgentActivity)
   const handleChatEvent = useStore((s) => s.handleChatEvent)
   const adoptConfig = useStore((s) => s.adoptConfig)
+  const setElsewhere = useStore((s) => s.setElsewhere)
   const acknowledgeSelected = useStore((s) => s.acknowledgeSelected)
   const requestQuit = useStore((s) => s.requestQuit)
   const dialog = useStore((s) => s.dialog)
@@ -119,6 +120,7 @@ export function App(): React.ReactElement {
     // are sidebar state, and they have to land for chats that are not the one
     // on screen.
     const offPushed = window.vivarium.onConfigPushed((c) => adoptConfig(c))
+    const offHeld = window.vivarium.onSessionHeld((e) => setElsewhere(e.sessionId, e.held))
     // Bringing the app to the front means looking at the selected session, so its
     // attention flag (and its share of the taskbar number) is answered for.
     const offFocus = window.vivarium.onWindowFocused(() => acknowledgeSelected())
@@ -134,11 +136,13 @@ export function App(): React.ReactElement {
       offActivity()
       offChat()
       offPushed()
+      offHeld()
       offFocus()
       offQuit()
     }
   }, [
     init,
+    setElsewhere,
     refreshStates,
     refreshBranches,
     refreshOutputTree,

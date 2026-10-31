@@ -309,6 +309,13 @@ export interface Config {
    * validates rather than trusts (see `restoreBounds` in main/index.ts).
    */
   window?: WindowBounds
+  /**
+   * The same for extra instances, by slot (see main/instance.ts); `window` stays
+   * the first one's. Kept apart so that a test build opened beside the app does
+   * not move the app, and ignored by a sibling's config watcher along with
+   * `window` itself.
+   */
+  instanceWindows?: Record<string, WindowBounds>
 }
 
 /**
@@ -603,6 +610,8 @@ export interface TranscriptSearchResult {
 /** Versions shown on the title-bar chip — enough to paste into a bug report. */
 export interface AppInfo {
   version: string
+  /** Which running instance this is, 0 for the first (see main/instance.ts). */
+  instance: number
   electron: string
   chrome: string
   node: string
@@ -624,6 +633,12 @@ export interface SpawnResult {
   /** Present when ok === false, e.g. 'container-stopped' | 'docker-missing'. */
   reason?: string
   message?: string
+}
+
+/** Whether another running instance holds a session's conversation. */
+export interface SessionHeldEvent {
+  sessionId: string
+  held: boolean
 }
 
 /** Payload streamed from a pty to the renderer. */
@@ -1112,6 +1127,8 @@ export interface ChatState {
   blocking: ChatBlockingCard | null
   /** §12.3: the history read failed. The chat still works — this is a banner, not a takeover. */
   historyError?: string
+  /** Running in another instance: this is its transcript, with no process here. */
+  elsewhere?: boolean
 }
 
 export interface ChatOpenResult {

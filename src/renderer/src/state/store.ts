@@ -197,6 +197,12 @@ export interface ChatSessionState {
   reason?: string
   /** the history read failed — a banner above the log, cleared only by a good read */
   historyError?: string
+  /**
+   * The last open found another instance holding it, so this is the transcript
+   * with no process behind it. What that open *got*, against `elsewhere`, which
+   * is who holds it now; ChatView reopens when the two disagree.
+   */
+  readOnly?: boolean
   /** crash / timeout, each offering the one Retry there is */
   error?: ChatErrorInfo
   /** full tool bodies fetched on expand, by entry id */
@@ -360,6 +366,13 @@ interface AppState {
   chatZoom: number
   /** session ids that currently have a live pty */
   live: Record<string, boolean>
+  /**
+   * Sessions another running instance holds (see SessionLeases in main/instance.ts).
+   * A chat here is its transcript, read-only; an agent here is no terminal at all.
+   * Its going away is what reopens the session here, for a handover and for the
+   * other window simply closing alike.
+   */
+  elsewhere: Record<string, true>
   activity: Record<string, AgentActivity>
   /**
    * When each agent's current state began (epoch ms) — a turn start for
@@ -516,6 +529,9 @@ interface AppState {
   zoomChat: (delta: number) => void
   resetChatZoom: () => void
   setLive: (sessionId: string, live: boolean) => void
+  setElsewhere: (sessionId: string, held: boolean) => void
+  /** "Move here": bring a session another instance holds into this window. */
+  takeSession: (sessionId: string) => void
   /** `at` (from a hook event) keeps the turn clock on main's timestamp */
   setActivity: (sessionId: string, a: AgentActivity, at?: number) => void
   /** The user answered: leave 'waiting' for 'working' without losing the turn. */
@@ -722,6 +738,7 @@ export const useStore = create<AppState>((set, get) => ({
   terminalFontSize: 13,
   chatZoom: 1,
   live: {},
+  elsewhere: {},
   activity: {},
   agentSince: {},
   agentWaitingSince: {},
@@ -1154,6 +1171,19 @@ export const useStore = create<AppState>((set, get) => ({
   },
   setLive: (sessionId, live) => set((s) => ({ live: { ...s.live, [sessionId]: live } })),
 
+  setElsewhere: (sessionId, held) =>
+    set((s) => {
+      // Told twice as often as it changes (an open's answer and main's event), and
+      // a fresh object each time would re-run every view reading the map.
+      if (!!s.elsewhere[sessionId] === held) return s
+      const elsewhere = { ...s.elsewhere }
+      if (held) elsewhere[sessionId] = true
+      else delete elsewhere[sessionId]
+      return { elsewhere }
+    }),
+
+  takeSession: (sessionId) => void window.vivarium.sessionTake(sessionId),
+
   setActivity: (sessionId, a, at) =>
     set((s) => {
       // Only stamp real transitions. A pty exit reports 'idle' for an agent that
@@ -1405,6 +1435,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }))
     const res = await window.vivarium.chatOpen(projectId, sessionId, retry)
+    if (res.ok) get().setElsewhere(sessionId, !!res.state?.elsewhere)
     set((s) => {
       const base = s.chats[sessionId] ?? emptyChat()
       if (!res.ok || !res.state) {
@@ -1429,7 +1460,8 @@ export const useStore = create<AppState>((set, get) => ({
             open: true,
             opening: false,
             reason: undefined,
-            historyError: st.historyError
+            historyError: st.historyError,
+            readOnly: !!st.elsewhere
           }
         },
         // A chat with a live process counts as live, exactly as a pty does: it is
@@ -1845,6 +1877,7 @@ export const useStore = create<AppState>((set, get) => ({
     const gone = [
       ...new Set([
         ...Object.keys(s.live),
+        ...Object.keys(s.elsewhere),
         ...Object.keys(s.notifications),
         ...Object.keys(s.agentSince),
         ...Object.keys(s.agentWaitingSince),
@@ -1863,6 +1896,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       config,
       live: without(s.live),
+      elsewhere: without(s.elsewhere) as Record<string, true>,
       notifications: without(s.notifications),
       agentSince: without(s.agentSince),
       agentWaitingSince: without(s.agentWaitingSince),

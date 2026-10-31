@@ -11,13 +11,19 @@ export const CH = {
   renameSession: 'session:rename',
   removeSession: 'session:remove',
   // A config change *main* made rather than the renderer — the chat auto-titler
-  // naming a chat, and another chat creating or deleting one through the
-  // orchestration server. The one config channel that pushes: every other
+  // naming a chat, another chat creating or deleting one through the
+  // orchestration server, and a sibling instance changing config.json. The one
+  // config channel that pushes: every other
   // config change starts in the renderer and adopts the Config it gets back,
   // but these start in main, so main is the writer and the renderer adopts.
   // The whole Config rides along, exactly like an invoke's return value, so the
   // store keeps having one way to take a config update.
   configPushed: 'config:pushed',
+  // Another running instance took or let go of a session's conversation, and
+  // asking for one back (see SessionLeases in main/instance.ts). Started in main,
+  // like the channel above: a sibling instance is not the renderer.
+  sessionHeld: 'session:held',
+  sessionTake: 'session:take',
   // The chat window's zoom factor. A setting rather than a chat channel: it is
   // global to the app and outlives every session, so it is written straight to
   // config.json and read back at launch.

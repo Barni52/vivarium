@@ -179,7 +179,8 @@ export async function ensureBridgeFiles(projectId: string): Promise<void> {
  *
  * The container rule is "rewrite before every start", and a host project has no
  * start — so this runs at app launch (`truncate`, the one moment no host agent
- * can be alive, since quitting kills every local pty) and again before each
+ * can be alive, since quitting kills every local pty, as long as this is the only
+ * instance running: ipc.ts asks) and again before each
  * agent spawn, where it writes **only what differs**. That second half is not
  * an optimisation: every host agent of every host project spawns at once when
  * the app comes up, and an unconditional writeFile truncates the very file a
