@@ -66,3 +66,20 @@ export function canMoveSession(
   if (converses && (isHostProject(from) || isHostProject(to))) return false
   return true
 }
+
+/** The base a diff is taken against when a repo offers nothing better. */
+export const DEFAULT_DIFF_BASE = 'origin/master'
+
+/**
+ * Whether `base` may go to `git diff` as `<base>...HEAD`. It is an argument of
+ * its own (no shell), but git reads one that starts with `-` as an *option* —
+ * `--output=<file>` among them — and an agent can pass it, so only the
+ * characters a ref name is written with get through.
+ *
+ * In `@shared` for the reason at the top of this file: the compare popover
+ * refuses a bad ref as you type it, and main refuses it again because the value
+ * arrives over IPC and through the `write_branch_diff` tool.
+ */
+export function isDiffBase(base: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/@^~-]*$/.test(base) && !base.includes('..')
+}

@@ -2,7 +2,8 @@ import { readFileSync, statSync } from 'fs'
 import { mkdir, writeFile } from 'fs/promises'
 import { join, resolve, relative, isAbsolute, sep } from 'path'
 import { execFile } from 'child_process'
-import type { Project, DiffResult } from '@shared/types'
+import { DEFAULT_DIFF_BASE, isDiffBase } from '@shared/projects'
+import type { Config, DiffRefs, DiffResult, DiffStats, Project } from '@shared/types'
 
 // Resolve the current git branch for a working directory by reading .git/HEAD
 // directly — no git binary required. Handles the common cases: a normal repo,
@@ -53,17 +54,34 @@ function run(cmd: string, args: string[], cwd: string): Promise<RunResult> {
   })
 }
 
-/** The base a diff is taken against when nothing else was picked. */
-export const DEFAULT_DIFF_BASE = 'origin/master'
-
 /**
- * Whether `base` may go to `git diff` as `<base>...HEAD`. It is an argument of
- * its own (no shell), but git reads one that starts with `-` as an *option* —
- * `--output=<file>` among them — and an agent can now pass it, so only the
- * characters a ref name is written with get through.
+ * The base for a project with nothing picked: what the repo itself calls its
+ * default, then the old global setting, then `origin/master`.
+ *
+ * `origin/HEAD` is a local ref that `git clone` sets and `git init` plus
+ * `git remote add` does not, so it can be absent from a perfectly good repo.
  */
-export function isDiffBase(base: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._/@^~-]*$/.test(base) && !base.includes('..')
+async function fallbackBase(project: Project, config: Config): Promise<string> {
+  const head = await run('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], project.basePath)
+  const ref = head.code === 0 ? head.stdout.trim() : ''
+  return ref && isDiffBase(ref) ? ref : config.diffBase || DEFAULT_DIFF_BASE
+}
+
+/** The base this project's diff is taken against, for the UI and for agents alike. */
+export async function resolveDiffBase(project: Project, config: Config): Promise<string> {
+  return project.diffBase || fallbackBase(project, config)
+}
+
+/** The compare popover's reading of the repo. Run when it opens, never polled. */
+export async function diffRefs(project: Project, config: Config): Promise<DiffRefs> {
+  const listed = await run('git', ['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], project.basePath)
+  // `refs/remotes/origin/HEAD` shortens to plain `origin` on current git and to
+  // `origin/HEAD` on older ones. Neither is a branch anybody would pick.
+  const remotes = listed.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.includes('/') && !l.endsWith('/HEAD') && isDiffBase(l))
+  return { fallback: await fallbackBase(project, config), remotes }
 }
 
 /**
@@ -122,6 +140,7 @@ export async function writeBranchDiff(
 
   // 3. Build + run the diff (or note that nothing is in scope).
   let body: string
+  let stats: DiffStats | undefined
   if (hadMounts && specs.length === 0) {
     body = 'No mounted folders are inside this repository; nothing to diff.'
   } else {
@@ -132,6 +151,7 @@ export async function writeBranchDiff(
       body = `git diff failed:\n${diff.stderr.trim() || 'unknown error'}`
     } else {
       body = diff.stdout.trim() ? diff.stdout : 'No differences.'
+      stats = await numstat(cwd, ['diff', '--numstat', ...args.slice(1)])
     }
   }
 
@@ -142,6 +162,7 @@ export async function writeBranchDiff(
     `# repo:    ${cwd}`,
     `# branch:  ${branch}  vs  ${base}`,
     `# scope:   ${scope}`,
+    stats ? `# stat:    ${formatStats(stats)}` : null,
     `# generated: ${new Date().toISOString()}`,
     fetchNote ? `# note:    ${fetchNote}` : null,
     ''
@@ -154,7 +175,33 @@ export async function writeBranchDiff(
   const file = join(dir, 'changes.txt')
   await mkdir(dir, { recursive: true })
   await writeFile(file, `${header}\n${body}\n`, 'utf8')
-  return { ok: true, message: file, folder }
+  return { ok: true, message: file, folder, stats }
+}
+
+/**
+ * Sum `git diff --numstat`. A second git run rather than counting `+` lines in
+ * the body, because this is exact where a count has to guess at a line that
+ * merely starts with `+++`, and a binary file (`-  -  path`) still counts as a
+ * file. It goes in the header so the preview can read the true size of a diff
+ * too large to load whole.
+ */
+async function numstat(cwd: string, args: string[]): Promise<DiffStats | undefined> {
+  const r = await run('git', args, cwd)
+  if (r.code !== 0) return undefined
+  const stats: DiffStats = { added: 0, removed: 0, files: 0 }
+  for (const line of r.stdout.split('\n')) {
+    const [added, removed] = line.split('\t')
+    if (added === undefined || removed === undefined) continue
+    stats.files++
+    stats.added += Number(added) || 0
+    stats.removed += Number(removed) || 0
+  }
+  return stats
+}
+
+/** The size of a diff in the one spelling the header and the tool answer share. */
+export function formatStats(s: DiffStats): string {
+  return `+${s.added} −${s.removed} · ${s.files} ${s.files === 1 ? 'file' : 'files'}`
 }
 
 export interface CommitOutcome {

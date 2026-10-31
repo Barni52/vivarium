@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { ChatEntry, ChatToolStatus, ChatTurnTokens } from '@shared/types'
 import { CHAT, CHAT_TEXT as TYPE, MONO } from '../../theme'
 import { Hi } from './find'
+import { LineCounts } from '../LineCounts'
 import { Elapsed } from '../Elapsed'
 import { Md, Preview, clock } from './Markdown'
 import { langForPath, tokenize } from './highlight'
@@ -224,6 +225,12 @@ export interface LogHandlers {
   subagents: Record<string, ChatEntry[]>
   /** the one Retry, offered by a crash / timeout row and by the read banner */
   onRetry: () => void
+  /** the Windows path of a file an agent named, if it is in the output folder */
+  outputFile: (seen: string) => string | null
+  /** clicking a file always opens it, in its own app */
+  onOpenOutput: (abs: string) => void
+  /** …and Preview is the separate, smaller thing beside it */
+  onPreviewOutput: (abs: string) => void
 }
 
 /**
@@ -824,7 +831,7 @@ function Thumb({
  * own handlers. The one that matters is the log's `onContextMenu`, which would
  * open its Copy/Find menu *under* this scrim, so the right-click stops here.
  */
-function ImageViewer({ src, onClose }: { src: string; onClose: () => void }): React.ReactElement {
+export function ImageViewer({ src, onClose }: { src: string; onClose: () => void }): React.ReactElement {
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return
@@ -1310,9 +1317,20 @@ function ToolCard({
     setChoice(!open)
   }
 
+  /**
+   * A file an agent left in the output folder. The card then behaves like a row
+   * of the output tree: clicking it opens the file, always, with Preview as a
+   * separate link. Show/hide moves onto its own label so the body stays
+   * reachable.
+   */
+  const outputFile = entry.file && entry.status === 'ok' ? handlers.outputFile(entry.file) : null
+
   return (
     <Line at={entry.at} role={entry.role} color={CHAT.dim2}>
-      <Card onClick={expandable ? toggle : undefined}>
+      <Card
+        onClick={outputFile ? () => handlers.onOpenOutput(outputFile) : expandable ? toggle : undefined}
+        title={outputFile ?? undefined}
+      >
         <span
           style={{
             color: CHAT.text,
@@ -1345,8 +1363,37 @@ function ToolCard({
             <Hi>{entry.result}</Hi>
           </span>
         )}
+        {entry.status !== 'running' && entry.counts && <LineCounts counts={entry.counts} />}
+        {outputFile && (
+          <span
+            className="vlink"
+            title="Preview in the Output panel"
+            onClick={(e) => {
+              e.stopPropagation()
+              handlers.onPreviewOutput(outputFile)
+            }}
+            style={{ marginLeft: 'auto', flex: 'none', fontSize: TYPE.gutter, color: CHAT.claude }}
+          >
+            Preview
+          </span>
+        )}
         {expandable && (
-          <span style={{ marginLeft: 'auto', flex: 'none', fontSize: TYPE.gutter, color: CHAT.dim3 }}>
+          <span
+            onClick={
+              outputFile
+                ? (e) => {
+                    e.stopPropagation()
+                    toggle()
+                  }
+                : undefined
+            }
+            style={{
+              marginLeft: outputFile ? undefined : 'auto',
+              flex: 'none',
+              fontSize: TYPE.gutter,
+              color: CHAT.dim3
+            }}
+          >
             {/* A card that closed itself says how much it is holding, or the
                 size rule reads as the app having lost the output. `+` where main
                 clipped the body: this counts what arrived, not what exists. */}

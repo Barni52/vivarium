@@ -1,7 +1,7 @@
 import { app, ipcMain, dialog, BrowserWindow, clipboard, shell, nativeImage } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { watch, type FSWatcher } from 'node:fs'
-import { readdir, mkdir, stat } from 'node:fs/promises'
+import { open, readdir, readFile, mkdir, stat } from 'node:fs/promises'
 import { join, resolve, sep, extname, isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { CH } from '@shared/ipc'
@@ -21,10 +21,12 @@ import type {
   ClaudeUpdateResult,
   Config,
   ContainerState,
+  DiffRefs,
   DiffResult,
   DockerStatus,
   MountNode,
   NewProjectInput,
+  OutputFileRead,
   OutputNode,
   Project,
   Session,
@@ -37,14 +39,14 @@ import type {
   VolumeReport
 } from '@shared/types'
 import { DEFAULT_EFFORT } from '@shared/models'
-import { canMoveSession, isHostProject, projectHolds } from '@shared/projects'
+import { canMoveSession, isDiffBase, isHostProject, projectHolds } from '@shared/projects'
 import { ConfigStore } from './config'
 import { DockerService, SNIPPET_AFTER, SNIPPET_BEFORE, snippetOf } from './docker'
 import { BridgeWatcher, bridgeDir, ensureHostBridgeFiles, removeBridge } from './bridge'
 import { ChatService } from './chat'
 import { McpAttachments } from './mcpServers'
 import { OrchestrationServer } from './orchestration'
-import { DEFAULT_DIFF_BASE, gitBranch, writeBranchDiff } from './git'
+import { diffRefs, gitBranch, resolveDiffBase, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
 import { pasteImage, pruneClips, removeClips } from './clipboard'
 import { deleteHostTranscripts, resolveClaude, searchHostTranscripts } from './host'
@@ -764,15 +766,32 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     const p = cfg.projects.find((x) => x.id === projectId)
     if (!p) return { ok: false, message: 'not-found' }
     if (!cfg.sharedOutputFolder) return { ok: false, message: 'no-output' }
-    return writeBranchDiff(p, cfg.sharedOutputFolder, cfg.diffBase || DEFAULT_DIFF_BASE)
+    return writeBranchDiff(p, cfg.sharedOutputFolder, await resolveDiffBase(p, cfg))
   })
 
-  ipcMain.handle(CH.setDiffBase, async (_e, value: string): Promise<Config> => {
-    return store.mutate((cfg) => {
-      cfg.diffBase = value.trim() || undefined
-      return cfg
-    })
+  ipcMain.handle(CH.diffRefs, async (_e, projectId: string): Promise<DiffRefs | null> => {
+    const cfg = store.get()
+    const p = cfg.projects.find((x) => x.id === projectId)
+    return p ? diffRefs(p, cfg) : null
   })
+
+  // The whole picture at once rather than one call each for pick, add and
+  // remove: adding a ref also selects it, and removing the selected one also
+  // clears it, so the two fields only ever make sense as a pair. `isDiffBase`
+  // again here because these strings reach `git diff` on the host.
+  ipcMain.handle(
+    CH.setDiffBase,
+    async (_e, projectId: string, selected: string | null, saved: string[]): Promise<Config> => {
+      return store.mutate((cfg) => {
+        const p = cfg.projects.find((x) => x.id === projectId)
+        if (!p) return cfg
+        p.diffBase = selected && isDiffBase(selected) ? selected : undefined
+        const kept = [...new Set(saved)].filter(isDiffBase)
+        p.diffBases = kept.length ? kept : undefined
+        return cfg
+      })
+    }
+  )
 
   // ---- docker / containers ----------------------------------------------
   ipcMain.handle(CH.dockerStatus, async (): Promise<DockerStatus> => {
@@ -898,6 +917,30 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   /** Whole tree, so a wide shallow explosion is bounded as well as a deep one. */
   const OUTPUT_MAX_NODES = 4000
 
+  /** What the preview reads of a text file. Past this it says so and offers the real app. */
+  const OUTPUT_READ_LIMIT = 2 * 1024 * 1024
+  /**
+   * A picture has to arrive whole, so it gets its own larger limit, and past
+   * that it is simply a file with no preview. There is no file URL to hand the
+   * renderer, so the bytes cross IPC as a data URL.
+   */
+  const OUTPUT_IMAGE_LIMIT = 16 * 1024 * 1024
+  const OUTPUT_IMAGE_TYPES: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.ico': 'image/x-icon',
+    // Shown through <img>, where an SVG's scripts do not run.
+    '.svg': 'image/svg+xml'
+  }
+  /** Containers, which can start with thousands of readable bytes and are never text. */
+  const OUTPUT_OPAQUE = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.pdf', '.docx', '.xlsx', '.pptx'])
+  /** How far in a NUL byte is looked for, git's own test for "this is binary". */
+  const OUTPUT_SNIFF = 8000
+
   async function scanTree(dir: string, depth: number, budget: { left: number }): Promise<OutputNode[]> {
     if (depth > OUTPUT_MAX_DEPTH || budget.left <= 0) return []
     let entries
@@ -950,6 +993,54 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   ipcMain.handle(CH.outputTree, async (): Promise<OutputNode[]> => {
     const folder = store.get().sharedOutputFolder
     return folder ? scanTree(folder, 0, { left: OUTPUT_MAX_NODES }) : []
+  })
+
+  /** `abs` resolved, if it is strictly inside the output folder. */
+  function outputTarget(abs: string): string | null {
+    const folder = store.get().sharedOutputFolder
+    if (!folder) return null
+    const target = resolve(abs)
+    return target.startsWith(resolve(folder) + sep) ? target : null
+  }
+
+  ipcMain.handle(CH.readOutputFile, async (_e, abs: string): Promise<OutputFileRead> => {
+    const target = outputTarget(abs)
+    if (!target) return { kind: 'missing' }
+    try {
+      const info = await stat(target)
+      if (!info.isFile()) return { kind: 'missing' }
+      const size = info.size
+      const ext = extname(target).toLowerCase()
+      const mime = OUTPUT_IMAGE_TYPES[ext]
+      if (mime) {
+        if (size > OUTPUT_IMAGE_LIMIT) return { kind: 'none', size }
+        const bytes = await readFile(target)
+        return { kind: 'image', dataUrl: `data:${mime};base64,${bytes.toString('base64')}`, size }
+      }
+      if (OUTPUT_OPAQUE.has(ext)) return { kind: 'none', size }
+      // Only the bytes that will be shown: this can be a 48 MB log, and the
+      // watcher re-reads it on every change while it is open.
+      const want = Math.min(size, OUTPUT_READ_LIMIT)
+      const buffer = Buffer.alloc(want)
+      const file = await open(target, 'r')
+      const { bytesRead } = await file.read(buffer, 0, want, 0).finally(() => file.close())
+      const bytes = buffer.subarray(0, bytesRead)
+      if (bytes.subarray(0, OUTPUT_SNIFF).includes(0)) return { kind: 'none', size }
+      const truncated = size > OUTPUT_READ_LIMIT
+      // Cut at the last whole line, or the limit can land inside a multibyte
+      // character and the preview ends in a replacement glyph.
+      const end = truncated ? bytes.lastIndexOf(0x0a) + 1 : bytes.length
+      return { kind: 'text', text: bytes.subarray(0, end || bytes.length).toString('utf8'), size, truncated }
+    } catch {
+      return { kind: 'missing' }
+    }
+  })
+
+  ipcMain.handle(CH.revealOutputFile, async (_e, abs: string): Promise<string> => {
+    const target = outputTarget(abs)
+    if (!target) return 'outside'
+    shell.showItemInFolder(target)
+    return ''
   })
 
   ipcMain.handle(CH.openOutputFile, async (_e, abs: string): Promise<string> => {

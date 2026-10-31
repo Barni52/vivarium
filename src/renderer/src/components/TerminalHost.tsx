@@ -162,12 +162,35 @@ export function TerminalHost(): React.ReactElement {
           >
             <TypeIcon type={sel.session.type} size={14} />
           </span>
-          <span style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--fg)' }}>
+          {/* Ellipsised rather than wrapped: this row is 34px tall and the Output
+              panel can leave it 320 wide. */}
+          <span
+            style={{
+              minWidth: 0,
+              fontSize: 12.5,
+              fontWeight: 500,
+              color: 'var(--fg)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}
+          >
             {sel.session.name}
           </span>
-          <span style={{ fontSize: 11.5, color: 'var(--dim)' }}>{sel.project.name}</span>
+          <span
+            style={{
+              minWidth: 0,
+              fontSize: 11.5,
+              color: 'var(--dim)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}
+          >
+            {sel.project.name}
+          </span>
           <div style={{ flex: 1 }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none', whiteSpace: 'nowrap' }}>
             {sel.session.type === 'agent' && <AgentStatus sessionId={sel.session.id} />}
             <span
               style={{

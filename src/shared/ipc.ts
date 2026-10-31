@@ -32,12 +32,15 @@ export const CH = {
   // git
   projectBranches: 'git:branches',
   projectDiff: 'git:diff',
+  diffRefs: 'git:diff-refs',
   setDiffBase: 'git:set-diff-base',
 
   // shared output folder
   setSharedOutput: 'output:set-folder',
   outputTree: 'output:tree',
   openOutputFile: 'output:open-file',
+  readOutputFile: 'output:read-file',
+  revealOutputFile: 'output:reveal-file',
   openOutputFolder: 'output:open-folder',
   deleteOutputFile: 'output:delete-file',
   outputChanged: 'output:changed',

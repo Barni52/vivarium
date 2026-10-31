@@ -15,7 +15,9 @@ import type {
   ChatTodo,
   ClaudeStatus,
   ClaudeUpdateResult,
+  ChatLineCounts,
   Config,
+  DiffResult,
   ContainerState,
   DockerStatus,
   ImageVariant,
@@ -29,6 +31,7 @@ import type {
   VolumeInfo
 } from '@shared/types'
 import { behindIds } from '../claude'
+import { outputPathForChat } from '../outputPaths'
 import { DEFAULT_EFFORT } from '@shared/models'
 import { canMoveSession, isHostProject, projectHolds, sessionTypesFor } from '@shared/projects'
 import {
@@ -55,6 +58,7 @@ export type DialogKind =
   | 'addProject'
   | 'settings'
   | 'addSession'
+  | 'diffBase'
   | 'confirmKill'
   | 'confirmMove'
   | 'confirmDeleteProject'
@@ -290,9 +294,25 @@ interface AppState {
   docker: DockerStatus | null
   outputTree: OutputNode[]
   outputExpanded: Record<string, boolean>
-  outputCollapsed: boolean
-  /** user-dragged height of the shared-output panel body (px, session-only like sidebarWidth) */
-  outputHeight: number
+  /**
+   * The Output panel, right of the window. It shares the agent panel's slot, one
+   * open at a time and the last one opened wins: this is the half of that rule
+   * in the store, and `ChatView` holds the other.
+   */
+  outputOpen: boolean
+  /** The file the panel is previewing, or null for the tree. */
+  outputPreview: string | null
+  /** Dragged width (px), or null for the default. Session-only like the sidebar's. */
+  outputPanelWidth: number | null
+  /** The short-lived line at the foot of the panel. */
+  outputNotice: { text: string; counts?: ChatLineCounts } | null
+  /**
+   * Text on its way into a chat's composer. The draft is local to `ChatView`, so
+   * the panel leaves it here and that view takes it.
+   */
+  composerInsert: { sessionId: string; text: string } | null
+  /** Where the compare popover is open, if it is. */
+  diffBaseTarget: { projectId: string; top: number; left: number } | null
   selectedSessionId: string | null
   expanded: Record<string, boolean>
   sidebarWidth: number
@@ -461,12 +481,25 @@ interface AppState {
   openOutputFolder: () => void
   deleteOutputPath: (abs: string) => Promise<void>
   toggleOutputDir: (path: string) => void
+  collapseOutputTree: () => void
   toggleOutputPanel: () => void
-  setOutputHeight: (n: number) => void
+  closeOutputPanel: () => void
+  setOutputPanelWidth: (n: number) => void
+  setOutputNotice: (notice: AppState['outputNotice']) => void
+  previewOutput: (abs: string) => void
+  closeOutputPreview: () => void
+  revealOutput: (abs: string) => void
+  copyOutputPath: (abs: string) => void
+  /** Can a file be referenced right now? Only into a chat that is on screen. */
+  canReferenceOutput: () => boolean
+  referenceOutput: (abs: string) => void
+  takeComposerInsert: () => void
 
   // git diff → changes.txt
-  setDiffBase: (value: string) => Promise<void>
-  runProjectDiff: (projectId: string) => Promise<void>
+  /** `selected` null means the repo's default, and it stays following that. */
+  setProjectDiffBase: (projectId: string, selected: string | null, saved: string[]) => Promise<void>
+  openDiffBase: (projectId: string, anchor: DOMRect) => void
+  runProjectDiff: (projectId: string) => Promise<DiffResult>
 
   select: (sessionId: string) => void
   toggle: (projectId: string) => void
@@ -672,8 +705,12 @@ export const useStore = create<AppState>((set, get) => ({
   docker: null,
   outputTree: [],
   outputExpanded: {},
-  outputCollapsed: false,
-  outputHeight: 200,
+  outputOpen: false,
+  outputPreview: null,
+  outputPanelWidth: null,
+  outputNotice: null,
+  composerInsert: null,
+  diffBaseTarget: null,
   selectedSessionId: null,
   expanded: {},
   sidebarWidth: 288,
@@ -978,21 +1015,76 @@ export const useStore = create<AppState>((set, get) => ({
   toggleOutputDir: (path) =>
     set((s) => ({ outputExpanded: { ...s.outputExpanded, [path]: !s.outputExpanded[path] } })),
 
-  toggleOutputPanel: () => set((s) => ({ outputCollapsed: !s.outputCollapsed })),
-  // Clamp: never smaller than a few rows, never starving the project list —
-  // the render-side maxHeight keeps it sane if the window shrinks afterwards.
-  setOutputHeight: (n) =>
-    set({ outputHeight: Math.max(96, Math.min(Math.round(window.innerHeight * 0.7), n)) }),
+  collapseOutputTree: () => set({ outputExpanded: {} }),
 
-  setDiffBase: async (value) => {
-    const config = await window.vivarium.setDiffBase(value)
-    set({ config })
+  toggleOutputPanel: () =>
+    set((s) => ({ outputOpen: !s.outputOpen, outputPreview: null, outputNotice: null })),
+  closeOutputPanel: () => set({ outputOpen: false, outputPreview: null, outputNotice: null }),
+  // Only the floor, for the agent panel's reason: the ceiling depends on the
+  // window, so the panel caps itself and a drag survives a restore-down.
+  setOutputPanelWidth: (n) => set({ outputPanelWidth: Math.max(AGENT_PANEL_MIN, Math.round(n)) }),
+  setOutputNotice: (outputNotice) => set({ outputNotice }),
+  previewOutput: (abs) => set({ outputOpen: true, outputPreview: abs }),
+  closeOutputPreview: () => set({ outputPreview: null }),
+
+  revealOutput: (abs) => {
+    void window.vivarium.revealOutputFile(abs)
+  },
+
+  copyOutputPath: (abs) => {
+    void window.vivarium.clipboardWriteText(abs)
+    set({ outputNotice: { text: 'Path copied' } })
+  },
+
+  canReferenceOutput: () => {
+    const { config, selectedSessionId } = get()
+    return config.projects.some((p) =>
+      p.sessions.some((x) => x.id === selectedSessionId && x.type === 'chat')
+    )
+  },
+
+  referenceOutput: (abs) => {
+    const { config, selectedSessionId } = get()
+    const root = config.sharedOutputFolder
+    const project = config.projects.find((p) =>
+      p.sessions.some((x) => x.id === selectedSessionId && x.type === 'chat')
+    )
+    if (!root || !project || !selectedSessionId) return
+    set({
+      composerInsert: {
+        sessionId: selectedSessionId,
+        text: outputPathForChat(root, abs, isHostProject(project))
+      }
+    })
+  },
+
+  takeComposerInsert: () => set({ composerInsert: null }),
+
+  setProjectDiffBase: async (projectId, selected, saved) => {
+    set({ config: await window.vivarium.setDiffBase(projectId, selected, saved) })
+  },
+
+  openDiffBase: (projectId, anchor) => {
+    // Under the name, and kept on screen by its tallest ordinary size. It has a
+    // max-height of its own for the rest.
+    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - 336))
+    const top = Math.max(40, Math.min(anchor.bottom + 4, window.innerHeight - 360))
+    set({ dialog: 'diffBase', diffBaseTarget: { projectId, top, left } })
   },
 
   runProjectDiff: async (projectId) => {
-    // Fire-and-forget; the output-folder watcher refreshes the tree when
-    // changes.txt lands.
-    await window.vivarium.projectDiff(projectId)
+    const r = await window.vivarium.projectDiff(projectId)
+    if (!r.ok || !r.folder) return r
+    // The watcher refreshes the tree when changes.txt lands. This opens the
+    // branch's folder and says what was written, so the result is on screen.
+    const root = get().config.sharedOutputFolder?.replace(/[\\/]+$/, '') ?? ''
+    set((s) => ({
+      outputOpen: true,
+      outputPreview: null,
+      outputExpanded: { ...s.outputExpanded, [`${root}\\${r.folder}`]: true },
+      outputNotice: { text: `Wrote ${r.folder}/changes.txt`, counts: r.stats }
+    }))
+    return r
   },
 
   select: (sessionId) => {
@@ -1536,6 +1628,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       dialog: null,
       addSession: null,
+      diffBaseTarget: null,
       killTarget: null,
       moveTarget: null,
       deleteTarget: null,

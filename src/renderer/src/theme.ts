@@ -91,7 +91,7 @@ const MIDNIGHT = {
   'press-lift': 'brightness(.9)',
   /** the empty half of a progress bar */
   track: '#2a3042',
-  /** the one filled accent: "Add project", the active-item left bar */
+  /** the one filled accent: a dialog's primary button, the active-item left bar */
   accent: '#2f5fd0',
   /** ink on `--accent` */
   'accent-fg': '#f2f5ff',
@@ -808,6 +808,15 @@ export const GLOBAL_CSS = `${APP_CSS}
      height change at all. */
   .vchat [data-code] [data-copy]{opacity:0;pointer-events:none;transition:opacity .12s,filter .12s,color .12s}
   .vchat [data-code]:hover [data-copy],.vchat [data-code] [data-copy]:focus-visible,.vchat [data-code] [data-copy][data-copied]{opacity:1;pointer-events:auto}
+  /* A row of the output tree or the compare popover. Its actions appear on hover
+     or with keyboard focus inside it, and display is safe here because the row
+     has a fixed height: a hover may not change one. :has(:focus-visible) rather
+     than :focus-within, or a clicked row would stay lit until focus moved on. */
+  .voutput-row:hover,.voutput-row:has(:focus-visible){background:var(--sel)}
+  .voutput-acts{display:none}
+  .voutput-row:hover .voutput-acts,.voutput-row:has(:focus-visible) .voutput-acts{display:flex}
+  /* A branch name is a control and reads as a label until it is pointed at. */
+  .vlink:hover{text-decoration:underline}
   /* A wider gutter than the app-wide thumb: the log is a reading column and the
      bar sits at the very edge of it, so it is inset rather than flush. */
   .vchat-scroll::-webkit-scrollbar-thumb{background:${CHAT.border};border:3px solid ${CHAT.bg};background-clip:padding-box}

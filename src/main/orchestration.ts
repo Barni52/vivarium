@@ -4,14 +4,14 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { EFFORT_LEVELS, isEffort } from '@shared/models'
-import { isHostProject } from '@shared/projects'
+import { isDiffBase, isHostProject } from '@shared/projects'
 import type { ChatEffort, ChatOpenResult, Config, Project, Session } from '@shared/types'
 import { bridgeDir } from './bridge'
 import {
-  DEFAULT_DIFF_BASE,
   commitBranchChanges,
+  formatStats,
   gitBranch,
-  isDiffBase,
+  resolveDiffBase,
   writeBranchDiff
 } from './git'
 import type { ChatService } from './chat'
@@ -249,7 +249,9 @@ const TOOLS = [
         },
         base: {
           type: 'string',
-          description: `The branch or ref to diff against. Defaults to ${DEFAULT_DIFF_BASE}.`
+          description:
+            'The branch or ref to diff against, for this diff only. Defaults to the base the user ' +
+            "picked for that project, or the repository's default branch if they picked none."
         }
       }
     }
@@ -573,10 +575,14 @@ export class OrchestrationServer {
 
   /**
    * The UI's "Write branch diff", for an agent: the same writer, the same output
-   * folder, and the base the user set in the output panel unless the agent
-   * names one. The path handed back is the one the *caller* can open — its
-   * container's `/workspace/output/…`, or the Windows path for a host chat —
-   * whichever project the diff was taken of.
+   * folder, and the base the user picked for that project unless the agent
+   * names one. A named base is for this diff alone and joins no list: the
+   * compare popover holds what the user chose to keep. The path handed back is
+   * the one the *caller* can open — its container's `/workspace/output/…`, or
+   * the Windows path for a host chat — whichever project the diff was taken of.
+   *
+   * The sentence is read back by `chatMapper`, which takes the path and the
+   * counts out of it for the tool card, so its shape is a contract.
    */
   private async writeDiff(args: ToolArgs, caller: string): Promise<ToolResult> {
     const config = this.deps.readConfig()
@@ -588,7 +594,7 @@ export class OrchestrationServer {
     const projectId = readString(args.project) || callerProject?.id || ''
     const project = config.projects.find((p) => p.id === projectId)
     if (!project) return failure(`No project with id ${projectId}. list_chats lists them.`)
-    const base = readString(args.base).trim() || config.diffBase || DEFAULT_DIFF_BASE
+    const base = readString(args.base).trim() || (await resolveDiffBase(project, config))
     if (!isDiffBase(base)) return failure(`${base} is not a branch or ref name.`)
     if (!gitBranch(project.basePath)) {
       return failure(`Project ${project.name} is not on a git branch (no repository at its folder).`)
@@ -602,7 +608,7 @@ export class OrchestrationServer {
     return {
       text:
         `Wrote the diff of ${gitBranch(project.basePath)} against ${base} (project ${project.name}) ` +
-        `to ${where}.`
+        `to ${where}${r.stats ? `: ${formatStats(r.stats)}` : ''}.`
     }
   }
 

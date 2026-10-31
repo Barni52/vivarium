@@ -16,6 +16,7 @@ import type {
 import { DEFAULT_EFFORT, EFFORT_LEVELS, modelName, modelOptionLabel } from '@shared/models'
 import { isHostProject } from '@shared/projects'
 import { AGENT_PANEL_MIN, useStore } from '../../state/store'
+import { outputFileFrom } from '../../outputPaths'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
 import {
@@ -195,7 +196,31 @@ export function ChatView({
    */
   const openAgent = React.useCallback((toolUseId: string): void => {
     setAgentStack((s) => (s.length === 1 && s[0] === toolUseId ? [] : [toolUseId]))
+    // The Output panel shares this slot, last one opened wins. It lives outside
+    // this view, so the two ends of that rule are this line and the effect below.
+    useStore.getState().closeOutputPanel()
   }, [])
+
+  const outputOpen = useStore((s) => s.outputOpen)
+  const outputFolder = useStore((s) => s.config.sharedOutputFolder)
+  const openOutputFile = useStore((s) => s.openOutputFile)
+  const previewOutput = useStore((s) => s.previewOutput)
+  React.useEffect(() => {
+    if (outputOpen) setAgentStack([])
+  }, [outputOpen])
+
+  // A file referenced from the Output panel. A store field rather than a prop
+  // because the draft is local to this view and the panel is not inside it.
+  const composerInsert = useStore((s) =>
+    s.composerInsert?.sessionId === session.id ? s.composerInsert : null
+  )
+  const takeComposerInsert = useStore((s) => s.takeComposerInsert)
+  React.useEffect(() => {
+    if (!composerInsert) return
+    setDraft((d) => `${d}${d && !/\s$/.test(d) ? ' ' : ''}${composerInsert.text} `)
+    takeComposerInsert()
+    inputRef.current?.focus()
+  }, [composerInsert, takeComposerInsert])
 
   const inputRef = React.useRef<HTMLTextAreaElement>(null)
   const findInputRef = React.useRef<HTMLInputElement>(null)
@@ -767,9 +792,15 @@ export function ChatView({
       images: chat?.images ?? {},
       onImage: (imageId: string) => void loadImage(session.id, imageId),
       subagents: chat?.subagents ?? {},
-      onRetry: () => void openChat(project.id, session.id, true)
+      onRetry: () => void openChat(project.id, session.id, true),
+      outputFile: (seen: string) => outputFileFrom(outputFolder, seen),
+      onOpenOutput: openOutputFile,
+      onPreviewOutput: previewOutput
     }),
     [
+      outputFolder,
+      openOutputFile,
+      previewOutput,
       chat?.bodies,
       chat?.images,
       chat?.subagents,
@@ -1281,12 +1312,13 @@ export function ChatView({
               // Judged by what is *on screen*: the agent panel takes the
               // outline's slot, so an outline that is on underneath it is not
               // showing, and the item says Show and brings it back.
-              label: outline && agentStack.length === 0 ? 'Hide outline' : 'Show outline',
+              label: outline && agentStack.length === 0 && !outputOpen ? 'Hide outline' : 'Show outline',
               icon: <PanelToggle size={14} />,
               disabled: outlineTurns.length === 0,
               onSelect: () => {
-                if (agentStack.length > 0) {
+                if (agentStack.length > 0 || outputOpen) {
                   setAgentStack([])
+                  useStore.getState().closeOutputPanel()
                   setOutline(true)
                 } else setOutline((o) => !o)
               }
@@ -1464,7 +1496,7 @@ export function ChatView({
             onPath={setAgentStack}
             onJump={jumpToRow}
           />
-        ) : outline && (
+        ) : outline && !outputOpen && (
           <Outline
             turns={outlineTurns}
             clocks={turnClocks}
@@ -1880,6 +1912,30 @@ function Header({
     return EFFORT_LEVELS.filter((l) => found.has(l))
   }, [models, model])
 
+  /**
+   * How much the header has room for: 2 is everything, 1 has lost the token
+   * count and the project, 0 has lost the bar as well.
+   *
+   * Measured rather than a container query. `container-type` adds layout
+   * containment, which would turn this row into the containing block for the
+   * model menu's `position: fixed` backdrop and shrink it to the row. A step, not
+   * a width, so a dragged panel re-renders this only when a threshold is crossed.
+   */
+  const headRef = React.useRef<HTMLDivElement>(null)
+  const [room, setRoom] = React.useState(2)
+  React.useEffect(() => {
+    const el = headRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth
+      // Zero is a hidden chat: `visibility` keeps its layout, but a view that has
+      // no box yet must not be read as a very narrow one.
+      if (w > 0) setRoom(w >= HEADER_FULL_WIDTH ? 2 : w >= HEADER_BAR_WIDTH ? 1 : 0)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   const pct = context?.percentage ?? null
   const contextTitle = context
     ? `${tok(context.totalTokens)} / ${tok(context.maxTokens)} tokens · ${context.percentage}% of the context window${context.approximate ? ' (approximate — derived from the turn’s usage)' : ''}`
@@ -1887,6 +1943,7 @@ function Header({
 
   return (
     <div
+      ref={headRef}
       style={{
         flex: 'none',
         // 34, which is `TerminalHost`'s header to the pixel. The two headers
@@ -1906,9 +1963,14 @@ function Header({
         background: CHAT.header
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
+      {/* The one part of this row that gives way. Everything to its right is
+          `flex: none` and never wraps, so a narrow chat ellipsises the name
+          instead of folding a reading onto a second line of a 34px row. */}
+      <div style={{ flex: 1, display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
         <span
+          title={session.name}
           style={{
+            minWidth: 0,
             fontFamily: MONO,
             fontSize: 12.5,
             color: CHAT.text,
@@ -1919,21 +1981,24 @@ function Header({
         >
           {session.name}
         </span>
-        <span
-          style={{
-            fontFamily: MONO,
-            fontSize: 11.5,
-            color: CHAT.dim3,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis'
-          }}
-        >
-          {project.name}
-        </span>
+        {room === 2 && (
+          <span
+            style={{
+              minWidth: 0,
+              fontFamily: MONO,
+              fontSize: 11.5,
+              color: CHAT.dim3,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}
+          >
+            {project.name}
+          </span>
+        )}
       </div>
 
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 16 }}>
+      <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 16, whiteSpace: 'nowrap' }}>
         <div
           title={contextTitle}
           style={{
@@ -1945,9 +2010,11 @@ function Header({
             color: CHAT.dim2
           }}
         >
-          <span style={{ color: CHAT.dim }}>
-            {context ? `${tok(context.totalTokens)} / ${tok(context.maxTokens)}` : '— / —'}
-          </span>
+          {room === 2 && (
+            <span style={{ color: CHAT.dim }}>
+              {context ? `${tok(context.totalTokens)} / ${tok(context.maxTokens)}` : '— / —'}
+            </span>
+          )}
           {/* 84×5 on --track: wider and thinner than the title bar's quota pills,
               because this one is read continuously while the other two are
               glanced at, and length is what a percentage is easiest to judge by.
@@ -1955,34 +2022,36 @@ function Header({
               hairline this used to have made a 4% fill compete with a rule.
               The fill keeps a minimum sliver for the same reason: "a little"
               must never render as "none". */}
-          <span
-            style={{
-              width: 84,
-              height: 5,
-              display: 'block',
-              background: 'var(--track)',
-              borderRadius: 4,
-              overflow: 'hidden'
-            }}
-          >
-            {pct !== null && (
-              <span
-                // data-meter: out of the global theme transition (GLOBAL_CSS).
-                // This fill already animates its own `width` and escalates
-                // through three hues; cross-fading the colour on top of that
-                // smears the escalation while the bar is moving.
-                data-meter=""
-                style={{
-                  display: 'block',
-                  height: '100%',
-                  width: `${Math.max(pct > 0 ? 6 : 0, Math.min(100, pct))}%`,
-                  background: ctxColor(pct),
-                  borderRadius: 4,
-                  transition: 'width .4s'
-                }}
-              />
-            )}
-          </span>
+          {room > 0 && (
+            <span
+              style={{
+                width: 84,
+                height: 5,
+                display: 'block',
+                background: 'var(--track)',
+                borderRadius: 4,
+                overflow: 'hidden'
+              }}
+            >
+              {pct !== null && (
+                <span
+                  // data-meter: out of the global theme transition (GLOBAL_CSS).
+                  // This fill already animates its own `width` and escalates
+                  // through three hues; cross-fading the colour on top of that
+                  // smears the escalation while the bar is moving.
+                  data-meter=""
+                  style={{
+                    display: 'block',
+                    height: '100%',
+                    width: `${Math.max(pct > 0 ? 6 : 0, Math.min(100, pct))}%`,
+                    background: ctxColor(pct),
+                    borderRadius: 4,
+                    transition: 'width .4s'
+                  }}
+                />
+              )}
+            </span>
+          )}
           {/* The percentage in words as well as in length. The bar answers "how
               full" at a glance and this answers "how full exactly" without a
               hover, which is the reading the escalating tint is keyed to. */}
@@ -2242,6 +2311,15 @@ function TodoStrip({ todos }: { todos: ChatTodo[] }): React.ReactElement {
 
 type TaskEntry = Extract<ChatEntry, { kind: 'task' }>
 type ShellEntry = Extract<ChatEntry, { kind: 'shell' }>
+
+/**
+ * Below these header widths the context reading drops a part, the token count
+ * first and then the bar, because the percentage says the same thing in less
+ * room and the tooltip keeps all of it. The project name goes with the token
+ * count: the sidebar is already showing it.
+ */
+const HEADER_FULL_WIDTH = 640
+const HEADER_BAR_WIDTH = 480
 
 /**
  * What the agent panel always leaves the log, however far it is dragged. About

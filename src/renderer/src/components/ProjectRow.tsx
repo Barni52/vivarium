@@ -69,6 +69,7 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   const openContextMenu = useStore((s) => s.openContextMenu)
   const hasOutput = useStore((s) => !!s.config.sharedOutputFolder)
   const runProjectDiff = useStore((s) => s.runProjectDiff)
+  const openDiffBase = useStore((s) => s.openDiffBase)
   const openClaudeUpdate = useStore((s) => s.openClaudeUpdate)
   const openVolumes = useStore((s) => s.openVolumes)
   const openTranscriptSearch = useStore((s) => s.openTranscriptSearch)
@@ -413,24 +414,39 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
           </span>
 
           {branch && (
-            <span
-              title={`git branch: ${branch}`}
+            // The way into what this project's diff is taken against: the branch
+            // is what gets compared. Stops here so the row does not toggle, and
+            // only as wide as the name, so the rest of the line still does.
+            <button
+              className="vlink"
+              title={`Compare ${branch} with a base branch`}
+              onClick={(e) => {
+                e.stopPropagation()
+                openDiffBase(project.id, (e.currentTarget as HTMLElement).getBoundingClientRect())
+              }}
               style={{
+                width: 'fit-content',
+                maxWidth: '100%',
                 minWidth: 0,
+                padding: 0,
+                border: 0,
+                background: 'transparent',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 4,
                 color: 'var(--accent2)',
+                fontFamily: 'inherit',
                 fontSize: 11,
                 lineHeight: 1.2,
-                overflow: 'hidden'
+                overflow: 'hidden',
+                cursor: 'pointer'
               }}
             >
               <GitBranch size={10} style={{ flex: 'none' }} />
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {branch}
               </span>
-            </span>
+            </button>
           )}
         </div>
 

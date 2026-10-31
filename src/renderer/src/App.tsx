@@ -3,9 +3,11 @@ import { useStore } from './state/store'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { TerminalHost } from './components/TerminalHost'
+import { OutputPanel } from './components/OutputPanel'
 import { AddProject } from './components/dialogs/AddProject'
 import { ProjectSettings } from './components/dialogs/ProjectSettings'
 import { AddSessionPopover } from './components/dialogs/AddSessionPopover'
+import { DiffBasePopover } from './components/dialogs/DiffBasePopover'
 import { ConfirmKill } from './components/dialogs/ConfirmKill'
 import { ConfirmMove } from './components/dialogs/ConfirmMove'
 import { ConfirmDeleteProject } from './components/dialogs/ConfirmDeleteProject'
@@ -29,6 +31,7 @@ export function App(): React.ReactElement {
   const requestQuit = useStore((s) => s.requestQuit)
   const dialog = useStore((s) => s.dialog)
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed)
+  const outputOpen = useStore((s) => s.outputOpen)
   const cycleTheme = useStore((s) => s.cycleTheme)
 
   // Ctrl/Cmd+Shift+T — cycle midnight → graphite → paper → midnight.
@@ -169,11 +172,13 @@ export function App(): React.ReactElement {
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {!sidebarCollapsed && <Sidebar />}
         <TerminalHost />
+        {outputOpen && <OutputPanel />}
       </div>
 
       {dialog === 'addProject' && <AddProject />}
       {dialog === 'settings' && <ProjectSettings />}
       {dialog === 'addSession' && <AddSessionPopover />}
+      {dialog === 'diffBase' && <DiffBasePopover />}
       {dialog === 'confirmKill' && <ConfirmKill />}
       {dialog === 'confirmMove' && <ConfirmMove />}
       {dialog === 'confirmDeleteProject' && <ConfirmDeleteProject />}

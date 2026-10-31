@@ -17,10 +17,12 @@ import type {
   ClaudeUpdateResult,
   Config,
   ContainerState,
+  DiffRefs,
   DiffResult,
   DockerStatus,
   MountNode,
   NewProjectInput,
+  OutputFileRead,
   OutputNode,
   PtyDataEvent,
   PtyExitEvent,
@@ -77,13 +79,20 @@ const api = {
     ipcRenderer.invoke(CH.projectBranches),
   projectDiff: (projectId: string): Promise<DiffResult> =>
     ipcRenderer.invoke(CH.projectDiff, projectId),
-  setDiffBase: (value: string): Promise<Config> => ipcRenderer.invoke(CH.setDiffBase, value),
+  diffRefs: (projectId: string): Promise<DiffRefs | null> =>
+    ipcRenderer.invoke(CH.diffRefs, projectId),
+  setDiffBase: (projectId: string, selected: string | null, saved: string[]): Promise<Config> =>
+    ipcRenderer.invoke(CH.setDiffBase, projectId, selected, saved),
 
   // shared output folder
   setSharedOutput: (folder: string | null): Promise<Config> =>
     ipcRenderer.invoke(CH.setSharedOutput, folder),
   outputTree: (): Promise<OutputNode[]> => ipcRenderer.invoke(CH.outputTree),
   openOutputFile: (abs: string): Promise<string> => ipcRenderer.invoke(CH.openOutputFile, abs),
+  readOutputFile: (abs: string): Promise<OutputFileRead> =>
+    ipcRenderer.invoke(CH.readOutputFile, abs),
+  revealOutputFile: (abs: string): Promise<string> =>
+    ipcRenderer.invoke(CH.revealOutputFile, abs),
   openOutputFolder: (): Promise<string> => ipcRenderer.invoke(CH.openOutputFolder),
   deleteOutputFile: (abs: string): Promise<string> => ipcRenderer.invoke(CH.deleteOutputFile, abs),
   onOutputChanged: (cb: () => void): (() => void) => {

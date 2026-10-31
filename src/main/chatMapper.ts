@@ -1,6 +1,7 @@
 import type {
   ChatChip,
   ChatEntry,
+  ChatLineCounts,
   ChatQuestion,
   ChatQuestionAnswer,
   ChatQuestionOption,
@@ -317,13 +318,28 @@ function toolTitle(name: string, input: Json): string {
   }
 }
 
+/**
+ * The path and the counts out of `write_branch_diff`'s answer. Anchored on the
+ * two ways the path can start, because a project or a branch may have " to " in
+ * its name.
+ */
+const DIFF_WRITTEN_RE =
+  /to ((?:\/workspace\/output\/|[A-Za-z]:[\\/]).*?changes\.txt)(?:: \+(\d+) −(\d+))?/
+
 /** Body + one-line outcome for a completed tool call. */
 function toolBody(
   name: string,
   input: Json,
   result: Json | null,
   text: string
-): { body: ChatToolBody; result: string } {
+): {
+  body: ChatToolBody
+  result: string
+  counts?: ChatLineCounts
+  file?: string
+  /** replaces the card's title once the call has said what it did */
+  title?: string
+} {
   // An edit shows its diff and a command shows the tail of its output; a read
   // and a search collapse to their gutter line. A read changed nothing; a diff is
   // what you scrolled back for.
@@ -358,7 +374,24 @@ function toolBody(
     }
     return {
       body: { kind: 'diff', text: lines.join('\n'), truncated: false },
-      result: plus || minus ? `+${plus} −${minus}` : ''
+      result: '',
+      counts: plus || minus ? { added: plus, removed: minus } : undefined,
+      file: name === 'Write' ? str(input.file_path) || undefined : undefined
+    }
+  }
+  // Our own tool, so the sentence it answers with is ours as well (see
+  // OrchestrationServer.writeDiff). A failure has no path in it and falls
+  // through to the ordinary text card.
+  if (name.endsWith('write_branch_diff')) {
+    const wrote = DIFF_WRITTEN_RE.exec(text)
+    if (wrote) {
+      return {
+        body: { kind: 'none', text: '', truncated: false },
+        result: '',
+        counts: wrote[2] ? { added: Number(wrote[2]), removed: Number(wrote[3]) } : undefined,
+        file: wrote[1],
+        title: `write_branch_diff ${wrote[1]}`
+      }
     }
   }
   if (/^(Bash|BashOutput|PowerShell)$/.test(name)) {
@@ -1433,9 +1466,12 @@ export class ChatMapper {
     }
 
     if (entry.kind !== 'tool') return entry
-    const { body, result } = toolBody(name, input, structured, text)
+    const { body, result, counts, file, title } = toolBody(name, input, structured, text)
     entry.status = isError ? 'error' : 'ok'
     entry.result = isError ? firstLine(text) || 'error' : result
+    entry.counts = isError ? undefined : counts
+    entry.file = isError ? undefined : file
+    if (title && !isError) entry.title = title
     entry.body = body
     if (body.text) this.bodies.set(entry.id, body.text)
     // A foreground command the CLI moved to the background — past its timeout,

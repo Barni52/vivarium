@@ -364,120 +364,47 @@ export const GitBranch = ({ size = 12, color = 'currentColor', style }: P): Reac
     style
   )
 
-export const File = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
+// An eye: Preview, the second thing a file row offers after opening it.
+export const Eye = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
   svg(
     size,
     <>
       <path
-        d="M4 2.2h5l3 3v8.6H4z"
+        d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z"
         stroke={color}
-        strokeWidth="1.1"
+        strokeWidth="1.3"
         strokeLinejoin="round"
       />
-      <path d="M9 2.2v3h3" stroke={color} strokeWidth="1.1" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="2" stroke={color} strokeWidth="1.3" />
     </>,
     style
   )
 
-// ---- file-type icons (shared output tree) ---------------------------------
-// Popular formats only — anything unknown falls back to the generic File.
-// Colors reuse the app palette so the tree stays cohesive.
-
-const ImageFile = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
+// Three dots: a menu of the less common actions.
+export const Dots = ({ size = 13, color = 'currentColor', style }: P): React.ReactElement =>
   svg(
     size,
     <>
-      <rect x="2.5" y="3.5" width="11" height="9" stroke={color} strokeWidth="1.1" />
-      <circle cx="5.8" cy="6.4" r="1" fill={color} />
-      <path d="M4 11l3-3 2 2 2.2-2.2 1.8 1.8" stroke={color} strokeWidth="1.1" strokeLinejoin="round" fill="none" />
+      <circle cx="3" cy="8" r="1.3" fill={color} />
+      <circle cx="8" cy="8" r="1.3" fill={color} />
+      <circle cx="13" cy="8" r="1.3" fill={color} />
     </>,
     style
   )
 
-const Globe = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
-  svg(
-    size,
-    <>
-      <circle cx="8" cy="8" r="5.5" stroke={color} strokeWidth="1.1" fill="none" />
-      <path d="M2.5 8h11M8 2.5c-2.1 1.7-2.1 9.3 0 11 2.1-1.7 2.1-9.3 0-11z" stroke={color} strokeWidth="1.1" fill="none" />
-    </>,
-    style
-  )
-
-const DocLines = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
-  svg(
-    size,
-    <>
-      <path d="M4 2.2h5l3 3v8.6H4z" stroke={color} strokeWidth="1.1" strokeLinejoin="round" />
-      <path d="M9 2.2v3h3" stroke={color} strokeWidth="1.1" strokeLinejoin="round" />
-      <path d="M5.8 8.2h4.4M5.8 10.6h4.4" stroke={color} strokeWidth="1.1" strokeLinecap="round" />
-    </>,
-    style
-  )
-
-const CodeFile = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
+// Collapse all: a chevron folding up between two lines.
+export const CollapseAll = ({ size = 13, color = 'currentColor', style }: P): React.ReactElement =>
   svg(
     size,
     <path
-      d="M6.2 4.8L3.2 8l3 3.2M9.8 4.8l3 3.2-3 3.2"
+      d="M3 3h10M3 13h10M5.5 9.5 8 7l2.5 2.5"
       stroke={color}
       strokeWidth="1.3"
       strokeLinecap="round"
       strokeLinejoin="round"
-      fill="none"
     />,
     style
   )
-
-const TableFile = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
-  svg(
-    size,
-    <>
-      <rect x="2.5" y="3.5" width="11" height="9" stroke={color} strokeWidth="1.1" />
-      <path d="M2.5 6.5h11M7 6.5v6" stroke={color} strokeWidth="1.1" />
-    </>,
-    style
-  )
-
-const Archive = ({ size = 14, color = 'currentColor', style }: P): React.ReactElement =>
-  svg(
-    size,
-    <>
-      <rect x="3.5" y="2.5" width="9" height="11" stroke={color} strokeWidth="1.1" />
-      <path d="M8 4v1.2M8 6.8V8M8 9.6v1.2" stroke={color} strokeWidth="1.1" strokeLinecap="round" />
-    </>,
-    style
-  )
-
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp'])
-const CODE_EXTS = new Set([
-  'js', 'ts', 'tsx', 'jsx', 'json', 'css', 'scss', 'py', 'java', 'sh', 'ps1', 'bat', 'yml', 'yaml', 'xml'
-])
-const TABLE_EXTS = new Set(['csv', 'tsv', 'xls', 'xlsx'])
-const ARCHIVE_EXTS = new Set(['zip', '7z', 'rar', 'tar', 'gz'])
-
-/**
- * A file's glyph and its tint, in the output tree.
- *
- * Eight kinds sharing the palette's chromatic tokens rather than eight hues of
- * their own — the shape is doing the work here, exactly as it does for the
- * session types, and the colour only groups them: warm (`--str`) for things you
- * read, `--code-fn` blue for source, `--ok` for data, `--danger` for the one
- * that opens outside the app. Everything else stays grey, which is most of a
- * tree most of the time.
- */
-export function FileIcon({ name, size = 14, style }: { name: string; size?: number; style?: React.CSSProperties }): React.ReactElement {
-  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
-  if (IMAGE_EXTS.has(ext)) return <ImageFile size={size} color="var(--code-keyword)" style={style} />
-  if (ext === 'html' || ext === 'htm') return <Globe size={size} color="var(--accent2)" style={style} />
-  if (ext === 'md' || ext === 'markdown') return <DocLines size={size} color="var(--role-you)" style={style} />
-  if (ext === 'pdf') return <DocLines size={size} color="var(--danger)" style={style} />
-  if (ext === 'txt' || ext === 'log') return <DocLines size={size} color="var(--dim)" style={style} />
-  if (CODE_EXTS.has(ext)) return <CodeFile size={size} color="var(--code-fn)" style={style} />
-  if (TABLE_EXTS.has(ext)) return <TableFile size={size} color="var(--ok)" style={style} />
-  if (ARCHIVE_EXTS.has(ext)) return <Archive size={size} color="var(--muted)" style={style} />
-  return <File size={size} color="var(--dim)" style={style} />
-}
 
 // A 270° arc opening at the top right, closed by a solid arrowhead pointing
 // clockwise — the reload convention.

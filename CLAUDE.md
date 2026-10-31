@@ -33,9 +33,11 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
 - `config.ts` — atomic persistence of the single `%APPDATA%/vivarium/config.json`.
 - `git.ts` — branch detection (reads `.git/HEAD` directly) + "Write branch diff", which writes
   `<output>/<branch>/changes.txt` (the branch with `/` made `-`) so a branch's diff and its
-  review sit together. Agents run the same writer through the `write_branch_diff` tool, base
-  `origin/master` unless they or the output panel name another — and `isDiffBase` guards the
-  base, because git reads an argument starting with `-` as an option. `commit_changes` stages and
+  review sit together. Agents run the same writer through the `write_branch_diff` tool. The base
+  is per project (`resolveDiffBase`: `Project.diffBase`, then `origin/HEAD`, then the old global
+  `Config.diffBase`, then `origin/master`) unless an agent names one for that one diff, and
+  `isDiffBase` (`@shared/projects`) guards it, because git reads an argument starting with `-` as
+  an option. `commit_changes` stages and
   commits on the same mount scope (`git add -A` / `git commit -- <mounts>`, so a hand-staged file
   elsewhere stays out), only when the checkout is on the branch the agent names; it never checks
   out and never pushes.
@@ -94,6 +96,11 @@ renderer's `localStorage`.
   `highlight.ts` uses Prism's `tokenize` (a token tree), never `highlight` (an HTML string).
   Anything reached for later clears the same bar. Links go out through `openExternal`, never an
   `<a>`: this window has no new-window handler, so a navigation would open the page inside the app.
+- `components/OutputPanel`, `OutputTree`, `OutputPreview` — the shared output folder, a panel on
+  the right of the window. `outputPaths.ts` converts between a file's three spellings, and
+  `diffParse.ts` reads a diff for the preview.
+- `components/FileIcon.tsx` — the only user of `@phosphor-icons/react`, imported per icon.
+- `components/dialogs/DiffBasePopover.tsx` — what a project's branch is compared with.
 - `Elapsed.tsx` is the only thing in the UI that ticks.
 
 **Adding an IPC feature** touches four places in order: channel name in `src/shared/ipc.ts` →
@@ -652,6 +659,40 @@ longer holds, because an agent's delete gets no `confirmKill` to do it.
   name lines the message does not contain, and tagging them would hand back confidently wrong
   bytes. `CodeBlock`'s own copy button is unaffected and still yields the bare code, which is the
   other thing a reader means by "copy" and the reason both exist.
+
+### The Output panel
+
+- **It sits beside `TerminalHost`, not inside `ChatView`, so it also works next to a terminal, and
+  it still shares the agent panel's slot.** One open at a time, the last one opened wins: `openAgent`
+  closes it, and an effect on `outputOpen` clears `agentStack`. The outline hides while it is open.
+- **The headers beside it are 34px and never wrap.** The panel can leave a chat 320 wide, so the
+  chat header steps its readings down off a `ResizeObserver` (`HEADER_FULL_WIDTH`,
+  `HEADER_BAR_WIDTH`) and only the name shrinks. Not a container query: `container-type` makes
+  the row the containing block for the model menu's `position: fixed` backdrop.
+- **Clicking a file always opens it in its own app**, everywhere: the tree, and a chat card for a
+  `Write` or `write_branch_diff` into the folder. Preview is the secondary action, the eye on a
+  row or the link on a card. Do not make a click preview.
+- **The tree has no dates, no unread marks, no Recent view, and names are plain `--fg`.** All of
+  these were tried in design and turned down. Colour belongs to the icon. So `OutputNode` has no
+  `mtime` and `scanTree` makes no stat calls; size comes from the read.
+- **Rows are a flat list from `buildRows`.** A folder holding only a folder folds into one row,
+  and expansion is keyed on the deepest path of the chain.
+- **`output:read-file` is the only way file content reaches the renderer**, behind the same
+  inside-the-folder guard as open and delete, at 2 MB of text or 16 MB of image. HTML shows its
+  source and is never rendered; markdown goes through `Md`, so nothing is set as HTML.
+- **"by <chat>" is read off the log rows the store already holds** (`entry.file`), once per read
+  and never through a selector, which would walk every row on every token. Nothing is persisted,
+  so a file written through `Bash`, or from a row that is not loaded, says nothing.
+- **`write_branch_diff`'s answer is parsed.** `chatMapper`'s `DIFF_WRITTEN_RE` takes the path and
+  counts out of the sentence `OrchestrationServer.writeDiff` writes, so change them together.
+- **The compare list is the default plus what the user added, never the remotes.** Remotes are
+  only `Add <ref>` suggestions while typing, because every entry but the default has an × and an
+  entry refilled from `git` could not stay removed. The × forgets the entry and touches no branch.
+  A base an agent passes joins no list.
+- **Esc in a field out here must `preventDefault`.** `ChatView` listens on the window and reads an
+  unclaimed Esc as "stop the turn", and a popover's `dialog` is already null by the time it looks.
+- **A line count is two numbers, not a string.** `counts` on a tool row, drawn only by
+  `LineCounts`: `+` in `--code-ins`, `−` in `--code-del`.
 
 ## Commands
 

@@ -163,6 +163,12 @@ export interface ChatRewindRange {
   to: number
 }
 
+/** See the `counts` field on a tool row. */
+export interface ChatLineCounts {
+  added: number
+  removed: number
+}
+
 /** What `chat:task-output` answers: the end of a background command's output file. */
 export interface ChatShellOutput {
   ok: boolean
@@ -224,6 +230,20 @@ export interface Project {
    * something else is a reading that lies about a live fact.
    */
   slashCommands?: string[]
+  /**
+   * The ref this project's branch is diffed against. Absent means "the repo's
+   * own default" (see `resolveDiffBase`), so a project nobody has touched
+   * follows `origin/HEAD` and a repo on `main` is not diffed against a
+   * `master` it does not have.
+   */
+  diffBase?: string
+  /**
+   * The refs the user added to this project's compare list, in the order they
+   * were added. Only ever what they typed or picked: remote branches are
+   * offered while typing and never listed by themselves, because every entry
+   * here has to be removable and a list that refills from `git` is not.
+   */
+  diffBases?: string[]
 }
 
 export interface Config {
@@ -236,8 +256,10 @@ export interface Config {
    */
   sharedOutputFolder?: string
   /**
-   * Base ref the "Write branch diff" project action diffs the current branch
-   * against (e.g. "origin/master"). Defaults to "origin/master" when unset.
+   * The one global base ref this app had before each project got its own
+   * (`Project.diffBase`). Nothing writes it any more. An older config may still
+   * hold it, and it is the fallback for a repo with no `origin/HEAD`, so what
+   * someone typed there keeps working.
    */
   diffBase?: string
   /**
@@ -309,7 +331,35 @@ export interface DiffResult {
   message: string
   /** the branch folder under the output folder that changes.txt went into */
   folder?: string
+  /** how big the diff is, when git produced one */
+  stats?: DiffStats
 }
+
+/** A diff's size: `git diff --numstat`, summed. */
+export interface DiffStats {
+  added: number
+  removed: number
+  files: number
+}
+
+/** What the compare popover needs from git, asked for when it opens. */
+export interface DiffRefs {
+  /** the base a project with nothing picked uses — never stored, never removable */
+  fallback: string
+  /** every remote branch, offered as an `Add <ref>` row while typing */
+  remotes: string[]
+}
+
+/**
+ * What `output:read-file` answers. `none` means the file is there but the panel
+ * has no way to draw it (a zip, or anything with a NUL in its first bytes), and
+ * `missing` covers a file removed since the tree was read.
+ */
+export type OutputFileRead =
+  | { kind: 'text'; text: string; size: number; truncated: boolean }
+  | { kind: 'image'; dataUrl: string; size: number }
+  | { kind: 'none'; size: number }
+  | { kind: 'missing' }
 
 /** One node in the shared-output-folder file tree. */
 export interface OutputNode {
@@ -746,8 +796,21 @@ export type ChatEntry =
       kind: 'tool'
       toolUseId: string
       title: string
-      /** the one-line outcome shown beside the title ("+18 −11", "exit 0") */
+      /** the one-line outcome shown beside the title ("exit 1", "12 lines") */
       result: string
+      /**
+       * Lines added and removed, apart from `result` because they are two
+       * colours: green `+`, red `−`. An edit's patch, or `write_branch_diff`'s
+       * whole diff.
+       */
+      counts?: ChatLineCounts
+      /**
+       * The file this call produced, spelled as the agent saw it
+       * (`/workspace/output/…`, or a Windows path in a host chat). The renderer
+       * decides whether that is inside the output folder, because this mapper
+       * never learns where the folder is.
+       */
+      file?: string
       status: ChatToolStatus
       body: ChatToolBody
     })

@@ -90,7 +90,14 @@ export function searchTextOf(entry: ChatEntry): string {
     case 'thinking':
       return entry.md
     case 'tool':
-      return `${entry.title}\n${entry.result}\n${entry.body.text}`
+      return [
+        entry.title,
+        entry.result,
+        // Two lines, because they are two nodes: a term spanning both could not
+        // be highlighted, and a hit with no visible match reads as a broken bar.
+        ...(entry.counts ? [`+${entry.counts.added}`, `−${entry.counts.removed}`] : []),
+        entry.body.text
+      ].join('\n')
     case 'ask':
       return entry.questions
         .flatMap((q) => [q.header ?? '', q.question, ...q.options.map((o) => `${o.label} ${o.description ?? ''}`)])

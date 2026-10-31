@@ -1,14 +1,17 @@
 import React from 'react'
 import { useStore } from '../state/store'
-import { Plus } from './Icons'
+import { leaf } from '../paths'
+import { Folder, Plus } from './Icons'
 import { ProjectRow } from './ProjectRow'
-import { OutputPanel } from './OutputPanel'
 
 export function Sidebar(): React.ReactElement {
   const width = useStore((s) => s.sidebarWidth)
   const projects = useStore((s) => s.config.projects)
   const openAddProject = useStore((s) => s.openAddProject)
   const setSidebarWidth = useStore((s) => s.setSidebarWidth)
+  const outputFolder = useStore((s) => s.config.sharedOutputFolder)
+  const outputOpen = useStore((s) => s.outputOpen)
+  const toggleOutputPanel = useStore((s) => s.toggleOutputPanel)
   const [addHover, setAddHover] = React.useState(false)
 
   const startResize = (e: React.MouseEvent): void => {
@@ -40,35 +43,42 @@ export function Sidebar(): React.ReactElement {
         fontSize: 12.5
       }}
     >
-      <div style={{ padding: '10px 10px 8px 10px', flex: 'none' }}>
+      {/* Adding a project is rare, so it is a quiet + on a header rather than the
+          loudest thing on screen. It only earns a filled button in the one state
+          where it is the next thing to do: below, when the list is empty. */}
+      <div
+        style={{
+          flex: 'none',
+          height: 36,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 8px 0 12px',
+          borderBottom: '1px solid var(--border)'
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>Projects</span>
         <button
           onClick={openAddProject}
+          title="Add project"
+          aria-label="Add project"
           onMouseEnter={() => setAddHover(true)}
           onMouseLeave={() => setAddHover(false)}
           style={{
-            width: '100%',
-            height: 38,
+            width: 24,
+            height: 24,
+            padding: 0,
+            border: 0,
+            borderRadius: 'var(--radius-sm)',
+            background: addHover ? 'var(--sel)' : 'transparent',
+            color: addHover ? 'var(--fg)' : 'var(--muted)',
             display: 'flex',
             alignItems: 'center',
-            gap: 8,
-            padding: '0 14px',
-            background: 'var(--accent)',
-            color: 'var(--accent-fg)',
-            border: 0,
-            borderRadius: 'var(--radius)',
-            fontSize: 12.5,
-            fontWeight: 500,
-            cursor: 'pointer',
-            letterSpacing: '.2px',
-            // Brightness, not a second blue. A filled button has one fill, and a
-            // hover token for it would be a value that exists only to be 12%
-            // lighter than another value — which is what `filter` already is.
-            filter: addHover ? 'brightness(1.12)' : 'none',
-            transition: 'filter .12s'
+            justifyContent: 'center',
+            cursor: 'pointer'
           }}
         >
-          <Plus size={16} />
-          Add project
+          <Plus size={15} />
         </button>
       </div>
 
@@ -76,10 +86,75 @@ export function Sidebar(): React.ReactElement {
         {projects.map((p) => (
           <ProjectRow key={p.id} project={p} />
         ))}
+        {projects.length === 0 && (
+          <div style={{ padding: 12 }}>
+            <button
+              onClick={openAddProject}
+              style={{
+                width: '100%',
+                height: 38,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '0 14px',
+                background: 'var(--accent)',
+                color: 'var(--accent-fg)',
+                border: 0,
+                borderRadius: 'var(--radius)',
+                fontSize: 12.5,
+                fontWeight: 500,
+                cursor: 'pointer',
+                letterSpacing: '.2px'
+              }}
+            >
+              <Plus size={16} />
+              Add project
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* shared output folder + file tree */}
-      <OutputPanel />
+      {/* The one row Output keeps here: the tree itself is the panel on the right
+          of the window, so the project list has the sidebar's whole height. */}
+      <button
+        onClick={toggleOutputPanel}
+        aria-pressed={outputOpen}
+        title={outputFolder ?? 'No output folder set'}
+        style={{
+          flex: 'none',
+          height: 34,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 12px',
+          border: 0,
+          borderTop: '1px solid var(--border)',
+          background: outputOpen ? 'var(--sel)' : 'transparent',
+          color: 'var(--fg)',
+          fontFamily: 'inherit',
+          fontSize: 12.5,
+          textAlign: 'left',
+          cursor: 'pointer'
+        }}
+      >
+        <span style={{ flex: 'none', display: 'flex', color: 'var(--accent2)' }}>
+          <Folder size={15} />
+        </span>
+        <span style={{ flex: 'none', fontWeight: 600 }}>Output</span>
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 11.5,
+            color: 'var(--dim)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          {outputFolder ? leaf(outputFolder) : 'not set'}
+        </span>
+      </button>
 
       {/* resize handle */}
       <div

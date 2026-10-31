@@ -169,3 +169,37 @@ export function ImageToggle({
     </div>
   )
 }
+
+/** The small icon button on the Output panel's headers. */
+export function PanelBtn({
+  title,
+  onClick,
+  children
+}: {
+  title: string
+  onClick: (e: React.MouseEvent) => void
+  children: React.ReactNode
+}): React.ReactElement {
+  return (
+    <button
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      style={{
+        width: 24,
+        height: 24,
+        flex: 'none',
+        padding: 0,
+        border: 0,
+        background: 'transparent',
+        color: 'var(--muted)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer'
+      }}
+    >
+      {children}
+    </button>
+  )
+}
