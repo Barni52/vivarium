@@ -39,6 +39,7 @@ import {
   MONO,
   THEMES,
   applyTheme,
+  crossfadeTheme,
   currentTheme,
   tokensFor,
   type ThemeName
@@ -1143,9 +1144,11 @@ export const useStore = create<AppState>((set, get) => ({
   // renderer has drawn anything — so a `paper` window without this flashes a
   // near-black band down whichever edge you are dragging.
   setTheme: (name) => {
-    applyTheme(name)
-    set({ theme: name })
-    window.vivarium.setWindowBackground(tokensFor(name).bg)
+    crossfadeTheme(() => {
+      applyTheme(name)
+      set({ theme: name })
+      window.vivarium.setWindowBackground(tokensFor(name).bg)
+    })
   },
   cycleTheme: () => {
     const i = THEMES.findIndex((t) => t.name === get().theme)

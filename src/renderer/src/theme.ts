@@ -465,6 +465,27 @@ export function applyTheme(name: ThemeName): void {
   }
 }
 
+/**
+ * Run a theme change inside a single crossfade of the window.
+ *
+ * The browser snapshots the old frame, runs `update`, and fades to the new one on
+ * the compositor, so the cost is one style recalculation however large the page
+ * is, and no frame ever shows two themes. That covers the terminals as well: their
+ * canvases cannot take a CSS transition, so they used to snap ahead of the page.
+ *
+ * `update` runs asynchronously, after the old frame is captured. A hidden window
+ * has no frame to capture and the API would only skip the animation, so it applies
+ * directly, as it does if the API is ever missing.
+ */
+export function crossfadeTheme(update: () => void): void {
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown }
+  if (!doc.startViewTransition || document.visibilityState === 'hidden') {
+    update()
+    return
+  }
+  doc.startViewTransition(update)
+}
+
 /** `--bg:#12141c;--panel:#171a24;…` for one theme. */
 const vars = (t: Tokens): string =>
   Object.entries(t)
@@ -530,27 +551,22 @@ const APP_CSS = `
      sidebar and the terminal beside it disagreed about how wide a character is. */
   body{font-family:${MONO};font-size:12.5px;color:var(--fg)}
   ::selection{background:var(--selection)}
-  /* **The theme swap, and the only reason this rule is global.**
+  /* **The theme swap is one crossfade of the whole window, never a transition per
+     element.** See \`crossfadeTheme\`. This used to be
+     \`*{transition:background-color .15s,color .15s,border-color .15s}\`, which
+     started some 25 000 main-thread animations on every swap (one per element,
+     per property) in a window of 22 000 nodes: about a second frozen, and the
+     150ms fade over in about three frames. Elements with a transition of their own
+     ran on a different clock or none, so the frames that were drawn were half one
+     theme and half the other. Do not bring a universal transition back: it also
+     adds work to every later style recalculation.
 
-     Almost every surface in this app is styled *inline*, so there is no class to
-     hang a transition on and no stylesheet rule that could win against the
-     inline background anyway — but \`transition\` is not in competition with
-     anything here, it only says *how* a value that changed should arrive. One
-     universal rule therefore covers every element the swap touches, including
-     the ones nobody has written yet, which is exactly the argument the radius
-     and hover rules already make for the chat window.
-
-     Three properties and no more: \`background-color\`, \`color\`, \`border-color\`.
-     Not \`all\`, and not \`box-shadow\` — the focus ring is drawn with a shadow
-     and it has to appear the instant a key lands, not fade in over 150ms.
-
-     **Progress fills opt out.** A meter animates its own \`width\` as a reading
-     changes, and a colour transition on top of that turns the escalation from
-     accent → amber → red into a smear through the intermediate hues while the
-     bar is also moving. \`[data-meter]\` marks the fill, not the track: the
-     track is an ordinary themed surface and should cross-fade like the rest. */
-  *,*::before,*::after{transition:background-color .15s,color .15s,border-color .15s}
-  [data-meter]{transition:none}
+     The control fade that rule gave as a side effect stays, for the buttons that
+     have no hover of their own. \`.vchat\` narrows it below, because the log can
+     hold thousands of them. */
+  button{transition:background-color .15s,color .15s,border-color .15s}
+  ::view-transition{pointer-events:none}
+  ::view-transition-old(root),::view-transition-new(root){animation-duration:.16s}
   /* Keyboard focus. Every field in this app sets outline:none inline and inline
      styles win, so the ring is drawn with box-shadow instead: a hairline in the
      accent hue plus a soft bloom, square like the controls it wraps. :focus-visible
@@ -780,7 +796,7 @@ export const GLOBAL_CSS = `${APP_CSS}
      The data-click attribute is for what is clickable without being a button:
      a tool card and the thinking row, which are divs because they wrap block
      content a button may not contain. */
-  .vchat button:not(:disabled),.vchat [data-click]{transition:filter .12s,background-color .12s,border-color .12s,color .12s}
+  .vchat button:not(:disabled),.vchat [data-click]{transition:filter .12s}
   .vchat button:not(:disabled):hover,.vchat [data-click]:hover{filter:var(--hover-lift)}
   .vchat button:not(:disabled):active,.vchat [data-click]:active{filter:var(--press-lift)}
   /* …with two exceptions, and they are the same exception twice. The lift above
@@ -806,7 +822,7 @@ export const GLOBAL_CSS = `${APP_CSS}
      shown to a corner nobody is pointing at. Opacity only — a hover in this
      window may not change a height, and the log re-pins its tail on any
      height change at all. */
-  .vchat [data-code] [data-copy]{opacity:0;pointer-events:none;transition:opacity .12s,filter .12s,color .12s}
+  .vchat [data-code] [data-copy]{opacity:0;pointer-events:none;transition:opacity .12s,filter .12s}
   .vchat [data-code]:hover [data-copy],.vchat [data-code] [data-copy]:focus-visible,.vchat [data-code] [data-copy][data-copied]{opacity:1;pointer-events:auto}
   /* A row of the output tree or the compare popover. Its actions appear on hover
      or with keyboard focus inside it, and display is safe here because the row
@@ -831,6 +847,23 @@ export const GLOBAL_CSS = `${APP_CSS}
      way, so the content box stays the full width of the column and no row
      reflows when a conversation grows past one screen. */
   .vchat-log::-webkit-scrollbar{width:0;height:0}
+  /* **A row off screen costs no layout and no paint**, which is what makes resizing
+     a long chat cheap. \`auto\` in the intrinsic size means "the height it last had",
+     so the number is only a guess for a row never yet drawn.
+     This is not virtualisation, deliberately: the rows stay in the DOM, so expanded
+     cards, find, selection and copy all keep working.
+
+     Two things the containment brings: a row is a containing block for
+     \`position: fixed\` (the image viewer portals out for that reason), and its
+     paint is clipped to its box, so a row may not draw outside itself.
+
+     \`data-measure\` is \`measureRows\` in ChatView: heights are only estimates until
+     a row is drawn, so anything that aims at a position draws them once first. The
+     \`contain\` there is load-bearing: \`auto\` implies layout containment, which
+     keeps margins inside a row, so plain \`visible\` lays the log out at a different
+     height from the one it returns to, and a jump lands 28px off per affected row. */
+  .vchat-row{content-visibility:auto;contain-intrinsic-block-size:auto 120px}
+  .vchat-log[data-measure] .vchat-row{content-visibility:visible;contain:layout style paint}
 `
 
 /**

@@ -123,9 +123,7 @@ function UsageChip({
           display: 'flex'
         }}
       >
-        {/* data-meter opts the fill out of the global theme transition — see
-            GLOBAL_CSS. The track above keeps it. */}
-        <span data-meter="" style={{ width: `${pct}%`, background: color }} />
+        <span style={{ width: `${pct}%`, background: color }} />
       </span>
       <span style={{ fontSize: 11.5, color: 'var(--muted)', minWidth: 28 }}>
         {Math.round(pct)}%

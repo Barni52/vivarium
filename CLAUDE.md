@@ -147,8 +147,12 @@ longer holds, because an agent's delete gets no `confirmKill` to do it.
 - **Ink is never a constant.** `--accent2` is a light orange on midnight, a light amber on graphite
   and a dark rust on paper, so anything filled names its own ink token — `--on-accent2`,
   `--danger-fg`, `--send-fg`, `--accent-fg`. This is the rule paper breaks first if ignored.
-- **The theme swap transitions; progress fills opt out** with `data-meter`. A meter animates its
-  own `width` and escalates through three hues, and cross-fading colour on top of that smears it.
+- **The theme swap is one View Transition of the whole window** (`crossfadeTheme`), so it costs one
+  style recalculation and no frame shows two themes. **There is no universal `transition` rule, and
+  it must not come back:** `*{transition:…}` started ~25 000 main-thread animations per swap, froze
+  the window for about a second and drew half-swapped frames. It is also why `.vchat button` only
+  transitions `filter`: the log can hold thousands of them, and each listed colour property would
+  start an animation on every swap.
 - The ANSI palette is per theme: Campbell on the dark two, a darkened set on paper where `white`
   and `brightWhite` are **deliberately inverted** so `\e[97m` stays readable on cream.
 
@@ -678,6 +682,20 @@ the reasoning.
   yanking a reader who scrolled up. **Corollary, binding the pinned bands and everything in the
   log: a hover may not change a height.** The question card's preview pane reserves the tallest
   option's space with `visibility`; do not compute it against font metrics.
+- **A chat costs only what is on screen, in three layers.** A hidden chat is
+  `content-visibility: hidden`: `visibility` alone kept every hidden log laid out, so each paid for
+  every resize step. A chat never yet shown draws no rows (`seen`/`drawn` in `ChatView`), because
+  rendering 300 rows per hidden chat was the freeze after launch. And an off-screen row is
+  `content-visibility: auto` (`.vchat-row`), which is **not** virtualisation: rows stay in the DOM, so
+  expanded cards, find, selection and copy all still work. Terminals get none of this, since they
+  have to keep measuring to fit. Measured on six large transcripts: 22 000 nodes to 1 900, a resize
+  step from ~280ms to ~10ms.
+- **Off-screen heights are estimates, so anything that aims at a position calls `measureRows`
+  first** (the outline, find, the scroll rail). It holds rows drawn until `scrollend`, with
+  `contain: layout style paint` kept on: `auto` implies layout containment, and plain `visible`
+  collapses margins differently, which landed a jump 28px off per affected row. A row is also a
+  containing block for `position: fixed` and clips its paint, so a row may not draw outside itself
+  (the image viewer portals out).
 - **Streamed prose is revealed at a steady rate, and that is not decoration** — the CLI's own
   cadence is ~68 characters every ~460 ms, so `ChatLog` drains at a *rate* (`REVEAL_CATCHUP`),
   only for the row the running turn is writing into, and snaps to full the instant the turn ends.

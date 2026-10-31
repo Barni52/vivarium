@@ -105,6 +105,39 @@ const COMPOSER_MIN_H = 24
 // thing `zoom` still changes is the size of the type. All that is left to keep
 // in step is the side padding, and both take it from EDGE.
 
+/** One stable empty list, so an undrawn log gives React nothing new to compare. */
+const NO_ROWS: ChatEntry[] = []
+
+/**
+ * Draw every row of the log once, so positions are real before something aims at
+ * one.
+ *
+ * Off-screen rows only have an estimated height until they are drawn (`.vchat-row`
+ * in theme.ts). A smooth scroll to a row far away would fix its destination from
+ * those estimates and land in the wrong place. Costs one layout of the log, on a
+ * deliberate jump.
+ *
+ * Held until the scroll has finished, not for a fixed frame or two: letting rows
+ * go back to being skipped mid-flight moved the target by a few dozen pixels. The
+ * timeout is for a jump that does not move, which fires no `scrollend`. A second
+ * call replaces the first, so stepping through find hits cannot end the hold early.
+ */
+const measureEnds = new WeakMap<HTMLElement, () => void>()
+function measureRows(log: HTMLElement): void {
+  measureEnds.get(log)?.()
+  log.dataset.measure = ''
+  void log.scrollHeight
+  const end = (): void => {
+    clearTimeout(timer)
+    log.removeEventListener('scrollend', end)
+    measureEnds.delete(log)
+    delete log.dataset.measure
+  }
+  const timer = setTimeout(end, 1500)
+  log.addEventListener('scrollend', end)
+  measureEnds.set(log, end)
+}
+
 export function ChatView({
   project,
   session,
@@ -348,16 +381,18 @@ export function ChatView({
    * streamed token would otherwise drag you straight back to the bottom.
    */
   const jumpToRow = React.useCallback((id: string): void => {
-    const el = logRef.current?.querySelector(`[data-row="${CSS.escape(id)}"]`)
-    if (!el) return
+    const log = logRef.current
+    const el = log?.querySelector(`[data-row="${CSS.escape(id)}"]`)
+    if (!log || !el) return
     pinned.current = false
+    measureRows(log)
     el.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }, [])
 
-  // Becoming visible is not a resize (the view is hidden with `visibility`, so
-  // it keeps its layout the whole time), and a chat that was at the bottom when
-  // you left it should be at the bottom when you come back.
-  React.useEffect(() => {
+  // A chat that was at the bottom when you left it should be at the bottom when
+  // you come back. Before paint, or the first frame of a newly drawn log shows
+  // its top.
+  React.useLayoutEffect(() => {
     const el = logRef.current
     if (visible && el && pinned.current) el.scrollTop = el.scrollHeight
   }, [visible])
@@ -527,6 +562,20 @@ export function ChatView({
    * reader who has scrolled up.
    */
   const lastRowId = rows.length > 0 ? rows[rows.length - 1].id : null
+
+  /**
+   * No rows until this chat has been on screen once.
+   *
+   * Every chat opens at launch and stays mounted, which is right for the process
+   * behind it and wrong for its log: building 300 rows of markdown for each chat
+   * nobody is looking at was most of the two or three seconds the window spent
+   * unresponsive after appearing. Set during render rather than in an effect so the
+   * first frame of the chat already has them. The chat's data is unaffected; only
+   * the DOM waits.
+   */
+  const seen = React.useRef(visible)
+  if (visible) seen.current = true
+  const drawn = seen.current ? rows : NO_ROWS
   React.useLayoutEffect(() => {
     const el = logRef.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
@@ -765,7 +814,9 @@ export function ChatView({
    */
   React.useEffect(() => {
     if (!activeHit) return
-    const el = logRef.current?.querySelector(`[data-row="${CSS.escape(activeHit)}"]`)
+    const log = logRef.current
+    if (log) measureRows(log)
+    const el = log?.querySelector(`[data-row="${CSS.escape(activeHit)}"]`)
     if (!el) return
     pinned.current = false
     el.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -1179,7 +1230,13 @@ export function ChatView({
         // reason: nothing in a chat is unrecoverable, so terminals *must* stay
         // mounted while a chat merely *may*. What it buys is scroll position,
         // which cards are expanded, and the draft.
+        //
+        // `contentVisibility` is what makes that cheap, and it is chat-only.
+        // `visibility` alone keeps a hidden chat fully laid out, so every hidden
+        // chat paid for each resize step and each style change as if it were on
+        // screen. A terminal cannot do this: it has to keep measuring to fit.
         visibility: visible ? 'visible' : 'hidden',
+        contentVisibility: visible ? 'visible' : 'hidden',
         outline: dragOver ? `1px dashed ${CHAT.you}` : 'none'
       }}
     >
@@ -1412,9 +1469,10 @@ export function ChatView({
               Every match in the log is already washed, and washing one of them
               *harder* is not a difference you can find by eye; an edge is. */}
           <FindContext.Provider value={matcher}>
-            {rows.map((e) => (
+            {drawn.map((e) => (
               <div
                 key={e.id}
+                className="vchat-row"
                 data-row={e.id}
                 style={
                   e.id === activeHit
@@ -1962,8 +2020,9 @@ function Header({
     if (!el) return
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth
-      // Zero is a hidden chat: `visibility` keeps its layout, but a view that has
-      // no box yet must not be read as a very narrow one.
+      // Zero is a view with no box yet, which must not be read as a very narrow
+      // one. A hidden chat does not get here at all: its contents are skipped, and
+      // the observer fires when it comes back.
       if (w > 0) setRoom(w >= HEADER_FULL_WIDTH ? 2 : w >= HEADER_BAR_WIDTH ? 1 : 0)
     })
     ro.observe(el)
@@ -2069,11 +2128,6 @@ function Header({
             >
               {pct !== null && (
                 <span
-                  // data-meter: out of the global theme transition (GLOBAL_CSS).
-                  // This fill already animates its own `width` and escalates
-                  // through three hues; cross-fading the colour on top of that
-                  // smears the escalation while the bar is moving.
-                  data-meter=""
                   style={{
                     display: 'block',
                     height: '100%',
@@ -4608,6 +4662,9 @@ const ScrollRail = React.memo(function ScrollRail({
     const thumb = thumbRef.current
     if (!rail || !log || !thumb || thumb.style.display === 'none') return
     e.preventDefault()
+    // A drag turns a fraction into a position, so the fraction has to be of the
+    // real height or the log jitters under the pointer as rows get drawn.
+    measureRows(log)
     const rect = rail.getBoundingClientRect()
     const thumbH = thumb.offsetHeight
     const within = e.clientY - rect.top - thumb.offsetTop

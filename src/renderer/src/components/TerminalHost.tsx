@@ -210,7 +210,7 @@ export function TerminalHost(): React.ReactElement {
       {/* Terminal body — one persistent xterm per live session. It renders even
           with nothing selected, and the empty state sits *over* it: the views in
           here are what open the ptys, so a body that only existed once something
-          was selected would mean nothing ever came up on its own. Hidden views use
+          was selected would mean nothing ever came up on its own. Hidden terminals use
           visibility:hidden, which keeps their layout, so they still fit correctly
           behind the overlay. */}
       {/* data-terminal-host lets the context-menu catcher detect a click
