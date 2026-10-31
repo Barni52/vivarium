@@ -84,16 +84,39 @@ gh release view vX.Y.Z --json assets --jq '[.assets[]|{name,size,state}]'
 ## Release-notes style
 
 This is the part worth getting right; the rest is mechanical. Read the previous release
-(`gh release view <lasttag>`) before writing, and match it.
+(`gh release view <lasttag>`) before writing, and match its voice and format. Do not match its
+length: that follows from what shipped.
 
-- `## Vivarium vX.Y` heading, then one `###` section per substantial change, ordered by how
-  much it changes daily use. Fixes collect in a single `### Fixes` list at the end.
+**Rank the changes before writing a word of the notes.** The session running the release has just
+done some of this work, so that work feels biggest. It is not a reason to lead with it.
+
+1. Go through **every** commit since the last tag, oldest included: `git log <lasttag>..HEAD`
+   with bodies, and `git show --stat` for what each one touched. Read the diff of any commit
+   whose message says little (`Random fixes`).
+2. List every user-visible change and rank the list by how much it changes the user's daily use.
+   Ask what the user will notice most after installing, and what they could now do that they
+   could not before.
+3. These do not count towards importance: which session made the change, how recent it is, how
+   much work it took, how large the diff or the commit body is, and how good its numbers look.
+4. Write the sections in that order, and give the release commit subject its headline topics in
+   the same order.
+
+**Length follows importance.** Not everything deserves the same number of words.
+
+- The top change or two get a section with the reasoning and trade-offs. Nothing gets more words
+  than the change ranked above it.
+- A moderate change gets a short section: a sentence or two on the symptom and the fix.
+- A small change gets one line under `### Fixes`, however interesting it was to build.
+- If nothing in a release is big, the notes are short. Do not inflate a change to fill a section.
+
+- `## Vivarium vX.Y` heading, then one `###` section per change that earns one, in ranked order.
+  Everything smaller collects in a single `### Fixes` list at the end.
 - **Lead with the symptom, not the change.** "An agent that finished planning sat there showing
   a climbing timer" before "both tools now report through the bridge". The reader recognises
   the symptom; they have never heard of the bridge.
-- Explain the *why* and the constraint, in prose, at the density the codebase comments use —
-  the WSL clock drift, the capture-phase listener, the 3-second probe. These notes double as
-  the public record of decisions this repo's comments make internally.
+- In the sections that earn it, explain the *why* and the constraint in prose — the WSL clock
+  drift, the capture-phase listener, the 3-second probe. These notes double as the public record
+  of decisions this repo's comments make internally.
 - Say what was traded away, not only what was gained (Ctrl+F taking the chord from readline).
 - Bold the sentence a skimmer needs. Do not bold whole paragraphs.
 - Close with `---` and `**Install:** download \`Vivarium-<version>-setup.exe\` below and run it

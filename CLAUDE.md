@@ -826,4 +826,13 @@ There is **no test suite, by design — don't add one.**
   commented, and that is where the reasoning this file only indexes actually lives. New code keeps
   that style — explain Windows quirks, docker gotchas and non-obvious decisions inline, focusing
   on *why* and on constraints the code cannot express.
+- **A comment has to earn its place, so dense does not mean more.** Do not restate what the code
+  says, and do not narrate how something used to work unless that stops the mistake being repeated;
+  git keeps the rest. **When you change code, fix or delete the stale and pointless comments around
+  that change.** Stay in the area you touched: no whole-file sweeps, because a cleanup can delete
+  the one line that was protecting a fix. Keep anything that records a trap or a "do not bring this
+  back", even if it looks unnecessary, unless the code it guards is gone.
+- **A comment is a past agent's belief, not evidence.** It can be confidently wrong: the note on the
+  old universal `transition` rule argued for the thing freezing the app. When a change depends on
+  one, check it against the code or a measurement first.
 - Cross-process types live in `src/shared/types.ts`; renderer-only types stay in the renderer.
