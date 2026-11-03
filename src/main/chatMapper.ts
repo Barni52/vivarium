@@ -815,7 +815,7 @@ export class ChatMapper {
       }
       else if (type === 'document') chips.push({ kind: 'document', name: str(b.title) || 'document' })
       else if (type === 'tool_result') {
-        const done = this.toolResult(b, obj(line.toolUseResult) ?? obj(line.tool_use_result), at)
+        const done = this.toolResult(b, obj(line.toolUseResult) ?? obj(line.tool_use_result), at, touched)
         if (done) touched.push(done)
       }
     })
@@ -908,7 +908,7 @@ export class ChatMapper {
     for (const block of arr(content)) {
       const b = obj(block)
       if (!b || str(b.type) !== 'tool_result') continue
-      const done = this.toolResult(b, obj(line.toolUseResult) ?? obj(line.tool_use_result), at)
+      const done = this.toolResult(b, obj(line.toolUseResult) ?? obj(line.tool_use_result), at, touched)
       if (done) touched.push(done)
     }
     const text = (
@@ -1366,8 +1366,34 @@ export class ChatMapper {
     entry.endedAt = at
   }
 
+  /**
+   * A background command the agent stopped itself, with `TaskStop` (what
+   * `KillShell` / `KillBash` are now called). The CLI marks the task notified
+   * as it kills it, so the live `task_notification` frame is the only end it
+   * reports and no `<task-notification>` line reaches the transcript: the model
+   * already has the tool result. That result is the only record of the stop in
+   * the file, so the row ends here. Without it the settle at `result` rebuilt a
+   * command launched and stopped in the same turn from the file as still
+   * running, over the row the live frame had already ended, and it span until a
+   * reopen, which then called it `unknown`.
+   */
+  private shellStopped(input: Json, structured: Json | null, at: number): ShellEntry | undefined {
+    const taskId = str(structured?.task_id) || str(input.task_id) || str(input.shell_id)
+    const shell = taskId ? this.findShellRow('', taskId) : undefined
+    if (!shell?.running) return undefined
+    shell.running = false
+    shell.status = 'stopped'
+    shell.endedAt = at
+    return shell
+  }
+
   /** A tool_result completes the card its tool_use already produced. */
-  private toolResult(b: Json, structured: Json | null, at: number): ChatEntry | null {
+  private toolResult(
+    b: Json,
+    structured: Json | null,
+    at: number,
+    touched: ChatEntry[]
+  ): ChatEntry | null {
     const toolUseId = str(b.tool_use_id)
     const pending = this.tools.get(toolUseId)
     if (!pending) return null
@@ -1474,6 +1500,10 @@ export class ChatMapper {
     if (title && !isError) entry.title = title
     entry.body = body
     if (body.text) this.bodies.set(entry.id, body.text)
+    if (/^(TaskStop|KillShell|KillBash)$/.test(name) && !isError) {
+      const stopped = this.shellStopped(input, structured, at)
+      if (stopped) touched.push(stopped)
+    }
     // A foreground command the CLI moved to the background — past its timeout,
     // or to let a message through — has an ordinary call card already, and its
     // result says it is now a background task. It becomes the row a background

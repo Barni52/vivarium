@@ -613,7 +613,9 @@ the reasoning.
   `Monitor`. Card in the log with a `$` and a `--ok` rail (`CHAT.shell` — an alias, not a new
   token), its own **shells band** under the agents band, and the agent panel's slot for its
   detail. It ends on the CLI's task frames or its `<task-notification>`, matched by call id or
-  task id, and is adopted across turns by reference like an agent. Its **output is read, never
+  task id, and is adopted across turns by reference like an agent. **A command the agent stops
+  with `TaskStop` gets no notification line**, only a live frame, so the mapper also ends the row
+  on that tool's result, or the settle brings it back as running. Its **output is read, never
   streamed**: the panel asks main for the last 500 lines of the file the CLI writes, once a
   second while the command runs and only while the panel shows it (`chat:task-output`, path
   checked against `…/tasks/<id>.output` and handed to `tail` without a shell). Stop is the CLI's
