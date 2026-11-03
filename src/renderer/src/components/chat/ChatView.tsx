@@ -2960,7 +2960,7 @@ function AgentDetail({
         {entry.description}
       </div>
       <div style={{ marginTop: 6, fontFamily: MONO, fontSize: TYPE.mono, display: 'flex' }}>
-        <AgentStatus entry={entry} liveTools={progress.tools} verbose />
+        <AgentStatus entry={entry} liveTools={progress.tools} />
       </div>
 
       {entry.prompt && (

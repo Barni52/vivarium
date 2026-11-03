@@ -726,6 +726,9 @@ export const CHAT = {
   /** a find-in-chat match; the current row additionally takes a `you` rail */
   find: 'var(--find)',
   danger: 'var(--danger)',
+  /** the outcome chip of a finished agent or command: succeeded, failed */
+  doneFill: 'var(--ok-soft)',
+  failFill: 'var(--danger-soft)',
   /** context fill, escalating — `--accent2` while there is room, then amber, then red */
   ctx: ['var(--accent2)', 'var(--str)', 'var(--danger)']
 }

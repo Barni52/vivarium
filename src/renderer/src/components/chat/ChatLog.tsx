@@ -1571,23 +1571,59 @@ export function agentProgress(sub: ChatEntry[] | undefined): { tools: number; la
 }
 
 /**
- * An agent's outcome in one line: a mark, then what it cost.
+ * How a finished agent or command ended, as a labelled chip on a soft fill of
+ * its colour: `✓ done`, `✗ failed`, or `■` and the status word for anything
+ * else (`stopped`, `no report`, `unknown`) on the neutral track.
+ *
+ * A bare grey `✓` at the end of the line was the whole difference between a
+ * running row and a finished one, and it read as neither. So success gets a
+ * colour of its own now, but only this soft fill, which keeps a log full of
+ * finished work quiet. The mark stays in front of the word so the shape still
+ * says it without the hue. The line height is held under the mono line's, so a
+ * row does not grow as the chip replaces the clock.
+ */
+function OutcomeChip({
+  outcome,
+  status
+}: {
+  outcome: 'done' | 'failed' | 'other'
+  status: string
+}): React.ReactElement {
+  const look =
+    outcome === 'done'
+      ? { mark: '✓', word: 'done', fill: CHAT.doneFill, ink: CHAT.live }
+      : outcome === 'failed'
+        ? { mark: '✗', word: 'failed', fill: CHAT.failFill, ink: CHAT.danger }
+        : { mark: '■', word: status || 'ended', fill: CHAT.track, ink: CHAT.dim2 }
+  return (
+    <span
+      style={{
+        flex: 'none',
+        padding: '0 6px',
+        borderRadius: CHAT.radius,
+        lineHeight: '16px',
+        background: look.fill,
+        color: look.ink
+      }}
+    >
+      {look.mark} {look.word}
+    </span>
+  )
+}
+
+/**
+ * An agent's outcome in one line: the outcome chip, then what it cost.
  *
  * One component for the log card, the band and the panel, so the three can
- * never disagree about whether an agent finished. Colour is spent only on a
- * failure — the same rule the `stop` row follows — and the mark carries the
- * meaning without it.
+ * never disagree about whether an agent finished.
  */
 export function AgentStatus({
   entry,
-  liveTools,
-  verbose = false
+  liveTools
 }: {
   entry: Extract<ChatEntry, { kind: 'task' }>
   /** calls counted off the sub-log, for while the row has no total of its own */
   liveTools: number
-  /** the panel spells the status word out; the card and the band let the mark say it */
-  verbose?: boolean
 }): React.ReactElement {
   if (entry.running) {
     return (
@@ -1602,15 +1638,14 @@ export function AgentStatus({
   const done = entry.status === 'completed'
   const tools = entry.tools ?? (liveTools || null)
   const stats = [
-    verbose || (!done && !failed) ? entry.status : null,
     entry.durationMs !== null ? secs(entry.durationMs) : null,
     tools !== null ? calls(tools) : null,
     entry.tokens !== null ? `${tok(entry.tokens)} tok` : null
   ].filter(Boolean)
   return (
-    <span style={{ flex: 'none', color: failed ? CHAT.danger : CHAT.dim2 }}>
-      {done ? '✓ ' : failed ? '✗ ' : '■ '}
-      {stats.join(' · ')}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none', color: CHAT.dim2 }}>
+      <OutcomeChip outcome={done ? 'done' : failed ? 'failed' : 'other'} status={entry.status} />
+      {stats.length > 0 && <span>{stats.join(' · ')}</span>}
     </span>
   )
 }
@@ -1765,14 +1800,13 @@ export function ShellStatus({
   const failed = entry.status === 'failed' || (entry.exitCode !== null && entry.exitCode !== 0)
   const done = entry.status === 'completed' && !failed
   const stats = [
-    verbose || (!done && !failed) ? entry.status : null,
     entry.exitCode !== null && (failed || verbose) ? `exit ${entry.exitCode}` : null,
     entry.endedAt !== null ? secs(Math.max(0, entry.endedAt - entry.at)) : null
   ].filter(Boolean)
   return (
-    <span style={{ flex: 'none', color: failed ? CHAT.danger : CHAT.dim2 }}>
-      {done ? '✓ ' : failed ? '✗ ' : '■ '}
-      {stats.join(' · ')}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none', color: CHAT.dim2 }}>
+      <OutcomeChip outcome={done ? 'done' : failed ? 'failed' : 'other'} status={entry.status} />
+      {stats.length > 0 && <span>{stats.join(' · ')}</span>}
     </span>
   )
 }
