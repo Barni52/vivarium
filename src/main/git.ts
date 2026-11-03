@@ -141,6 +141,7 @@ export async function writeBranchDiff(
   // 3. Build + run the diff (or note that nothing is in scope).
   let body: string
   let stats: DiffStats | undefined
+  let files: DiffFileStat[] = []
   if (hadMounts && specs.length === 0) {
     body = 'No mounted folders are inside this repository; nothing to diff.'
   } else {
@@ -151,7 +152,9 @@ export async function writeBranchDiff(
       body = `git diff failed:\n${diff.stderr.trim() || 'unknown error'}`
     } else {
       body = diff.stdout.trim() ? diff.stdout : 'No differences.'
-      stats = await numstat(cwd, ['diff', '--numstat', ...args.slice(1)])
+      const counted = await numstat(cwd, ['diff', '--numstat', '-z', ...args.slice(1)])
+      stats = counted?.stats
+      files = counted?.files ?? []
     }
   }
 
@@ -165,6 +168,7 @@ export async function writeBranchDiff(
     stats ? `# stat:    ${formatStats(stats)}` : null,
     `# generated: ${new Date().toISOString()}`,
     fetchNote ? `# note:    ${fetchNote}` : null,
+    ...(files.length ? ['# files:', ...formatFileTree(files).map((row) => `#   ${row}`)] : []),
     ''
   ]
     .filter((l) => l !== null)
@@ -179,24 +183,104 @@ export async function writeBranchDiff(
 }
 
 /**
- * Sum `git diff --numstat`. A second git run rather than counting `+` lines in
- * the body, because this is exact where a count has to guess at a line that
- * merely starts with `+++`, and a binary file (`-  -  path`) still counts as a
- * file. It goes in the header so the preview can read the true size of a diff
- * too large to load whole.
+ * Read `git diff --numstat -z` per file and summed. A second git run rather
+ * than counting `+` lines in the body, because this is exact where a count has
+ * to guess at a line that merely starts with `+++`, and a binary file
+ * (`-  -  path`) still counts as a file. The sum goes in the header so the
+ * preview can read the true size of a diff too large to load whole; the per-file
+ * counts become the header's file tree.
+ *
+ * `-z` because without it a rename is spelled `src/{a => b}/x.ts` and a path
+ * with unusual characters comes back quoted, neither of which is a path. With
+ * it, a rename leaves the path field empty and puts the old and new names in the
+ * next two NUL-separated fields; the tree files it under the new one.
  */
-async function numstat(cwd: string, args: string[]): Promise<DiffStats | undefined> {
+async function numstat(
+  cwd: string,
+  args: string[]
+): Promise<{ stats: DiffStats; files: DiffFileStat[] } | undefined> {
   const r = await run('git', args, cwd)
   if (r.code !== 0) return undefined
   const stats: DiffStats = { added: 0, removed: 0, files: 0 }
-  for (const line of r.stdout.split('\n')) {
-    const [added, removed] = line.split('\t')
-    if (added === undefined || removed === undefined) continue
+  const files: DiffFileStat[] = []
+  const fields = r.stdout.split('\0')
+  for (let i = 0; i < fields.length; i++) {
+    const [added, removed, path] = fields[i].split('\t')
+    if (added === undefined || removed === undefined || path === undefined) continue
+    const file: DiffFileStat = {
+      path: path || fields[(i += 2)] || '',
+      added: Number(added) || 0,
+      removed: Number(removed) || 0,
+      binary: added === '-'
+    }
+    files.push(file)
     stats.files++
-    stats.added += Number(added) || 0
-    stats.removed += Number(removed) || 0
+    stats.added += file.added
+    stats.removed += file.removed
   }
-  return stats
+  return { stats, files }
+}
+
+interface DiffFileStat {
+  path: string
+  added: number
+  removed: number
+  binary: boolean
+}
+
+interface FileTreeNode {
+  children: Map<string, FileTreeNode>
+  file?: DiffFileStat
+}
+
+/**
+ * The changed files as a text tree with each file's `+added −removed`, aligned
+ * in one column, for the header of `changes.txt`. A folder holding only a
+ * folder folds into one row (`renderer/src/`), as the output tree does, so a
+ * deep repo does not spend a row per level. Siblings keep git's order, which is
+ * already sorted by path.
+ */
+function formatFileTree(files: DiffFileStat[]): string[] {
+  const root: FileTreeNode = { children: new Map() }
+  for (const file of files) {
+    let node = root
+    for (const part of file.path.split('/')) {
+      let child = node.children.get(part)
+      if (!child) {
+        child = { children: new Map() }
+        node.children.set(part, child)
+      }
+      node = child
+    }
+    node.file = file
+  }
+
+  const rows: { label: string; file?: DiffFileStat }[] = []
+  const walk = (node: FileTreeNode, indent: string): void => {
+    const entries = [...node.children]
+    entries.forEach(([name, child], i) => {
+      const last = i === entries.length - 1
+      let label = name
+      let target = child
+      while (!target.file && target.children.size === 1) {
+        const [[nextName, next]] = target.children
+        if (next.file) break
+        label += `/${nextName}`
+        target = next
+      }
+      const branch = last ? '└── ' : '├── '
+      rows.push({ label: `${indent}${branch}${label}${target.file ? '' : '/'}`, file: target.file })
+      if (!target.file) walk(target, indent + (last ? '    ' : '│   '))
+    })
+  }
+  walk(root, '')
+
+  const width = Math.max(...rows.map((row) => row.label.length))
+  return rows.map(({ label, file }) => {
+    if (!file) return label
+    const counts = file.binary ? 'binary' : `+${file.added} −${file.removed}`
+    return `${label.padEnd(width)}  ${counts}`
+  })
 }
 
 /** The size of a diff in the one spelling the header and the tool answer share. */

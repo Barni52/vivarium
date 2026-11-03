@@ -2421,7 +2421,7 @@ export class ChatService {
     // replace them with — but its lines still went into the file, so the offset
     // has to step over them or the *next* turn's settle would map them again and
     // stamp them with the next turn's number, duplicating the whole cut turn.
-    else void this.skipTurn(l, from)
+    else void this.skipTurn(l, turn, from)
     l.malformed = 0
 
     // **Last, and only now.** This is the first moment the CLI is provably
@@ -2444,13 +2444,35 @@ export class ChatService {
    * Advance past a turn's transcript lines without rendering them. Used where a
    * settle would be wrong (an interrupt) but the bytes still have to be accounted
    * for, since every later read is relative to this offset.
+   *
+   * The same read also tells the turn's `you` row which transcript line it is,
+   * because that row is never settled and keeps its optimistic `you:<turn>` id,
+   * and a row with no uuid cannot be offered as a revert target — so the one
+   * message you most want back after an Esc was missing from the picker until a
+   * reopen re-read it. The uuid is taken from a throwaway mapper rather than the
+   * first user line in the read, because the mapper is what decides which line
+   * is your message on reopen: a task notification or an interrupt marker is a
+   * user line too, and neither is a `you` row.
    */
-  private async skipTurn(l: Live, from: number): Promise<void> {
+  private async skipTurn(l: Live, turn: number, from: number): Promise<void> {
     const uuid = l.session.claudeSessionId
     if (!uuid) return
+    const row = l.entries.find((e) => e.id === `you:${turn}`)
     const r = await l.rt.readTranscript(uuid, from)
     if (!r.ok) return
-    this.accounted(l, from + takeTurn(completeLines(r.text).complete).bytes)
+    const { lines, bytes } = takeTurn(completeLines(r.text).complete)
+    this.accounted(l, from + bytes)
+    // The same object, not the same id: a revert or a /clear that landed during
+    // the read has replaced the log and restarted the turn numbers, so `you:<turn>`
+    // can already name a newer message — and `upsert` appends a row it cannot
+    // find, which would put an abandoned one back.
+    if (row?.kind !== 'text' || !l.entries.includes(row)) return
+    const mapper = new ChatMapper(turn)
+    const now = Date.now()
+    for (const line of lines) mapper.feed(line, now)
+    const opener = mapper.entries.find((e) => e.role === 'you' && e.kind === 'text' && e.id.includes('#'))
+    if (!opener) return
+    this.upsert(l, [{ ...row, transcriptUuid: opener.id.slice(0, opener.id.indexOf('#')) }])
   }
 
   /**

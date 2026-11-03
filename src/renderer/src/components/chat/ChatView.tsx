@@ -588,22 +588,25 @@ export function ChatView({
    * the picker reaches exactly as far back as the conversation is loaded, and
    * `load earlier` widens it.
    *
-   * Two filters carry weight. `id.includes('#')` keeps only *settled* rows — a
-   * message main painted optimistically is `you:<turn>` and carries no transcript
-   * uuid, so there is nothing to aim the CLI at yet. And the rows are deduped by
-   * uuid because one send can produce several text blocks (an attachment forces a
-   * block array, a split-send writes two lines): they are one message and must
-   * read as one row, or reverting "the last message" would offer half of it.
+   * Two filters carry weight. Only a row that knows its transcript uuid is a
+   * target: a settled row has it as its id's first segment, and an interrupted
+   * turn's row, which is never settled and keeps its optimistic `you:<turn>` id,
+   * has it as `transcriptUuid` once main has stepped over the turn's bytes. A
+   * message still running has neither, so there is nothing to aim the CLI at yet.
+   * And the rows are deduped by uuid because one send can produce several text
+   * blocks (an attachment forces a block array, a split-send writes two lines):
+   * they are one message and must read as one row, or reverting "the last
+   * message" would offer half of it.
    */
   const revertTargets = React.useMemo(() => {
     const seen = new Set<string>()
     const out: { id: string; uuid: string; at: number; text: string }[] = []
     for (const e of entries) {
-      if (e.role !== 'you' || e.kind !== 'text' || !e.id.includes('#')) continue
-      const uuid = e.id.slice(0, e.id.indexOf('#'))
-      if (seen.has(uuid)) continue
+      if (e.role !== 'you' || e.kind !== 'text') continue
+      const uuid = e.id.includes('#') ? e.id.slice(0, e.id.indexOf('#')) : e.transcriptUuid
+      if (!uuid || seen.has(uuid)) continue
       seen.add(uuid)
-      out.push({ id: e.id, uuid, at: e.at, text: e.md })
+      out.push({ id: e.id.includes('#') ? e.id : uuid, uuid, at: e.at, text: e.md })
     }
     return out.reverse()
   }, [entries])

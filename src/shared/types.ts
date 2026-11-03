@@ -804,6 +804,14 @@ export type ChatEntry =
        * reopen with nothing persisted beside the transcript.
        */
       from?: string
+      /**
+       * The transcript uuid of a `you` row that is never settled and so keeps
+       * its optimistic `you:<turn>` id: an interrupted turn. Without it that
+       * message cannot be offered as a revert target until a reopen re-reads
+       * it, which is the one revert you reach for right after an Esc. Settled
+       * rows never carry it; their uuid is the first segment of the id.
+       */
+      transcriptUuid?: string
     })
   /** collapsed to its first line with a `▸ show` */
   | (ChatEntryBase & { kind: 'thinking'; md: string })
