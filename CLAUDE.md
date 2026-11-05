@@ -702,7 +702,9 @@ the reasoning.
   cadence is ~68 characters every ~460 ms, so `ChatLog` drains at a *rate* (`REVEAL_CATCHUP`),
   only for the row the running turn is writing into, and snaps to full the instant the turn ends.
   `LogRow` is memoised and `ChatView`'s `handlers` with it, or every paint re-renders every row in
-  the log, markdown parse included.
+  the log, markdown parse included. So nothing that changes while a turn runs may ride in
+  `handlers`: the subagent buffer did, and every frame of six parallel agents re-rendered the
+  whole log. A task row gets its sub-log as its own `sub` prop.
 - **The turn clock draws at the bottom of the log while running** and stays in its place in time
   once frozen — which takes agreement in three places (`settleTurn`, `freezeTurnClock`, the
   store's `applyEntries`).

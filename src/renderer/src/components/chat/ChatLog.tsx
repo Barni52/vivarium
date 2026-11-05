@@ -222,7 +222,6 @@ export interface LogHandlers {
   images: Record<string, string | null>
   /** ask for one — idempotent, and remembers the miss */
   onImage: (imageId: string) => void
-  subagents: Record<string, ChatEntry[]>
   /** the one Retry, offered by a crash / timeout row and by the read banner */
   onRetry: () => void
   /** the Windows path of a file an agent named, if it is in the output folder */
@@ -249,7 +248,8 @@ export const LogRow = React.memo(function LogRow({
   handlers,
   streaming = false,
   groupIndex = 0,
-  groupSize = 1
+  groupSize = 1,
+  sub
 }: {
   entry: ChatEntry
   handlers: LogHandlers
@@ -261,6 +261,14 @@ export const LogRow = React.memo(function LogRow({
    */
   groupIndex?: number
   groupSize?: number
+  /**
+   * A `task` row's sub-log. A prop of its own, never on `handlers`: every frame
+   * any running subagent sends replaces the store's `subagents` map, and while
+   * that map rode in `handlers` each of those frames re-rendered every row in
+   * the log. Six reviewers fanned out at once made scrolling crawl. Passed this
+   * way, a frame re-renders only the one card whose agent sent it.
+   */
+  sub?: ChatEntry[]
 }): React.ReactElement | null {
   switch (entry.kind) {
     case 'text':
@@ -528,7 +536,13 @@ export const LogRow = React.memo(function LogRow({
 
     case 'task':
       return (
-        <TaskRow entry={entry} handlers={handlers} groupIndex={groupIndex} groupSize={groupSize} />
+        <TaskRow
+          entry={entry}
+          handlers={handlers}
+          groupIndex={groupIndex}
+          groupSize={groupSize}
+          sub={sub}
+        />
       )
 
     case 'shell':
@@ -1690,14 +1704,15 @@ function TaskRow({
   entry,
   handlers,
   groupIndex,
-  groupSize
+  groupSize,
+  sub
 }: {
   entry: Extract<ChatEntry, { kind: 'task' }>
   handlers: LogHandlers
   groupIndex: number
   groupSize: number
+  sub: ChatEntry[] | undefined
 }): React.ReactElement {
-  const sub = handlers.subagents[entry.toolUseId]
   const progress = React.useMemo(() => agentProgress(sub), [sub])
   const on = handlers.openAgent === entry.toolUseId
   // A one-line peek, so the slice is cheap and the ellipsis does the rest — a

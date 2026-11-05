@@ -871,7 +871,6 @@ export function ChatView({
       bodies: chat?.bodies ?? {},
       images: chat?.images ?? {},
       onImage: (imageId: string) => void loadImage(session.id, imageId),
-      subagents: chat?.subagents ?? {},
       onRetry: () => void openChat(project.id, session.id, true),
       outputFile: (seen: string) => outputFileFrom(outputFolder, seen),
       onOpenOutput: openOutputFile,
@@ -883,7 +882,6 @@ export function ChatView({
       previewOutput,
       chat?.bodies,
       chat?.images,
-      chat?.subagents,
       loadBody,
       loadImage,
       loadSubagent,
@@ -1489,6 +1487,7 @@ export function ChatView({
                   streaming={e.id === streamingId}
                   groupIndex={agentGroups.get(e.id)?.index}
                   groupSize={agentGroups.get(e.id)?.size}
+                  sub={e.kind === 'task' ? chat?.subagents[e.toolUseId] : undefined}
                 />
               </div>
             ))}
@@ -2904,7 +2903,7 @@ function AgentPanel({
           {entry?.kind === 'shell' ? (
             <ShellDetail key={id} entry={entry} sessionId={sessionId} />
           ) : entry ? (
-            <AgentDetail key={id} entry={entry} handlers={inner} sub={subagents[id]} />
+            <AgentDetail key={id} entry={entry} handlers={inner} subagents={subagents} />
           ) : (
             <div style={{ fontSize: TYPE.prose, lineHeight: TYPE.proseLine, color: CHAT.dim3 }}>
               This is no longer in the loaded conversation — a <code>/clear</code> or a revert
@@ -2924,12 +2923,13 @@ function AgentPanel({
 function AgentDetail({
   entry,
   handlers,
-  sub
+  subagents
 }: {
   entry: TaskEntry
   handlers: LogHandlers
-  sub: ChatEntry[] | undefined
+  subagents: Record<string, ChatEntry[]>
 }): React.ReactElement {
+  const sub = subagents[entry.toolUseId]
   const progress = React.useMemo(() => agentProgress(sub), [sub])
   const long = entry.prompt.length > 360 || entry.prompt.split('\n').length > 5
   const [asked, setAsked] = React.useState(!long)
@@ -3025,7 +3025,12 @@ function AgentDetail({
             on the same edge as the report above it. */}
         <div style={{ margin: '0 -10px' }}>
           {(sub ?? []).map((e) => (
-            <LogRow key={e.id} entry={e} handlers={handlers} />
+            <LogRow
+              key={e.id}
+              entry={e}
+              handlers={handlers}
+              sub={e.kind === 'task' ? subagents[e.toolUseId] : undefined}
+            />
           ))}
         </div>
         {!sub?.length && (
