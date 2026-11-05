@@ -560,7 +560,10 @@ the reasoning.
   tagged with a `TurnOrigin` (`Live.origins`) and its `result` writes the answer into the sender
   as a `<chat-notification>` message, queued like anything else. A blocking wait would hold the
   sender's turn silent across the whole other turn and trip its own `SILENCE_BUSY_MS`. Only
-  agent-started turns notify — a chat you type into never reports to anyone.
+  agent-started turns notify — a chat you type into never reports to anyone. **And an
+  agent-started turn never flags you**: its idle is sent `quiet` (no "finished" mark, badge count
+  or taskbar flash), because the answer goes to the sender, whose own turn is what tells you. A
+  question card in it still flags, since only you can answer it.
 - **A reply turn inherits the relay.** B, working for A, asks C; C's answer opens a turn in B
   owed to A, so a chain answers all the way back. Every path that gives up on turns (`dropQueue`,
   `close`) fails their origins out loud rather than leaving a sender waiting; replies are never
@@ -568,7 +571,9 @@ the reasoning.
 - **Relayed words are the fifth thing that is not something you typed.** Both wrappers stay in
   the transcript (the receiving model must know an agent wrote it), and the mapper unwraps them
   into a `you`-role row carrying `from` — drawn as `from <name>` / `reply · <name>` in place of
-  `you`. Read unrecognised, either is a bubble of markup the user never typed.
+  `you`, with the `--role-agent` violet on the rail and the word and an `--agent-soft` wash over
+  the bubble, so it never reads as something you typed. Read unrecognised, either is a bubble of
+  markup the user never typed.
 - **An agent attaches MCP servers itself, and logs in with nobody at the keyboard.**
   `connect_mcp` sends `mcp_set_servers` (the Agent SDK's `setMcpServers`), which replaces only the
   servers added that way — the `--mcp-config` `vivarium` server is in a different list and is never

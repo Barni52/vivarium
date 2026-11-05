@@ -125,6 +125,9 @@ const MIDNIGHT = {
    * is a meaning, not a hex.
    */
   'role-agent': '#a98fe0',
+  /** the tint on a message another chat's agent sent into this one: the
+   *  `--role-agent` violet laid over the `you` bubble's `--card` */
+  'agent-soft': 'rgba(169,143,224,.10)',
 
   // ── Derived. ─────────────────────────────────────────────────────────────
   // The named palette does not cover a few states this app has and a transcript
@@ -231,6 +234,7 @@ const GRAPHITE: Tokens = {
   'role-you': '#9bb6a0',
   'role-stop': '#8c8a83',
   'role-agent': '#b294c9',
+  'agent-soft': 'rgba(178,148,201,.10)',
 
   // Still the one red in the app that means "this ends something" — a warm
   // theme is not a reason for a delete button to stop looking like one.
@@ -302,6 +306,7 @@ const PAPER: Tokens = {
   'role-stop': '#78736a',
   // Dark enough to carry 11px text on cream, like every other role hue here.
   'role-agent': '#6d3c9e',
+  'agent-soft': 'rgba(109,60,158,.08)',
 
   // A step darker than the close button's red, which stays what it is on every
   // theme: this one has to carry small text on cream.
@@ -715,6 +720,8 @@ export const CHAT = {
   stop: 'var(--role-stop)',
   /** a subagent — its card's rail, its band line, its panel */
   agent: 'var(--role-agent)',
+  /** the tint on a `you` bubble another chat wrote (`from` / `reply ·`) */
+  agentBand: 'var(--agent-soft)',
   /**
    * a background command — the same three places a subagent has. The "process
    * is up" green under a second name rather than a new hue: a shell is a

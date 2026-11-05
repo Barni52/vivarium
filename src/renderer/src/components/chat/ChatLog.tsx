@@ -89,6 +89,7 @@ function Line({
   role,
   color,
   band = false,
+  tint,
   children
 }: {
   at: number
@@ -96,13 +97,19 @@ function Line({
   color?: string
   /** the raised bubble that marks a turn you started */
   band?: boolean
+  /** a translucent wash laid over the bubble's surface, so the surface stays raised */
+  tint?: string
   children: React.ReactNode
 }): React.ReactElement {
   return (
     <div
       style={{
         padding: ROW_PAD,
-        background: band ? CHAT.band : undefined,
+        background: !band
+          ? undefined
+          : tint
+            ? `linear-gradient(${tint}, ${tint}), ${CHAT.band}`
+            : CHAT.band,
         // Only the bubble has an edge to round; every other row is a transparent
         // block on the page and a radius on it would draw nothing.
         borderRadius: band ? CHAT.radiusCard : undefined,
@@ -122,7 +129,7 @@ function Line({
         // more hairline. Margin, not padding — padding is inside the bubble and
         // would only make it taller. It cannot collapse anywhere awkward: the log
         // column has top padding, so it does not escape through the top.
-        borderLeft: band ? `2px solid ${CHAT.you}` : undefined,
+        borderLeft: band ? `2px solid ${color ?? CHAT.you}` : undefined,
         marginTop: band ? BAND_GAP : undefined
       }}
     >
@@ -274,7 +281,16 @@ export const LogRow = React.memo(function LogRow({
     case 'text':
       if (entry.role === 'you') {
         return (
-          <Line at={entry.at} role={entry.from ?? 'you'} color={CHAT.you} band>
+          // A message another chat's agent wrote takes the agent violet on its
+          // rail, its role word and a wash over the bubble, so it never reads
+          // as something you typed.
+          <Line
+            at={entry.at}
+            role={entry.from ?? 'you'}
+            color={entry.from ? CHAT.agent : CHAT.you}
+            tint={entry.from ? CHAT.agentBand : undefined}
+            band
+          >
             {entry.md && (
               <div
                 style={{

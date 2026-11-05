@@ -2390,8 +2390,12 @@ export class ChatService {
     // still going.
     if (l.inFlight.length === 0 && l.queue.length === 0) {
       // Suppressed at the same branch that reads terminal_reason for the stop
-      // row: you ended it, and being told it ended is noise.
-      this.setActivity(l, 'idle', aborted || l.interrupted)
+      // row: you ended it, and being told it ended is noise. Equally quiet when
+      // the turn answered another chat (it has an origin, read before
+      // `deliverReply` below takes it): the reply goes to that chat, and the
+      // sender's own turn is what tells you. A question card in such a turn
+      // still flags, because that one needs you.
+      this.setActivity(l, 'idle', aborted || l.interrupted || l.origins.has(turn))
     }
     l.interrupted = false
     l.mapper = null
