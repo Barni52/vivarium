@@ -109,6 +109,20 @@ const COMPOSER_MIN_H = 24
 const NO_ROWS: ChatEntry[] = []
 
 /**
+ * Whether a wheel up over `target` is taken by a scroller inside the log rather
+ * than by the log: something between the two that scrolls vertically and is not
+ * already at its top.
+ */
+function innerScrollsUp(target: EventTarget | null, log: HTMLElement): boolean {
+  for (let n = target instanceof Element ? target : null; n && n !== log; n = n.parentElement) {
+    if (n.scrollTop <= 0 || n.scrollHeight <= n.clientHeight) continue
+    const y = getComputedStyle(n).overflowY
+    if (y === 'auto' || y === 'scroll') return true
+  }
+  return false
+}
+
+/**
  * Draw every row of the log once, so positions are real before something aims at
  * one.
  *
@@ -274,6 +288,8 @@ export function ChatView({
    * which is the exact cost `LogRow`'s memo exists to avoid.
    */
   const [atTail, setAtTail] = React.useState(true)
+  /** the log's `scrollTop` at the last scroll event, to tell which way it moved */
+  const lastTop = React.useRef(0)
   /** when the last Esc landed, for the pair that opens the revert picker */
   const escAt = React.useRef(0)
   const zoom = useStore((s) => s.chatZoom)
@@ -416,14 +432,27 @@ export function ChatView({
     setFind({ term, caseSensitive: false, at: 0 })
   }, [visible, session.id, takePendingFind])
 
-  // Ctrl + wheel zooms, the terminal's convention. A native listener because it
-  // has to be non-passive: React registers wheel at the root as passive, where
-  // preventDefault is ignored and the page zooms *and* scrolls.
+  // Ctrl + wheel zooms, the terminal's convention, and a plain wheel up lets go
+  // of the tail. A native listener because the zoom has to be non-passive: React
+  // registers wheel at the root as passive, where preventDefault is ignored and
+  // the page zooms *and* scrolls.
   React.useEffect(() => {
     const el = logRef.current
     if (!el) return
     const onWheel = (e: WheelEvent): void => {
-      if (!e.ctrlKey) return
+      if (!e.ctrlKey) {
+        // A wheel up drops the tail pin *before* the scroll it starts. The
+        // scroll handler would drop it too, but only once the first step of
+        // Chromium's smooth scroll lands, a frame later; a resize in that frame
+        // assigns `scrollTop`, which cancels the animation outright, and the
+        // gesture is lost. Not when an inner scroller (a code block, a preview)
+        // is what the wheel is moving, since the log then stays where it is.
+        if (e.deltaY < 0 && el.scrollTop > 0 && !innerScrollsUp(e.target, el)) {
+          pinned.current = false
+          setAtTail(false)
+        }
+        return
+      }
       e.preventDefault()
       useStore.getState().zoomChat(e.deltaY < 0 ? 1 : -1)
     }
@@ -1354,7 +1383,19 @@ export function ChatView({
         className="vchat-scroll vchat-log"
         onScroll={(e) => {
           const el = e.currentTarget
-          const tail = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+          const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+          // **Any move up off the bottom drops the pin, however small.** The
+          // 40px is only how close you must come back to re-arm it. Read as
+          // "within 40px is still pinned", a slow wheel or touchpad scroll spent
+          // several events inside that zone, and every resize in the meantime
+          // (a streaming row, an off-screen row getting its real height) put the
+          // log straight back on the bottom, so it could only be left by
+          // scrolling fast enough to clear 40px in one event. `gap >= 1` keeps a
+          // clamp from counting: content shrinking under a pinned log lowers
+          // `scrollTop` too, but leaves it on the bottom.
+          const up = el.scrollTop < lastTop.current - 0.5 && gap >= 1
+          lastTop.current = el.scrollTop
+          const tail = !up && gap < 40
           pinned.current = tail
           // The same 40px, deliberately: the control means "tail-follow is off",
           // so it has to appear at the instant following stops and not a pixel
@@ -2559,7 +2600,7 @@ function ShellStrip({
 }
 
 /**
- * One band section: the card with its role rail, a header line that folds it,
+ * One band section: the card, a header line in its role hue that folds it,
  * and its lines under that.
  *
  * **Folded, the header is the whole band**, and it still says what matters —
@@ -2592,10 +2633,9 @@ function BandFrame({
         marginBottom: 10,
         padding: '4px 0',
         background: CHAT.card,
+        // No hue rail: the log's ledger dropped it, and the band says what it
+        // is the way a ledger does, with its hue on the header's words.
         border: `1px solid ${CHAT.borderCard}`,
-        // The log card's rail, so the band and the rows it summarises are
-        // visibly the same kind of thing.
-        borderLeft: `2px solid ${hue}`,
         borderRadius: CHAT.radiusCard,
         fontFamily: MONO,
         fontSize: 11.5,

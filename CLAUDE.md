@@ -571,8 +571,8 @@ the reasoning.
 - **Relayed words are the fifth thing that is not something you typed.** Both wrappers stay in
   the transcript (the receiving model must know an agent wrote it), and the mapper unwraps them
   into a `you`-role row carrying `from` — drawn as `from <name>` / `reply · <name>` in place of
-  `you`, with the `--role-agent` violet on the rail and the word and an `--agent-soft` wash over
-  the bubble, so it never reads as something you typed. Read unrecognised, either is a bubble of
+  `you`, with the `--role-agent` violet on the word and an `--agent-soft` wash in place of the
+  `you` one, so it never reads as something you typed. Read unrecognised, either is a bubble of
   markup the user never typed.
 - **An agent attaches MCP servers itself, and logs in with nobody at the keyboard.**
   `connect_mcp` sends `mcp_set_servers` (the Agent SDK's `setMcpServers`), which replaces only the
@@ -602,9 +602,12 @@ the reasoning.
   re-validated against the tool's schema (unknown keys tolerated). The settled row reads
   `toolUseResult`, never prose.
 - **A subagent is one object in three places, and none of them expands in place.** In the log it
-  is a card in its own family — a `--role-agent` rail and a `◆`, the prompt's first line, and
-  while running a `↳` latest step whose line is reserved from the first frame — with agents one
-  message launched drawn as one group (`agentGroups`, keyed on the id's message segment). Above
+  is a row of a **ledger** (`Ledger` in `ChatLog`) — one bordered box whose header carries the
+  `◆` and the hue, a row per agent with the prompt's first line and, while running, a `↳` latest
+  step whose line is reserved from the first frame. Agents one message launched are one box
+  (`agentGroups`, keyed on the id's message segment), drawn in pieces across their log rows; the
+  open one is the selected-row fill. No hue rail on a rounded card: that was the old look, and
+  it was the same device on three kinds of row. Above
   the composer the **agents band** lists everything running plus whatever the latest turn
   launched, so finished ones leave when you send the next message and a background agent stays
   for as long as it runs. Clicking either opens the **agent panel** in the outline's slot:
@@ -615,8 +618,8 @@ the reasoning.
 - **A background command is a `shell` row, a sibling of `task` and drawn like one.** A `Bash` /
   `PowerShell` with `run_in_background`, a foreground one the CLI moved to the background (its
   result says so; the tool card is replaced in place, as a Skill's becomes a `cmd` row), or a
-  `Monitor`. Card in the log with a `$` and a `--ok` rail (`CHAT.shell` — an alias, not a new
-  token), its own **shells band** under the agents band, and the agent panel's slot for its
+  `Monitor`. A one-row ledger in the log headed `$ shell` in `--ok` (`CHAT.shell` — an alias,
+  not a new token), its own **shells band** under the agents band, and the agent panel's slot for its
   detail. It ends on the CLI's task frames or its `<task-notification>`, matched by call id or
   task id, and is adopted across turns by reference like an agent. **A command the agent stops
   with `TaskStop` gets no notification line**, only a live frame, so the mapper also ends the row
@@ -628,9 +631,10 @@ the reasoning.
 - **The agents and shells bands fold separately**, to a header line that still counts running and
   done — folding hides detail, never the fact that something is going. `bandsFolded` is
   session-only and shared by every chat, like the panel width.
-- **A `you` row is a raised `--card` bubble *and* a `--role-you` left rail *and* a gap above it.**
-  The surface alone was one step over the page and read as one more tool card; the rail and the
-  gap are what make a turn findable when scrolling back through mostly machinery.
+- **A `you` row is a flat `--you-soft` wash with no edge, *and* a gap above it.** A raised
+  `--card` alone read as one more tool card, and the hue rail that fixed it was the same rail the
+  agent and shell cards wore. The role hue as a fill is what nothing else in the log has; the gap
+  is the other half of making a turn findable when scrolling back through mostly machinery.
 - **The log has exactly one scrollbar and it is `ScrollRail`.** The native one is turned off
   (`vchat-log` in `GLOBAL_CSS`), because two bars down one column are two answers to "where am I".
   So the rail takes the whole job: the thumb drags, the track takes a click, and the wheel over it
@@ -685,8 +689,10 @@ the reasoning.
   `cmd` row, told apart by having **no title**, and stays open: it is short, it is addressed to
   you, and `/context` draws a meter that reflowing destroys.
 - **The log follows the tail on a ResizeObserver, not on the entry count** — a streaming turn
-  grows the last row rather than adding one. `pinned` (within 40px of the bottom) keeps it from
-  yanking a reader who scrolled up. **Corollary, binding the pinned bands and everything in the
+  grows the last row rather than adding one. `pinned` keeps it from yanking a reader who scrolled
+  up: **any** move up drops it (a wheel up before the scroll even lands), and only coming back
+  within 40px re-arms it — read as "within 40px stays pinned", a slow scroll could not get out.
+  **Corollary, binding the pinned bands and everything in the
   log: a hover may not change a height.** The question card's preview pane reserves the tallest
   option's space with `visibility`; do not compute it against font metrics.
 - **A chat costs only what is on screen, in three layers.** A hidden chat is

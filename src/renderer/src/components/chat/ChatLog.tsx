@@ -55,7 +55,7 @@ const ROW_PAD = '6px 10px'
 const META_GAP = 3
 
 /**
- * The air above a `you` bubble — the visual start of a turn.
+ * The air above a `you` row — the visual start of a turn.
  *
  * 14 rather than the 12 two stacked rows already get, because this gap is doing
  * a different job from the one ROW_PAD does: that one keeps two rows of the same
@@ -73,14 +73,15 @@ const mono: React.CSSProperties = {
 /**
  * One log row: the meta line, then the message under it at full width.
  *
- * `band` is what a `you` row wears — a real `--card` bubble now, one step up
- * from the page. It used to be a white lift at 4%, chosen so it would read the
- * same whatever hue the role word was set to; with a palette that has a surface
- * *for* this, the lift is just a weaker way of drawing the same thing.
+ * `band` is what a `you` row wears: a flat wash of its role hue (`--you-soft`)
+ * with no edge. **Not a raised card with a hue rail down its left side** — that
+ * is what it was, and the agent and shell cards wore the same rail, so the one
+ * device meant three things; on a rounded card the rail also bends round the
+ * corners and thins to a point, which reads as generated rather than designed.
  *
  * Everything else sits on bare `--bg` with no surface at all, which is the whole
- * of the treatment: what Claude said is the page, what you said is on top of it,
- * and the machinery is in bordered cards. Role words are 500 weight in their own
+ * of the treatment: what Claude said is the page, what you said is tinted, and
+ * the machinery is in bordered cards. Role words are 500 weight in their own
  * hue, behind a `--dim` timestamp — the one place in the log where colour and
  * weight are both spent on four characters.
  */
@@ -95,63 +96,61 @@ function Line({
   at: number
   role: string
   color?: string
-  /** the raised bubble that marks a turn you started */
+  /** the wash that marks a turn you started */
   band?: boolean
-  /** a translucent wash laid over the bubble's surface, so the surface stays raised */
+  /** a different wash for the band — another chat's agent writing, not you */
   tint?: string
   children: React.ReactNode
 }): React.ReactElement {
   return (
     <div
       style={{
-        padding: ROW_PAD,
-        background: !band
-          ? undefined
-          : tint
-            ? `linear-gradient(${tint}, ${tint}), ${CHAT.band}`
-            : CHAT.band,
-        // Only the bubble has an edge to round; every other row is a transparent
-        // block on the page and a radius on it would draw nothing.
-        borderRadius: band ? CHAT.radiusCard : undefined,
-        // **The three things that make a `you` row findable when scrolling.**
-        // The surface alone was not enough: `--card` over `--bg` is one step,
-        // and a step is hard to see in a log that is mostly prose with bordered
-        // cards in it — the bubble read as one more card.
-        //
-        // The rail is the same left-edge idiom the sidebar's active item and the
-        // find bar's current hit already use, in the same `you` hue as the role
-        // word, so the colour naming a message and the colour marking one agree.
-        // (When a `you` row *is* the current find hit the two rails meet and read
-        // as one 4px edge — which is the right emphasis for it, so it is left.)
-        //
-        // The gap above is the other half: a turn starts here, and what separates
-        // it from the tool cards of the turn before should be air rather than one
-        // more hairline. Margin, not padding — padding is inside the bubble and
-        // would only make it taller. It cannot collapse anywhere awkward: the log
-        // column has top padding, so it does not escape through the top.
-        borderLeft: band ? `2px solid ${color ?? CHAT.you}` : undefined,
+        // Two more px of air top and bottom inside the wash; the sides stay on
+        // ROW_PAD so the text keeps the column edge every other row is on.
+        padding: band ? '8px 10px' : ROW_PAD,
+        // **What makes a `you` row findable when scrolling: a hue, and air.**
+        // The hue is the role word's own, so the colour naming a message and the
+        // colour marking one agree, and it is a fill a log of bordered grey cards
+        // has nothing else like. No edge on it: a hairline would make it one more
+        // card, and a rail is what this replaced.
+        background: band ? (tint ?? CHAT.band) : undefined,
+        // The control radius, not the card one: a wash with no border is a
+        // highlight on the page rather than an object on it.
+        borderRadius: band ? CHAT.radius : undefined,
+        // The gap above: a turn starts here, and what separates it from the tool
+        // cards of the turn before should be air rather than one more hairline.
+        // Margin, not padding — padding is inside the wash and would only make
+        // it taller. It cannot collapse anywhere awkward: the log column has top
+        // padding, so it does not escape through the top.
         marginTop: band ? BAND_GAP : undefined
       }}
     >
-      <div
-        style={{
-          display: 'flex',
-          gap: 8,
-          alignItems: 'baseline',
-          marginBottom: META_GAP,
-          fontFamily: MONO,
-          fontSize: TYPE.gutter,
-          // Its own leading, not the block's: this line is a label on the row
-          // below it, and the 1.5 the mono scale carries put visible air between
-          // the two that read as a gap rather than as a pair.
-          lineHeight: 1.2,
-          userSelect: 'none'
-        }}
-      >
-        <span style={{ color: CHAT.dim4 }}>{clock(at)}</span>
-        <span style={{ color: color ?? CHAT.dim2, fontWeight: 500 }}>{role}</span>
-      </div>
+      <Meta at={at} role={role} color={color} />
       <div style={{ minWidth: 0 }}>{children}</div>
+    </div>
+  )
+}
+
+/** A row's meta line: the timestamp, then the role word in its hue. */
+function Meta({ at, role, color }: { at: number; role: string; color?: string }): React.ReactElement {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        alignItems: 'baseline',
+        marginBottom: META_GAP,
+        fontFamily: MONO,
+        fontSize: TYPE.gutter,
+        // Its own leading, not the block's: this line is a label on the row
+        // below it, and the 1.5 the mono scale carries put visible air between
+        // the two that read as a gap rather than as a pair.
+        lineHeight: 1.2,
+        userSelect: 'none'
+      }}
+    >
+      <span style={{ color: CHAT.dim4 }}>{clock(at)}</span>
+      <span style={{ color: color ?? CHAT.dim2, fontWeight: 500 }}>{role}</span>
     </div>
   )
 }
@@ -282,8 +281,7 @@ export const LogRow = React.memo(function LogRow({
       if (entry.role === 'you') {
         return (
           // A message another chat's agent wrote takes the agent violet on its
-          // rail, its role word and a wash over the bubble, so it never reads
-          // as something you typed.
+          // role word and its wash, so it never reads as something you typed.
           <Line
             at={entry.at}
             role={entry.from ?? 'you'}
@@ -536,7 +534,6 @@ export const LogRow = React.memo(function LogRow({
             style={{
               background: CHAT.inset,
               border: `1px solid ${CHAT.borderCard}`,
-              borderLeft: `2px solid ${CHAT.hold}`,
               borderRadius: CHAT.radiusCard,
               padding: '4px 15px 12px',
               opacity: entry.state === 'cancelled' ? 0.7 : 1
@@ -825,9 +822,9 @@ function Thumb({
           objectFit: 'contain',
           border: `1px solid ${lit ? CHAT.dim3 : CHAT.borderCard}`,
           borderRadius: CHAT.radius,
-          // The band behind a `you` row is a surface; a transparent PNG dropped on
-          // it would read as whatever happens to be underneath, so it gets a ground
-          // of its own.
+          // The wash behind a `you` row is translucent; a transparent PNG dropped
+          // on it would read as whatever happens to be underneath, so it gets a
+          // ground of its own.
           background: CHAT.inset,
           cursor: 'zoom-in',
           transition: 'border-color .12s'
@@ -1124,9 +1121,6 @@ function CompactRow({
               padding: '4px 15px 10px',
               background: CHAT.inset,
               border: `1px solid ${CHAT.borderCard}`,
-              // The one tie back to the band above it, which is otherwise a
-              // separate object by the time you have scrolled the summary.
-              borderLeft: `2px solid ${CHAT.hold}`,
               borderRadius: CHAT.radiusCard
             }}
           >
@@ -1692,29 +1686,135 @@ function secs(ms: number): string {
 }
 
 /**
- * One dispatched subagent, as a card in the log.
+ * The ledger: what a subagent and a background command are drawn in.
  *
- * **Its own family, not a fourth kind of tool card.** It used to be the same
- * one-line inset box as a `Read`, with only the gutter word `task` to tell it
- * apart — and an agent is not a call, it is a second worker with its own
- * transcript, which the reader goes looking for. So it takes the `you` bubble's
- * idiom in a third role hue: a 2px `--role-agent` rail and a `◆` (shape first,
- * so the hue only reinforces it), on the inset surface the machinery uses.
+ * **A table, not a card per item.** Agents one message launched are one
+ * decision, so a fan-out is one bordered box with a header naming it (`◆ agents
+ * · 3 in parallel`) and a row per agent, hairlines between them; a lone agent
+ * or a command is the same box with one row. The hue is spent on the header and
+ * nowhere else. These used to be separate cards each carrying a 2px hue rail
+ * down a rounded left edge — the `you` bubble's rail in two more hues, so the
+ * one device meant three things, and the rail bent round the corners. Do not
+ * bring the rail back.
+ *
+ * Each row of a fan-out is still its own log row (`agentGroups` numbers them),
+ * so the box is drawn in pieces: the first row carries the top edge and the
+ * header, the last the bottom edge, and every row the sides. They meet because
+ * the wrapper puts no vertical padding between pieces. Every piece is wholly
+ * inside its own row, which matters: `.vchat-row` contains paint, and anything
+ * drawn outside it is clipped.
+ *
+ * **The row is the click target, not the box.** It carries `data-click` and its
+ * own fill, so the hover lift brightens that one row and leaves the edges the
+ * neighbouring rows share alone. The row the agent panel is showing takes the
+ * selected-row fill, the way the sidebar marks the session on screen, and its
+ * `›` turns the header's hue.
+ */
+function Ledger({
+  at,
+  hue,
+  glyph,
+  label,
+  index,
+  size,
+  on,
+  onClick,
+  title,
+  children
+}: {
+  at: number
+  hue: string
+  glyph: string
+  /** the header's words — only the first row of a group draws them */
+  label: string
+  index: number
+  size: number
+  /** the agent panel is showing this row */
+  on: boolean
+  onClick: () => void
+  title: string
+  children: React.ReactNode
+}): React.ReactElement {
+  const first = index === 0
+  const last = index === size - 1
+  const edge = `1px solid ${CHAT.borderCard}`
+  const r = CHAT.radiusCard
+  return (
+    <div style={{ padding: `${first ? 6 : 0}px 10px ${last ? 6 : 0}px` }}>
+      <div
+        style={{
+          borderLeft: edge,
+          borderRight: edge,
+          borderTop: first ? edge : undefined,
+          borderBottom: last ? edge : undefined,
+          borderRadius: `${first ? `${r} ${r}` : '0 0'} ${last ? `${r} ${r}` : '0 0'}`,
+          // The row fills are square; this keeps them inside the rounded ends.
+          overflow: 'hidden'
+        }}
+      >
+        {first && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'baseline',
+              padding: '5px 12px',
+              background: CHAT.card,
+              borderBottom: edge,
+              fontFamily: MONO,
+              fontSize: TYPE.gutter,
+              // `Line`'s meta line, moved into the box: the same leading, the
+              // same timestamp-then-role order, the same weight on the role.
+              lineHeight: 1.2,
+              userSelect: 'none'
+            }}
+          >
+            <span style={{ color: CHAT.dim4 }}>{clock(at)}</span>
+            <span style={{ color: hue, fontWeight: 500 }}>
+              {glyph} {label}
+            </span>
+          </div>
+        )}
+        <div
+          onClick={onClick}
+          data-click=""
+          title={title}
+          style={{
+            ...mono,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            minWidth: 0,
+            padding: '8px 12px',
+            background: on ? CHAT.hover : CHAT.inset,
+            borderTop: first ? undefined : edge,
+            color: CHAT.dim,
+            cursor: 'pointer'
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+          <span aria-hidden style={{ flex: 'none', color: on ? hue : CHAT.dim4 }}>
+            ›
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * One dispatched subagent, as a row of a ledger (see `Ledger`).
  *
  * It says three things: who and what for (type and description), what it was
  * asked (one line of the prompt), and — only while it runs — what it is doing
  * now (`↳` the latest step). The step line is there from the first frame with a
- * placeholder, so the card does not grow a line under the reader the moment the
+ * placeholder, so the row does not grow a line under the reader the moment the
  * first tool call lands.
  *
  * **It does not expand.** Clicking opens the agent panel beside the log. The
  * sub-log used to pour into the column right here, which pushed the
  * conversation down by however many steps the agent took and lost the reader's
  * place in it; the panel shows the same rows without moving the log a pixel.
- *
- * Agents one message launched together render as one group: the first carries
- * the meta line (`agents · 3 in parallel`) and the rest sit under it with no
- * line of their own, because a fan-out is one decision and reads as one.
  */
 function TaskRow({
   entry,
@@ -1735,35 +1835,19 @@ function TaskRow({
   // prompt can run to pages and only the first sentence is ever on screen here.
   const peek = entry.prompt.slice(0, 400).replace(/\s+/g, ' ').trim()
 
-  const card = (
-    <div
+  return (
+    <Ledger
+      at={entry.at}
+      hue={CHAT.agent}
+      glyph="◆"
+      label={groupSize > 1 ? `agents · ${groupSize} in parallel` : 'agent'}
+      index={groupIndex}
+      size={groupSize}
+      on={on}
       onClick={() => handlers.onOpenAgent(entry.toolUseId)}
-      data-click=""
       title={on ? 'Showing in the agent panel — click to close it' : 'Open this agent'}
-      style={{
-        ...mono,
-        minWidth: 0,
-        padding: '8px 12px',
-        background: CHAT.inset,
-        // The whole border lights while the panel is showing this agent, the
-        // way a running compaction's does: on, not pulsing. Spelled as
-        // longhands because the colour changes on a re-render, and React
-        // re-applying a `border` shorthand would wipe the `borderLeft` rail.
-        borderStyle: 'solid',
-        borderWidth: '1px 1px 1px 2px',
-        borderTopColor: on ? CHAT.agent : CHAT.borderCard,
-        borderRightColor: on ? CHAT.agent : CHAT.borderCard,
-        borderBottomColor: on ? CHAT.agent : CHAT.borderCard,
-        borderLeftColor: CHAT.agent,
-        borderRadius: CHAT.radiusCard,
-        color: CHAT.dim,
-        cursor: 'pointer'
-      }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-        <span aria-hidden style={{ color: CHAT.agent, flex: 'none' }}>
-          ◆
-        </span>
         <span style={{ color: CHAT.text, flex: 'none' }}>{entry.agentType}</span>
         <span
           style={{
@@ -1785,23 +1869,8 @@ function TaskRow({
           ↳ {progress.latest ?? 'starting…'}
         </div>
       )}
-    </div>
+    </Ledger>
   )
-
-  if (groupIndex === 0) {
-    return (
-      <Line
-        at={entry.at}
-        role={groupSize > 1 ? `agents · ${groupSize} in parallel` : 'agent'}
-        color={CHAT.agent}
-      >
-        {card}
-      </Line>
-    )
-  }
-  // The rest of a fan-out: `Line`'s side padding without its meta line, and
-  // nothing on top, so the lanes sit 6px apart — one block, not three rows.
-  return <div style={{ padding: '0 10px 6px' }}>{card}</div>
 }
 
 /**
@@ -1843,10 +1912,10 @@ export function ShellStatus({
 }
 
 /**
- * A background command, as a card in the log — `TaskRow`'s idiom in the shell
- * hue: a rail, a `$`, what it is for and how it stands, and the command itself
- * on a line under it. Like an agent's card it does not expand; clicking opens
- * the panel, which is where its output is.
+ * A background command: a one-row ledger in the shell hue, headed `$ shell` (or
+ * `$ monitor`), with what it is for and how it stands, and the command itself on
+ * a line under it. Like an agent's row it does not expand; clicking opens the
+ * panel, which is where its output is.
  */
 function ShellRow({
   entry,
@@ -1858,45 +1927,29 @@ function ShellRow({
   const on = handlers.openAgent === entry.toolUseId
   const command = entry.command.slice(0, 400).replace(/\s+/g, ' ').trim()
   return (
-    <Line at={entry.at} role={entry.tool === 'monitor' ? 'monitor' : 'shell'} color={CHAT.shell}>
-      <div
-        onClick={() => handlers.onOpenAgent(entry.toolUseId)}
-        data-click=""
-        title={on ? 'Showing in the panel — click to close it' : 'Open this command and its output'}
-        style={{
-          ...mono,
-          minWidth: 0,
-          padding: '8px 12px',
-          background: CHAT.inset,
-          // Longhands, for the reason TaskRow gives: the lit border changes on
-          // a re-render and a shorthand would wipe the rail.
-          borderStyle: 'solid',
-          borderWidth: '1px 1px 1px 2px',
-          borderTopColor: on ? CHAT.shell : CHAT.borderCard,
-          borderRightColor: on ? CHAT.shell : CHAT.borderCard,
-          borderBottomColor: on ? CHAT.shell : CHAT.borderCard,
-          borderLeftColor: CHAT.shell,
-          borderRadius: CHAT.radiusCard,
-          color: CHAT.dim,
-          cursor: 'pointer'
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <span aria-hidden style={{ color: CHAT.shell, flex: 'none' }}>
-            $
-          </span>
-          <span style={{ ...oneLine, flex: 1, color: CHAT.text }}>
-            <Hi>{entry.description}</Hi>
-          </span>
-          <ShellStatus entry={entry} />
-        </div>
-        {command && command !== entry.description && (
-          <div style={{ ...oneLine, color: CHAT.dim3, marginTop: 3 }}>
-            <Hi>{command}</Hi>
-          </div>
-        )}
+    <Ledger
+      at={entry.at}
+      hue={CHAT.shell}
+      glyph="$"
+      label={entry.tool === 'monitor' ? 'monitor' : 'shell'}
+      index={0}
+      size={1}
+      on={on}
+      onClick={() => handlers.onOpenAgent(entry.toolUseId)}
+      title={on ? 'Showing in the panel — click to close it' : 'Open this command and its output'}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <span style={{ ...oneLine, flex: 1, color: CHAT.text }}>
+          <Hi>{entry.description}</Hi>
+        </span>
+        <ShellStatus entry={entry} />
       </div>
-    </Line>
+      {command && command !== entry.description && (
+        <div style={{ ...oneLine, color: CHAT.dim3, marginTop: 3 }}>
+          <Hi>{command}</Hi>
+        </div>
+      )}
+    </Ledger>
   )
 }
 

@@ -126,8 +126,16 @@ const MIDNIGHT = {
    */
   'role-agent': '#a98fe0',
   /** the tint on a message another chat's agent sent into this one: the
-   *  `--role-agent` violet laid over the `you` bubble's `--card` */
+   *  `--role-agent` violet, washed over the page the way `--you-soft` is */
   'agent-soft': 'rgba(169,143,224,.10)',
+  /**
+   * The `you` row: `--role-you` washed over the page. A wash rather than a
+   * raised `--card`, and with no edge at all, because the rounded card with a
+   * 2px hue rail it replaced was the same device the agent and shell cards
+   * wore, so a rail stopped meaning "you". The hue is the one the role word
+   * already spends, which is what lets a flat fill be found while scrolling.
+   */
+  'you-soft': 'rgba(108,182,217,.10)',
 
   // ── Derived. ─────────────────────────────────────────────────────────────
   // The named palette does not cover a few states this app has and a transcript
@@ -235,6 +243,7 @@ const GRAPHITE: Tokens = {
   'role-stop': '#8c8a83',
   'role-agent': '#b294c9',
   'agent-soft': 'rgba(178,148,201,.10)',
+  'you-soft': 'rgba(155,182,160,.10)',
 
   // Still the one red in the app that means "this ends something" — a warm
   // theme is not a reason for a delete button to stop looking like one.
@@ -307,6 +316,7 @@ const PAPER: Tokens = {
   // Dark enough to carry 11px text on cream, like every other role hue here.
   'role-agent': '#6d3c9e',
   'agent-soft': 'rgba(109,60,158,.08)',
+  'you-soft': 'rgba(31,95,139,.08)',
 
   // A step darker than the close button's red, which stays what it is on every
   // theme: this one has to carry small text on cream.
@@ -659,14 +669,14 @@ export const CHAT = {
   /**
    * An inset box: a tool card, a diff, an expanded body, the plan panel.
    *
-   * The one distinction the log's surfaces turn on. `card` is the *raised* one
-   * and belongs to exactly one thing — the `you` bubble — while everything the
-   * machinery draws is recessed. They were the same fill before this palette,
-   * which is precisely why "user turn, tool call and AI response are hard to
-   * tell apart" was the complaint that started the redesign.
+   * Everything the machinery draws is recessed, and a `you` row is a wash of
+   * its role hue rather than a box (`band`), so the two never share a fill.
+   * They were the same fill before this palette, which is precisely why "user
+   * turn, tool call and AI response are hard to tell apart" was the complaint
+   * that started the redesign.
    */
   inset: 'var(--card2)',
-  /** the `you` bubble's raised surface, and nothing else */
+  /** the raised surface: popovers, the pinned bands, a table header */
   card: 'var(--card)',
   /** a recess *inside* a panel: a chip's fill, a meter's track */
   well: 'var(--input)',
@@ -681,8 +691,8 @@ export const CHAT = {
   borderCard: 'var(--border)',
   /** an edge you are meant to see: the composer, an outlined control */
   borderComposer: 'var(--border-strong)',
-  /** the `you` bubble. A real card now, not a white lift over the page. */
-  band: 'var(--card)',
+  /** the wash behind a `you` row */
+  band: 'var(--you-soft)',
   /** a row under the pointer, or a toggle that is on */
   hover: 'var(--sel)',
   /**
@@ -718,7 +728,7 @@ export const CHAT = {
   live: 'var(--ok)',
   /** the `stop` role word */
   stop: 'var(--role-stop)',
-  /** a subagent — its card's rail, its band line, its panel */
+  /** a subagent — its ledger header, its band line, its panel */
   agent: 'var(--role-agent)',
   /** the tint on a `you` bubble another chat wrote (`from` / `reply ·`) */
   agentBand: 'var(--agent-soft)',
