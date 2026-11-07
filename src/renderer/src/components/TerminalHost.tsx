@@ -369,7 +369,7 @@ function EmptyState(): React.ReactElement {
         background: 'var(--bg)'
       }}
     >
-      <Logo size={76} style={{ borderRadius: 18, boxShadow: '0 8px 44px -12px var(--accent)' }} />
+      <Logo size={76} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }}>
         <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: '.2px', color: 'var(--fg)' }}>
           Vivarium

@@ -31,7 +31,9 @@ async function render(size) {
     '<!doctype html><meta charset="utf-8">' +
     '<style>html,body{margin:0;padding:0;background:transparent}' +
     `svg{display:block;width:${size}px;height:${size}px}</style>` +
-    SVG
+    // icon.svg carries its own hand-tuned rules for taskbar size and below,
+    // scoped under a `small` root class; this only switches them on.
+    (size <= 24 ? SVG.replace('<svg ', '<svg class="small" ') : SVG)
   await new Promise((resolve) => {
     win.webContents.once('did-finish-load', resolve)
     win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))

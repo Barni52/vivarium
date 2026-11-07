@@ -1,34 +1,54 @@
 <svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="cont" x1="128" y1="66" x2="128" y2="192" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#8A93FF"/>
-      <stop offset="1" stop-color="#5B63F0"/>
+    <linearGradient id="live" x1="0" y1="40" x2="0" y2="130" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#86E6A0"/>
+      <stop offset="1" stop-color="#1F9A5C"/>
     </linearGradient>
-    <linearGradient id="spark" x1="128" y1="102" x2="128" y2="178" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#D6B6FF"/>
-      <stop offset="1" stop-color="#9A4DF0"/>
+    <linearGradient id="wait" x1="0" y1="124" x2="0" y2="222" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD27A"/>
+      <stop offset="1" stop-color="#E08A1F"/>
     </linearGradient>
+    <linearGradient id="glass" x1="0" y1="124" x2="0" y2="222" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C7F1EE" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#7FD3CC" stop-opacity="0.18"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="124" x2="0" y2="222" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7FD6CD"/>
+      <stop offset="1" stop-color="#2A8F87"/>
+    </linearGradient>
+    <!-- The small frames (24px and below) are hand-tuned by subtraction and
+         emphasis: scripts/gen-icon.cjs puts class="small" on the root. -->
+    <style>
+      .small .d { display: none }
+      .small .sh { filter: none }
+      .small .cell { transform-box: fill-box; transform-origin: center; transform: scale(0.92) }
+      .small .glass { stroke-width: 18px; fill: #A8E3DC; fill-opacity: 0.55 }
+    </style>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
   </defs>
 
-  <!-- Icon-only mark (no background tile): the logo scaled up to fill the canvas,
-       centered. Vivid indigo container (thick solid stroke + filled lid) with a
-       distinct bright-purple sparkle so both read clearly on any background. -->
-  <g transform="translate(128 128) scale(1.72) translate(-128 -132)">
-    <!-- container lid -->
-    <rect x="58" y="68" width="140" height="18" rx="9" fill="url(#cont)"/>
+  <!-- Cells: three glass habitats, one per container. Green is alive, amber is
+       waiting, the clear one is empty. Drawn as a Windows 11 object (no tile, lit
+       from above, a ground shadow). -->
+  <g class="sh" filter="url(#shadow)" transform="translate(128 125) scale(1.26) translate(-128 -130)">
+    <!-- empty cell (glass) -->
+    <path class="cell glass" d="M79.5 125L120.2 148.5L120.2 195.5L79.5 219L38.8 195.5L38.8 148.5Z"
+          fill="url(#glass)" stroke="url(#rim)" stroke-width="8" stroke-linejoin="round"/>
+    <circle class="d" cx="79.5" cy="184" r="9" fill="#2A8F87" fill-opacity="0.55"/>
 
-    <!-- container body (open-topped box) -->
-    <path d="M74 92 L74 160 Q74 189 103 189 L153 189 Q182 189 182 160 L182 92"
-          stroke="url(#cont)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- waiting cell (amber); a same-paint stroke rounds the corners -->
+    <path class="cell" d="M176.5 125L217.2 148.5L217.2 195.5L176.5 219L135.8 195.5L135.8 148.5Z"
+          fill="url(#wait)" stroke="url(#wait)" stroke-width="10" stroke-linejoin="round"/>
 
-    <!-- agent sparkle (enlarged) -->
-    <g transform="translate(128 140) scale(1.16) translate(-128 -140)">
-      <path d="M128 108
-               Q133 135 155 140
-               Q133 145 128 172
-               Q123 145 101 140
-               Q123 135 128 108 Z"
-            fill="url(#spark)"/>
-    </g>
+    <!-- living cell (green) with its leaf -->
+    <path class="cell" d="M128 41L168.7 64.5L168.7 111.5L128 135L87.3 111.5L87.3 64.5Z"
+          fill="url(#live)" stroke="url(#live)" stroke-width="10" stroke-linejoin="round"/>
+    <path class="d" d="M112 116C112 96 124 80 146 76C146 98 132 112 112 116Z" fill="#FFFFFF" fill-opacity="0.85"/>
+
+    <!-- top-left sheen on each cell -->
+    <path class="d" d="M100 64L124 50M152 148L174 136M56 148L76 136"
+          stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="5" stroke-linecap="round"/>
   </g>
 </svg>
