@@ -27,6 +27,31 @@ document.head.appendChild(style)
 // outside Electron (there is no preload bridge in a plain browser).
 window.vivarium?.setWindowBackground(tokensFor(currentTheme()).bg)
 
+// Chrome 156 (Electron 45) rejects a canvas `font` that starts with whitespace,
+// and a rejected assignment is silent: the context keeps `10px sans-serif`.
+// xterm's WebGL glyph atlas builds `${italic} ${weight} ${size}px ${family}`
+// with an empty italic part for upright text, so every terminal rasterised in a
+// 10px sans-serif and laid the result out in JetBrains Mono's cells: thin,
+// unevenly spaced, box drawing in the wrong cells. @xterm/addon-webgl 0.19 builds
+// the same string, so an upgrade does not fix it. Trimming at the setter
+// does, for every string xterm builds and any version of it, and cannot change a
+// valid value, since whitespace at either end of a CSS font means nothing.
+// Remove once `ctx.font = ' 400 13px monospace'` reads back as 13px again.
+for (const proto of [
+  CanvasRenderingContext2D.prototype,
+  globalThis.OffscreenCanvasRenderingContext2D?.prototype
+]) {
+  const font = proto && Object.getOwnPropertyDescriptor(proto, 'font')
+  if (!proto || !font?.set || !font.get) continue
+  const set = font.set
+  Object.defineProperty(proto, 'font', {
+    ...font,
+    set(this: CanvasRenderingContext2D, value: string) {
+      set.call(this, typeof value === 'string' ? value.trim() : value)
+    }
+  })
+}
+
 // Preload the terminal font (regular + bold) BEFORE the first xterm builds its
 // WebGL glyph atlas. Otherwise the atlas caches a fallback / synthesizes bold by
 // double-drawing, which renders as smeared/doubled text.
