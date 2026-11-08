@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { CH } from '../shared/ipc'
 import type {
   AgentActivityEvent,
@@ -226,6 +226,13 @@ const api = {
     ipcRenderer.invoke(CH.pasteImage, projectId),
   clipboardReadText: (): Promise<string> => ipcRenderer.invoke(CH.clipboardReadText),
   clipboardWriteText: (text: string): void => ipcRenderer.send(CH.clipboardWriteText, text),
+  /**
+   * Where a dropped or pasted `File` lives on disk, or undefined for one that
+   * was never a file (a pasted screenshot). `File.path` was removed in Electron
+   * 32 and this is its replacement; it only works here, in the preload, and it
+   * needs no IPC because the answer is already in this process.
+   */
+  pathForFile: (file: File): string | undefined => webUtils.getPathForFile(file) || undefined,
 
   // dialogs / window
   appInfo: (): Promise<AppInfo> => ipcRenderer.invoke(CH.appInfo),

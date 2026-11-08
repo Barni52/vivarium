@@ -778,7 +778,9 @@ the reasoning.
 ## Commands
 
 ```
-npm install          # no native build: node-pty's N-API prebuild loads as shipped
+npm install          # no native build: node-pty's N-API prebuild loads as shipped. Since
+                     # Electron 42 this does NOT fetch Electron's binary — the first
+                     # `npm run dev` does, or `node node_modules/electron/install.js`
 npm run dev          # electron-vite dev server + Electron
 npm run dev:cdp      # the same, plus CDP on 9366 and a visible window
 npm run typecheck    # tsc for both tsconfig.node.json and tsconfig.web.json

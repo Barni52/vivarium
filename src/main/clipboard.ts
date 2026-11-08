@@ -1,4 +1,4 @@
-import { app, clipboard } from 'electron'
+import { app, clipboard, nativeImage } from 'electron'
 import { promises as fs } from 'fs'
 import { join, relative } from 'path'
 
@@ -27,10 +27,7 @@ export function clipDir(projectId: string): string {
  * two words.
  */
 export async function pasteImage(projectId: string, host = false): Promise<string | null> {
-  const image = clipboard.readImage()
-  if (image.isEmpty()) return null
-
-  const png = image.toPNG()
+  const png = await clipboardPng()
   if (!png || png.length === 0) return null
 
   const dir = clipDir(projectId)
@@ -46,6 +43,37 @@ export async function pasteImage(projectId: string, host = false): Promise<strin
   }
   // Container-side path (dir is bind-mounted at /clip).
   return `/clip/${filename}`
+}
+
+/**
+ * The clipboard's image as PNG bytes, or null when it holds none.
+ *
+ * Electron 44 replaced `readImage()` with the W3C-shaped `read()`: items carry
+ * MIME types and hand their bytes over as a Blob. Windows offers a copied
+ * picture as `image/png`, but a browser's "Copy image" of a photo can arrive as
+ * JPEG only, so anything `image/*` is taken and round-tripped through
+ * `nativeImage` — the file is named `.png`, and it has to be one.
+ */
+async function clipboardPng(): Promise<Buffer | null> {
+  const items = await clipboard.read().catch(() => [])
+  const pick = (want: (t: string) => boolean): { item: Electron.ClipboardItem; type: string } | null => {
+    for (const item of items) {
+      const type = item.types.find(want)
+      if (type) return { item, type }
+    }
+    return null
+  }
+  const found = pick((t) => t === 'image/png') ?? pick((t) => t.startsWith('image/'))
+  if (!found) return null
+  const blob = await found.item.getType(found.type)
+  // Only the bookmark format resolves to something else; the type says "maybe".
+  // Duck-typed, not `instanceof`: a Blob built on Electron's side need not be
+  // this realm's Blob, and a false negative would silently disable the paste.
+  if (!('arrayBuffer' in blob)) return null
+  const bytes = Buffer.from(await blob.arrayBuffer())
+  if (found.type === 'image/png') return bytes
+  const image = nativeImage.createFromBuffer(bytes)
+  return image.isEmpty() ? null : image.toPNG()
 }
 
 /**

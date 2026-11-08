@@ -2,7 +2,7 @@ import { app, ipcMain, dialog, BrowserWindow, clipboard, shell, nativeImage } fr
 import { randomUUID } from 'node:crypto'
 import { watch, type FSWatcher } from 'node:fs'
 import { open, readdir, readFile, mkdir, stat } from 'node:fs/promises'
-import { join, resolve, sep, extname, isAbsolute } from 'node:path'
+import { join, resolve, sep, extname, isAbsolute, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { CH } from '@shared/ipc'
 import type {
@@ -1564,8 +1564,12 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   ipcMain.handle(CH.pasteImage, async (_e, projectId: string): Promise<string | null> =>
     pasteImage(projectId, isHostProject(store.getProject(projectId)))
   )
-  ipcMain.handle(CH.clipboardReadText, (): string => clipboard.readText())
-  ipcMain.on(CH.clipboardWriteText, (_e, text: string) => clipboard.writeText(text))
+  // Both are promises since Electron 44. The write is fire-and-forget on a `send`
+  // channel, so its rejection is caught here or it surfaces as unhandled.
+  ipcMain.handle(CH.clipboardReadText, (): Promise<string> => clipboard.readText())
+  ipcMain.on(CH.clipboardWriteText, (_e, text: string) => {
+    clipboard.writeText(text).catch(() => {})
+  })
 
   // ---- dialogs / window --------------------------------------------------
   // Version chip in the title bar. The runtime versions ride along because the
@@ -1581,20 +1585,31 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
     })
   )
 
-  ipcMain.handle(CH.browseFolder, async (): Promise<string | null> => {
-    const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
-    return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0]
-  })
+  // Since Electron 42 a dialog with no `defaultPath` opens in Downloads every
+  // time and Windows no longer remembers where you were, so the pickers keep
+  // that themselves: the parent of the last folder picked, which is where the
+  // next mount usually is. Session-only — the first pick after launch starts in
+  // Downloads, which is not worth a config field.
+  let lastPickedFrom: string | undefined
+  const pickFolders = async (multi: boolean): Promise<string[]> => {
+    const res = await dialog.showOpenDialog(win, {
+      defaultPath: lastPickedFrom,
+      properties: multi ? ['openDirectory', 'multiSelections'] : ['openDirectory']
+    })
+    if (res.canceled || res.filePaths.length === 0) return []
+    lastPickedFrom = dirname(res.filePaths[0])
+    return res.filePaths
+  }
+
+  ipcMain.handle(
+    CH.browseFolder,
+    async (): Promise<string | null> => (await pickFolders(false))[0] ?? null
+  )
 
   // Several mounts from one trip through the picker. Ctrl/Shift-click in the
   // folder list selects more than one; a cancel is an empty array rather than
   // null, so the caller's "add these" path is the only path.
-  ipcMain.handle(CH.browseFolders, async (): Promise<string[]> => {
-    const res = await dialog.showOpenDialog(win, {
-      properties: ['openDirectory', 'multiSelections']
-    })
-    return res.canceled ? [] : res.filePaths
-  })
+  ipcMain.handle(CH.browseFolders, (): Promise<string[]> => pickFolders(true))
 
   // One level of directories under a base folder, for the mount picker's
   // quick-add chips — the fast way to mount four of a monorepo's six packages.

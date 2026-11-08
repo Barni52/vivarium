@@ -974,9 +974,7 @@ export function ChatView({
   const addFiles = async (files: FileList | File[]): Promise<void> => {
     const next: PendingChip[] = []
     for (const f of Array.from(files)) {
-      // Electron 31 still puts the real path on the File; past 32 this becomes
-      // webUtils.getPathForFile in the preload.
-      const hostPath = (f as File & { path?: string }).path
+      const hostPath = window.vivarium.pathForFile(f)
       next.push(await routeFile(f, hostPath, tree, host))
     }
     setChips((c) => [...c, ...next])

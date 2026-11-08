@@ -80,9 +80,9 @@ function looksBinary(text: string): boolean {
 }
 
 /**
- * Route one dropped/pasted file. `hostPath` is Electron's `File.path` (still
- * present on Electron 31; past 32 this becomes `webUtils.getPathForFile` in the
- * preload). A clipboard image has none, so it always goes inline.
+ * Route one dropped/pasted file. `hostPath` is `window.vivarium.pathForFile`
+ * (Electron's `webUtils.getPathForFile`). A clipboard image has none, so it
+ * always goes inline.
  */
 export async function routeFile(
   file: File,
