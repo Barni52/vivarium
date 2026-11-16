@@ -105,6 +105,11 @@ export function searchTextOf(entry: ChatEntry): string {
         .join('\n')
     case 'plan':
       return entry.md
+    case 'question':
+      return entry.md
+    // The name is found as well as the text, because "to <name>" is on the row.
+    case 'sent':
+      return `${entry.name}\n${entry.md}\n${entry.error ?? ''}`
     case 'cmd':
       return `${entry.title}\n${entry.md}`
     case 'task':

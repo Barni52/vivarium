@@ -6,6 +6,7 @@ import { ACCENT, MONO } from '../theme'
 import { TypeIcon, Pencil, Close, Refresh, ThinkingDots, AiSpark } from './Icons'
 import { Elapsed } from './Elapsed'
 import { AiTag, describeCreator, useCreatorName } from './AiTag'
+import { AwaitingMark, OpenQuestionCount } from './OpenQuestionCount'
 
 // Turn duration next to an agent's indicator. Deliberately visible text, not a
 // tooltip: both indicators only render while the row is NOT hovered (the hover
@@ -27,6 +28,10 @@ export function SessionRow({ project, session }: { project: Project; session: Se
   const attention = useStore((s) => s.notifications[session.id])
   const since = useStore((s) => s.agentSince[session.id])
   const waitingSince = useStore((s) => s.agentWaitingSince[session.id])
+  // Numbers, not the lists: a selector returning the array would be a new
+  // value whenever the chat's state is replaced, which is every streamed token.
+  const questions = useStore((s) => s.chats[session.id]?.questions.length ?? 0)
+  const awaiting = useStore((s) => s.chats[session.id]?.awaiting.length ?? 0)
   const select = useStore((s) => s.select)
   const startRename = useStore((s) => s.startRename)
   const retitleChat = useStore((s) => s.retitleChat)
@@ -346,6 +351,16 @@ export function SessionRow({ project, session }: { project: Project; session: Se
         </div>
       )}
 
+      {/* Its own slot, left of the status, so it sits beside working dots or the
+          →N instead of taking their place. Not beside a filled "?": that is the
+          same question, flagged and not yet seen. */}
+      {!hover && !editing && questions > 0 && badge?.glyph !== '?' && (
+        <OpenQuestionCount
+          count={questions}
+          title={`${questions} open ${questions === 1 ? 'question' : 'questions'} — answered when you reply in this chat`}
+        />
+      )}
+
       {/* Next to a "!", how stale the flag is — one you left sitting for an hour
           means something different from one raised ten seconds ago. Next to a
           working or waiting agent, this turn's duration. */}
@@ -382,7 +397,13 @@ export function SessionRow({ project, session }: { project: Project; session: Se
         <ThinkingDots color={accent} title="Agent working" style={{ marginRight: 2 }} />
       )}
 
-      {!hover && !editing && isAgent && !badge && !working && (
+      {/* Done for now, but not done: other chats are still working on what it
+          handed them, and their answers will start it again. Nothing for you. */}
+      {!hover && !editing && isAgent && !badge && !working && awaiting > 0 && (
+        <AwaitingMark count={awaiting} />
+      )}
+
+      {!hover && !editing && isAgent && !badge && !working && awaiting === 0 && (
         <span
           title={dotTitle}
           style={{

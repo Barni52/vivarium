@@ -6,7 +6,8 @@ import { ACCENT, MONO } from '../theme'
 import { AiSpark, Chevron, Folder, Pencil, Plus, ThinkingDots, Trash } from './Icons'
 import { AiTag, describeCreator, useCreatorName } from './AiTag'
 import { RowBtn, SessionRow } from './SessionRow'
-import { findAttention, isAnyWorking } from './sessionGroup'
+import { countOpenQuestions, findAttention, isAnyWorking } from './sessionGroup'
+import { OpenQuestionCount } from './OpenQuestionCount'
 
 /**
  * A folder inside a project, and the sessions in it.
@@ -47,6 +48,7 @@ export function FolderRow({
   // Only read while folded, as on the project row: an open folder shows each
   // session's own badge right under it.
   const attention = useStore((s): AttentionKind | null => findAttention(s, sessions))
+  const questions = useStore((s) => countOpenQuestions(s, sessions))
   const hasWorking = useStore((s) => isAnyWorking(s, sessions))
   const creatorName = useCreatorName(folder.createdBy)
 
@@ -290,6 +292,16 @@ export function FolderRow({
               <Trash size={13} />
             </RowBtn>
           </div>
+        )}
+
+        {/* Folded, the sum of what its chats show on their own rows, so folding
+            never hides that a question is waiting for you. */}
+        {!hover && !editing && folded && questions > 0 && (
+          <OpenQuestionCount
+            count={questions}
+            size={15}
+            title={`${questions} open ${questions === 1 ? 'question' : 'questions'} in this folder`}
+          />
         )}
 
         {!hover && !editing && folded && hasWorking && !attention && (

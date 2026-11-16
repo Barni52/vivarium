@@ -198,6 +198,20 @@ const TOOLS = [
     }
   },
   {
+    name: 'ask_user',
+    description:
+      'Put a question to the person using Vivarium, when you need their decision to go on. Markdown; ' +
+      'say the options and your recommendation in it. Returns at once: end your turn after calling it, ' +
+      'and their answer arrives as their next message. The question stays listed as open for them ' +
+      'until they answer. Only for a chat the person works in; a chat another chat created asks that ' +
+      'chat instead, in its answer.',
+    inputSchema: {
+      type: 'object',
+      properties: { question: { type: 'string', description: 'The question, in markdown.' } },
+      required: ['question']
+    }
+  },
+  {
     name: 'read_chat',
     description:
       'Read the most recent turns of a chat: the messages it received and its answers, without tool calls.',
@@ -489,6 +503,8 @@ export class OrchestrationServer {
         return this.createFolder(args, caller)
       case 'send_to_chat':
         return this.sendToChat(args, caller)
+      case 'ask_user':
+        return this.askUser(args, caller)
       case 'read_chat':
         return this.readChat(args)
       case 'stop_chat':
@@ -586,6 +602,8 @@ export class OrchestrationServer {
     })
     if (!session) return failure(`Could not create a chat in project ${project.name}.`)
     const sent = await this.deliver(project, session, prompt, caller)
+    // Both sentences lead with the new chat's id: `chatMapper` reads the first
+    // uuid in this answer to point the `to <name>` row at the chat.
     if (sent.isError) {
       return { text: `Created chat ${session.id}, but: ${sent.text}`, isError: true }
     }
@@ -614,6 +632,21 @@ export class OrchestrationServer {
     const message = readString(args.message)
     if (!message.trim()) return failure('message is empty.')
     return this.deliver(found.project, found.session, message, caller)
+  }
+
+  /**
+   * Nothing is sent anywhere: the question is the tool call itself, which is in
+   * the transcript, and that is what the renderer lists as open and draws as the
+   * card. All this does is mark the caller's turn, so the idle it ends in flags
+   * "?" (see ChatService.markAsking). Not refused for a chat another chat
+   * created — only you can answer a question, whoever's chat it is in.
+   */
+  private askUser(args: ToolArgs, caller: string): ToolResult {
+    if (!readString(args.question).trim()) return failure('question is empty.')
+    this.deps.chat.markAsking(caller)
+    return {
+      text: 'Asked. End your turn now; the answer arrives as the next message from the user.'
+    }
   }
 
   private async readChat(args: ToolArgs): Promise<ToolResult> {

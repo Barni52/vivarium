@@ -21,7 +21,8 @@ import {
 } from './Icons'
 import { SessionRow } from './SessionRow'
 import { FolderRow } from './FolderRow'
-import { findAttention, isAnyWorking } from './sessionGroup'
+import { countOpenQuestions, findAttention, isAnyWorking } from './sessionGroup'
+import { OpenQuestionCount } from './OpenQuestionCount'
 
 function HeaderBtn({
   title,
@@ -80,6 +81,7 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   // included (shown when the project is collapsed, so a notification isn't
   // hidden with its session rows)
   const attention = useStore((s): AttentionKind | null => findAttention(s, project.sessions))
+  const questions = useStore((s) => countOpenQuestions(s, project.sessions))
   const op = useStore((s) => s.containerOps[project.id])
   const opError = useStore((s) => s.containerErrors[project.id])
   // aggregate: any child agent actually running (same collapsed-only rule as
@@ -456,6 +458,16 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
             </button>
           )}
         </div>
+
+        {/* Folded, the sum of what its chats show on their own rows — the
+            cross-project view of what is waiting on you. */}
+        {!expanded && questions > 0 && (
+          <OpenQuestionCount
+            count={questions}
+            size={15}
+            title={`${questions} open ${questions === 1 ? 'question' : 'questions'} in this project`}
+          />
+        )}
 
         {!expanded && hasWorking && !attention && (
           <ThinkingDots color={ACCENT.agent} title="An agent in this project is working" />

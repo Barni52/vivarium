@@ -6,6 +6,7 @@ import { Hi } from './find'
 import { LineCounts } from '../LineCounts'
 import { Elapsed } from '../Elapsed'
 import { Md, Preview, clock } from './Markdown'
+import { useStore } from '../../state/store'
 import { langForPath, tokenize } from './highlight'
 
 // The transcript, built to `docs/redisign/Chat Terminal.html`.
@@ -391,6 +392,30 @@ export const LogRow = React.memo(function LogRow({
 
     case 'cmd':
       return <CmdRow entry={entry} handlers={handlers} />
+
+    case 'question':
+      // A question to you is the one thing in an orchestrator's log addressed
+      // to you rather than to an agent, so it wears the question register
+      // (`hold`, as the AskUserQuestion record does) on a card of its own and
+      // says it is for you in the role word. The open/answered reading is the
+      // band's (see OpenQuestionsBand): the row is history and stays as it is.
+      return (
+        <Line at={entry.at} role="for you" color={CHAT.hold}>
+          <div
+            style={{
+              background: CHAT.inset,
+              border: `1px solid ${CHAT.hold}`,
+              borderRadius: CHAT.radiusCard,
+              padding: '4px 15px 10px'
+            }}
+          >
+            <Md src={entry.md} />
+          </div>
+        </Line>
+      )
+
+    case 'sent':
+      return <SentRow entry={entry} />
 
 
     case 'ask':
@@ -1172,6 +1197,90 @@ function CompactRow({
  * The size rule is `AUTO_OPEN_LINES`, shared with the tool cards, so a one-line
  * skill still opens and nothing new has to be learned to predict which do.
  */
+/**
+ * A message this chat sent another one, drawn as the mirror of the `from` row
+ * that arrives in the other chat: `to <name>` in the agent violet, on the agent
+ * wash. Folded to its first lines, because a brief is written for the agent
+ * receiving it and is usually long; a click on the text opens it, a click on
+ * the name goes to that chat.
+ */
+/**
+ * A folded `sent` row: three lines, enough to read what the brief is about and
+ * short enough that a run handing out six of them still reads as a log.
+ */
+const SENT_FOLDED: React.CSSProperties = {
+  display: '-webkit-box',
+  WebkitLineClamp: 3,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden'
+}
+
+function SentRow({ entry }: { entry: Extract<ChatEntry, { kind: 'sent' }> }): React.ReactElement {
+  const [open, setOpen] = React.useState(false)
+  // Looked up rather than carried: send_to_chat names a chat only by id, and a
+  // renamed chat should read as what it is called now. A deleted one keeps the
+  // name create_chat gave it, or says so.
+  const current = useStore((s) => {
+    if (!entry.chat) return null
+    for (const p of s.config.projects) {
+      const found = p.sessions.find((x) => x.id === entry.chat)
+      if (found) return found.name
+    }
+    return null
+  })
+  const select = useStore((s) => s.select)
+  const name = current ?? (entry.name || 'a deleted chat')
+  const lines = entry.md.split('\n')
+  const long = lines.length > 3 || entry.md.length > 280
+  const status =
+    entry.status === 'error'
+      ? `not sent · ${entry.error ?? 'error'}`
+      : entry.status === 'cancelled'
+        ? 'cancelled'
+        : entry.created
+          ? 'created'
+          : null
+  return (
+    <Line at={entry.at} role={`to ${name}`} color={CHAT.agent} tint={CHAT.agentBand} band>
+      <div
+        onClick={long ? () => setOpen((o) => !o) : undefined}
+        data-click={long ? '' : undefined}
+        title={long ? (open ? 'Fold the message' : 'Show the whole message') : undefined}
+        style={{
+          fontSize: TYPE.prose,
+          lineHeight: TYPE.proseLine,
+          color: CHAT.text,
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          ...(open || !long ? {} : SENT_FOLDED)
+        }}
+      >
+        <Hi>{entry.md}</Hi>
+      </div>
+      <div style={{ ...mono, fontSize: TYPE.gutter, color: CHAT.dim3, marginTop: 6, display: 'flex', gap: 12 }}>
+        {entry.chat && current && (
+          <span
+            onClick={() => select(entry.chat as string)}
+            data-click=""
+            title={`Go to ${name}`}
+            style={{ color: CHAT.agent, cursor: 'pointer' }}
+          >
+            → open {name}
+          </span>
+        )}
+        {long && (
+          <span onClick={() => setOpen((o) => !o)} data-click="" style={{ cursor: 'pointer' }}>
+            {open ? '▴ fold' : `▸ show all (${lines.length} lines)`}
+          </span>
+        )}
+        {status && (
+          <span style={{ color: entry.status === 'error' ? CHAT.danger : CHAT.dim3 }}>{status}</span>
+        )}
+      </div>
+    </Line>
+  )
+}
+
 function CmdRow({
   entry,
   handlers

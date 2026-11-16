@@ -231,6 +231,81 @@ export interface ChatSessionState {
   images: Record<string, string | null>
   /** a subagent's sub-log, by its spawning tool_use id */
   subagents: Record<string, ChatEntry[]>
+  /** the chats still working on something this one sent them, by id (main's `awaiting`) */
+  awaiting: string[]
+  /**
+   * The questions put to you here that you have not answered, oldest first —
+   * derived, never sent: see `findOpenQuestions`. Kept on the chat rather than
+   * computed by the sidebar's selectors, which run on every store change and
+   * would walk the log on every streamed token.
+   */
+  questions: OpenQuestion[]
+  /** questions waved off from the band, by id; session-only */
+  dismissed: Record<string, true>
+}
+
+/**
+ * A question waiting for your answer: an `ask_user` row, or an AskUserQuestion
+ * card still up. `rowId` is the log row to jump to; null for the card, which is
+ * always the last thing in the log.
+ */
+export interface OpenQuestion {
+  id: string
+  rowId: string | null
+  text: string
+  at: number
+}
+
+/**
+ * What is still unanswered in a chat. An `ask_user` question is answered by the
+ * next message **you typed** there — any message, one answering every question
+ * above it — so the walk goes back from the end and stops at the first one. A
+ * relayed message (`from`) is not yours, and a message that never reached the
+ * CLI (`unsent`) answered nothing. The card is answered by answering it.
+ *
+ * Only as far back as the mounted window: a question older than that with
+ * nothing typed after it is not listed until `load earlier` brings it in.
+ */
+function findOpenQuestions(c: ChatSessionState): OpenQuestion[] {
+  const open: OpenQuestion[] = []
+  const card = c.blocking?.kind === 'question' ? c.blocking : null
+  if (card && !c.dismissed[`card:${card.requestId}`]) {
+    open.push({
+      id: `card:${card.requestId}`,
+      rowId: null,
+      text: card.questions?.[0]?.question ?? card.title,
+      at: card.at
+    })
+  }
+  for (let i = c.entries.length - 1; i >= 0; i--) {
+    const e = c.entries[i]
+    if (e.kind === 'text' && e.role === 'you' && !e.from && e.queued !== 'unsent') break
+    if (e.kind === 'question' && !c.dismissed[e.id]) {
+      open.push({ id: e.id, rowId: e.id, text: summarizeQuestion(e.md), at: e.at })
+    }
+  }
+  return open.reverse()
+}
+
+/** The first line of a question with its markdown marks taken off, for one line of a band. */
+function summarizeQuestion(md: string): string {
+  const line = md.split('\n').find((l) => l.trim()) ?? ''
+  return line.replace(/^\s*(#+|[-*>]|\d+\.)\s*/, '').replace(/[*_`]/g, '').trim() || 'Question'
+}
+
+/** The chat with its open questions read again, keeping the old list when nothing changed. */
+function withQuestions(c: ChatSessionState): ChatSessionState {
+  const next = findOpenQuestions(c)
+  const same =
+    next.length === c.questions.length && next.every((q, i) => q.id === c.questions[i].id)
+  return same ? c : { ...c, questions: next }
+}
+
+/** Whether rows landing can change what is open: a question, or a message you typed. */
+function touchesQuestions(entries: ChatEntry[]): boolean {
+  return entries.some(
+    (e) => e.kind === 'question' || (e.kind === 'text' && e.role === 'you' && !e.from)
+  )
 }
 
 const emptyChat = (): ChatSessionState => ({
@@ -249,7 +324,10 @@ const emptyChat = (): ChatSessionState => ({
   opening: false,
   bodies: {},
   images: {},
-  subagents: {}
+  subagents: {},
+  awaiting: [],
+  questions: [],
+  dismissed: {}
 })
 
 /**
@@ -358,7 +436,7 @@ export interface AppState {
    * how much of the window the bands may take is about the window, not about a
    * conversation.
    */
-  bandsFolded: { agents: boolean; shells: boolean }
+  bandsFolded: { agents: boolean; shells: boolean; questions: boolean }
   /**
    * Which theme is on.
    *
@@ -544,7 +622,9 @@ export interface AppState {
   toggleFolder: (folderId: string) => void
   setSidebarWidth: (n: number) => void
   setAgentPanelWidth: (n: number) => void
-  toggleBandFolded: (band: 'agents' | 'shells') => void
+  toggleBandFolded: (band: 'agents' | 'shells' | 'questions') => void
+  /** wave an open question off the band without answering it, for this app session */
+  dismissQuestion: (sessionId: string, questionId: string) => void
   toggleSidebar: () => void
   setTheme: (name: ThemeName) => void
   /** the next theme in `THEMES` order, wrapping — what Ctrl+Shift+T does */
@@ -776,7 +856,7 @@ export const useStore = create<AppState>((set, get) => ({
   sidebarWidth: 288,
   sidebarCollapsed: false,
   agentPanelWidth: null,
-  bandsFolded: { agents: false, shells: false },
+  bandsFolded: { agents: false, shells: false, questions: false },
   // Adopted from the attribute, never decided here — see the field's note.
   theme: currentTheme(),
   terminalFontSize: 13,
@@ -1190,6 +1270,14 @@ export const useStore = create<AppState>((set, get) => ({
   setAgentPanelWidth: (n) => set({ agentPanelWidth: Math.max(AGENT_PANEL_MIN, Math.round(n)) }),
   toggleBandFolded: (band) =>
     set((s) => ({ bandsFolded: { ...s.bandsFolded, [band]: !s.bandsFolded[band] } })),
+
+  dismissQuestion: (sessionId, questionId) =>
+    set((s) => {
+      const c = s.chats[sessionId]
+      if (!c) return {}
+      const next = withQuestions({ ...c, dismissed: { ...c.dismissed, [questionId]: true } })
+      return { chats: { ...s.chats, [sessionId]: next } }
+    }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
   // The attribute (which the CSS reads and localStorage remembers) and the
@@ -1361,9 +1449,13 @@ export const useStore = create<AppState>((set, get) => ({
       s.notifyAgentAttention(e.sessionId, 'question')
     } else {
       s.setActivity(e.sessionId, 'idle', e.at)
-      // `quiet` is set for the idle that follows an interrupt: you ended the
-      // turn, so being told it finished is noise.
-      if (!e.quiet) s.notifyAgentAttention(e.sessionId, 'finished')
+      // `asks`: the turn put a question to you (`ask_user`), which is a "?"
+      // like a card's even though nothing is blocked. `quiet` is set for the
+      // idle that follows an interrupt — you ended the turn, so being told it
+      // finished is noise — and for a chat whose turn answered another chat, or
+      // that is waiting on chats it handed work to.
+      if (e.asks) s.notifyAgentAttention(e.sessionId, 'question')
+      else if (!e.quiet) s.notifyAgentAttention(e.sessionId, 'finished')
     }
   },
 
@@ -1384,7 +1476,10 @@ export const useStore = create<AppState>((set, get) => ({
       case 'entries-appended':
         patch((c) => {
           const entries = applyEntries(c.entries, e.entries)
-          return { ...c, entries, total: Math.max(c.total, entries.length) }
+          const next = { ...c, entries, total: Math.max(c.total, entries.length) }
+          // Only when the rows could change the answer: this event arrives for
+          // every streamed token, and the walk is not free on a long run.
+          return touchesQuestions(e.entries) ? withQuestions(next) : next
         })
         break
       case 'turn-settled':
@@ -1403,14 +1498,16 @@ export const useStore = create<AppState>((set, get) => ({
             ...c.entries.filter((x) => x.turn !== e.turn && !ids.has(x.id)),
             ...e.entries
           ]
-          return { ...c, entries, total: Math.max(c.total, entries.length) }
+          return withQuestions({ ...c, entries, total: Math.max(c.total, entries.length) })
         })
         break
       case 'blocking':
-        patch((c) => ({ ...c, blocking: e.card }))
+        patch((c) => withQuestions({ ...c, blocking: e.card }))
         break
       case 'blocking-cleared':
-        patch((c) => (c.blocking?.requestId === e.requestId ? { ...c, blocking: null } : c))
+        patch((c) =>
+          c.blocking?.requestId === e.requestId ? withQuestions({ ...c, blocking: null }) : c
+        )
         break
       case 'task':
         // Merged by id, not concatenated — a sub-log's rows are revised as well
@@ -1449,7 +1546,8 @@ export const useStore = create<AppState>((set, get) => ({
           blocking: null,
           subagents: {},
           bodies: {},
-          images: {}
+          images: {},
+          questions: []
         }))
         break
       case 'rewound':
@@ -1462,7 +1560,7 @@ export const useStore = create<AppState>((set, get) => ({
         // `total` is taken, not maxed: it is the only number here that can go
         // down, and `load earlier` reads it to decide whether an "earlier" exists
         // at all.
-        patch((c) => ({ ...c, entries: e.entries, total: e.total, blocking: null }))
+        patch((c) => withQuestions({ ...c, entries: e.entries, total: e.total, blocking: null }))
         break
       case 'error':
         patch((c) => ({ ...c, error: e.error }))
@@ -1481,6 +1579,9 @@ export const useStore = create<AppState>((set, get) => ({
           model: e.model ?? c.model,
           commands: e.commands ?? c.commands
         }))
+        break
+      case 'awaiting':
+        patch((c) => ({ ...c, awaiting: e.chats }))
         break
     }
   },
@@ -1507,7 +1608,7 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         chats: {
           ...s.chats,
-          [sessionId]: {
+          [sessionId]: withQuestions({
             ...base,
             entries: st.entries,
             total: st.total,
@@ -1517,12 +1618,13 @@ export const useStore = create<AppState>((set, get) => ({
             commands: st.commands,
             model: st.model,
             effort: st.effort,
+            awaiting: st.awaiting ?? [],
             open: true,
             opening: false,
             reason: undefined,
             historyError: st.historyError,
             readOnly: !!st.elsewhere
-          }
+          })
         },
         // A chat with a live process counts as live, exactly as a pty does: it is
         // what the sidebar's working indicator and TerminalHost's third render
@@ -1564,7 +1666,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       const c = s.chats[sessionId]
       if (!c || c.blocking?.requestId !== requestId) return {}
-      return { chats: { ...s.chats, [sessionId]: { ...c, blocking: null } } }
+      return { chats: { ...s.chats, [sessionId]: withQuestions({ ...c, blocking: null }) } }
     })
     await window.vivarium.chatAnswer(sessionId, requestId, answer)
   },
@@ -1613,7 +1715,7 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         chats: {
           ...s.chats,
-          [sessionId]: { ...cur, entries: [...add, ...cur.entries], total: res.total }
+          [sessionId]: withQuestions({ ...cur, entries: [...add, ...cur.entries], total: res.total })
         }
       }
     })

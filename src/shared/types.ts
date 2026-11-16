@@ -464,6 +464,13 @@ export interface AgentActivityEvent {
    * window in which clicking away first would flag the turn you just killed.)
    */
   quiet?: true
+  /**
+   * The idle ends a turn in which the agent put a question to you with the
+   * vivarium `ask_user` tool, so it flags "?" rather than "!" — and flags even
+   * when it would otherwise be quiet because other chats are still working for
+   * it: a question beats waiting. Chat only; a pty agent never sets it.
+   */
+  asks?: true
 }
 
 /**
@@ -872,6 +879,38 @@ export type ChatEntry =
       status: ChatToolStatus
       body: ChatToolBody
     })
+  /**
+   * A question the agent put to you with the vivarium `ask_user` tool: prose,
+   * not a form. The tool does not block — the agent ends its turn and you
+   * answer by typing — so the row is open until a message you typed follows it
+   * (see the store's `openQuestions`), which is a fact the transcript holds and
+   * nothing has to persist.
+   */
+  | (ChatEntryBase & { kind: 'question'; md: string })
+  /**
+   * A message this chat sent another one: `send_to_chat`, or the first message
+   * `create_chat` hands the chat it makes. The mirror of a `from` row, drawn as
+   * `to <name>` in the same violet, so a brief to an agent never reads as
+   * something addressed to you.
+   */
+  | (ChatEntryBase & {
+      kind: 'sent'
+      toolUseId: string
+      /** the target chat's id; null for a create_chat until its result names it */
+      chat: string | null
+      /**
+       * The name create_chat gave the chat. Empty for send_to_chat, which names
+       * none: the renderer looks the id up in config, so a renamed chat reads as
+       * what it is called now.
+       */
+      name: string
+      md: string
+      /** whether the call is the one that created the chat */
+      created: boolean
+      status: ChatToolStatus
+      /** the refusal, when status is 'error' (a stopped container, a missing chat) */
+      error?: string
+    })
   | (ChatEntryBase & {
       kind: 'ask'
       questions: ChatQuestion[]
@@ -1172,6 +1211,8 @@ export interface ChatState {
   historyError?: string
   /** Running in another instance: this is its transcript, with no process here. */
   elsewhere?: boolean
+  /** the chats still working on something this one sent them (see the `awaiting` event) */
+  awaiting?: string[]
 }
 
 export interface ChatOpenResult {
@@ -1229,6 +1270,13 @@ export type ChatEvent =
   | { kind: 'exit'; sessionId: string; exitCode: number }
   /** model / mode / command list, from each turn's re-emitted `init` */
   | { kind: 'meta'; sessionId: string; model?: string; commands?: string[] }
+  /**
+   * The chats with a turn owed to this one — a message it sent, directly or
+   * further down a relay chain, that has not been answered yet — by id. The
+   * whole list each time, sent whenever it changes, on this channel so it lands
+   * in order with the turn that sent the message.
+   */
+  | { kind: 'awaiting'; sessionId: string; chats: string[] }
 
 /**
  * What the renderer hands `chat:send` alongside the prose. Routed by

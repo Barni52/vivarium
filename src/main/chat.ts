@@ -795,6 +795,19 @@ interface Live {
   slowTurn: boolean
   /** set by an interrupt so the turn's `idle` raises no attention flag */
   interrupted: boolean
+  /**
+   * The agent put a question to you (`ask_user`) since the last idle, so the
+   * next one flags "?" — the next one rather than this turn's own, because a
+   * reply queued behind the asking turn keeps the chat busy, and the question is
+   * still open when that one ends. Cleared by every idle (see setActivity).
+   */
+  asking: boolean
+  /**
+   * The chats with a turn owed to this one, as last sent to the renderer (see
+   * refreshAwaiting). An idle with any is quiet: the agent handed work out, and
+   * the turn the answer opens is what tells you.
+   */
+  awaiting: string[]
   /** an `init` has already been caught reporting a mode other than bypass */
   modeWarned: boolean
   /**
@@ -1251,6 +1264,8 @@ export class ChatService {
       spoke: false,
       slowTurn: false,
       interrupted: false,
+      asking: false,
+      awaiting: [],
       modeWarned: false,
       titleWanted: false,
       titling: false,
@@ -1274,6 +1289,10 @@ export class ChatService {
     }
     this.live.set(session.id, l)
     this.onOpened?.(session.id)
+    // A respawned sender is a new `Live` with an empty list, while the chats
+    // working for it kept their origins (they name the session, not the
+    // process), so it learns what it is still waiting on here.
+    this.refreshAwaiting()
     // A process that has just been spawned is running nothing — nothing is even
     // emitted until the first user message — so this is the one moment the
     // reading is known without being told. Said out loud because the store keeps
@@ -1344,6 +1363,7 @@ export class ChatService {
       /* already gone */
     }
     this.live.delete(sessionId)
+    this.refreshAwaiting()
   }
 
   closeAll(): void {
@@ -1365,7 +1385,8 @@ export class ChatService {
       commands: l.commands,
       context: l.context,
       blocking: [...l.pending.values()][0] ?? null,
-      ...(l.elsewhere ? { elsewhere: true } : {})
+      ...(l.elsewhere ? { elsewhere: true } : {}),
+      ...(l.awaiting.length ? { awaiting: l.awaiting } : {})
     }
   }
 
@@ -1722,6 +1743,7 @@ export class ChatService {
     this.setActivity(l, 'idle', true)
     this.emit({ kind: 'exit', sessionId: l.session.id, exitCode: code })
     this.live.delete(l.session.id)
+    this.refreshAwaiting()
   }
 
   // ---- NDJSON framing -----------------------------------------------------
@@ -2393,9 +2415,14 @@ export class ChatService {
       // row: you ended it, and being told it ended is noise. Equally quiet when
       // the turn answered another chat (it has an origin, read before
       // `deliverReply` below takes it): the reply goes to that chat, and the
-      // sender's own turn is what tells you. A question card in such a turn
-      // still flags, because that one needs you.
-      this.setActivity(l, 'idle', aborted || l.interrupted || l.origins.has(turn))
+      // sender's own turn is what tells you. And quiet when this chat is waiting
+      // on others it handed work to: their answers open a turn here, and that
+      // turn's end decides again. A question card in either still flags, and so
+      // does an `ask_user` — a question beats waiting, because only you can
+      // answer it. Not after an interrupt: you are at the chat already.
+      const asks = l.asking && !aborted && !l.interrupted
+      const quiet = aborted || l.interrupted || l.origins.has(turn) || l.awaiting.length > 0
+      this.setActivity(l, 'idle', quiet && !asks, false, asks)
     }
     l.interrupted = false
     l.mapper = null
@@ -2418,6 +2445,7 @@ export class ChatService {
       l.origins.delete(turn)
       const status: ReplyStatus = aborted ? 'stopped' : f.is_error === true ? 'failed' : 'done'
       this.deliverReply(origin, l, status, str(f.result))
+      this.refreshAwaiting()
     }
 
     if (!aborted) void this.settleTurn(l, turn, from)
@@ -2858,10 +2886,54 @@ export class ChatService {
    * once: the entry goes as it is reported.
    */
   private failOrigins(l: Live, why: string): void {
+    if (l.origins.size === 0) return
     for (const [turn, origin] of [...l.origins]) {
       l.origins.delete(turn)
       this.deliverReply(origin, l, 'failed', why)
     }
+    this.refreshAwaiting()
+  }
+
+  /**
+   * Recompute, for every open chat, which chats owe it a turn, and send each
+   * list that changed. Owed is any origin naming it — the message it sent, or
+   * one sent further down a relay chain on its behalf: A asks B, B asks C and
+   * answers A "I have asked C", and A is now waiting on C. That walk is why this
+   * is recomputed from the origins rather than counted up and down at each send.
+   *
+   * Called wherever an origin is added or taken (enqueue, a turn's result,
+   * failOrigins) and wherever a chat enters or leaves `live`. A handful of chats
+   * with a handful of origins each, so the whole sweep costs nothing.
+   */
+  private refreshAwaiting(): void {
+    const owed = new Map<string, string[]>()
+    for (const c of this.live.values()) {
+      if (c.closing) continue
+      for (const origin of c.origins.values()) {
+        for (let o: TurnOrigin | null = origin; o; o = o.relay) {
+          // A chain can loop back (A asks B, B asks A): a chat does not wait on itself.
+          if (o.sender === c.session.id) continue
+          const list = owed.get(o.sender) ?? []
+          if (!list.includes(c.session.id)) list.push(c.session.id)
+          owed.set(o.sender, list)
+        }
+      }
+    }
+    for (const l of this.live.values()) {
+      const next = owed.get(l.session.id) ?? []
+      if (next.join() === l.awaiting.join()) continue
+      l.awaiting = next
+      this.emit({ kind: 'awaiting', sessionId: l.session.id, chats: next })
+    }
+  }
+
+  /**
+   * The agent asked you something with `ask_user` (main/orchestration.ts), so
+   * the idle that ends this stretch of work flags "?" (see `Live.asking`).
+   */
+  markAsking(sessionId: string): void {
+    const l = this.live.get(sessionId)
+    if (l) l.asking = true
   }
 
   /**
@@ -2922,7 +2994,10 @@ export class ChatService {
       l.titleWanted = true
     }
 
-    if (origin) l.origins.set(turn, origin)
+    if (origin) {
+      l.origins.set(turn, origin)
+      this.refreshAwaiting()
+    }
     if (queued) {
       l.queue.push({ turn, text: written, attachments })
       return
@@ -3923,11 +3998,17 @@ export class ChatService {
     l: Live,
     activity: AgentActivityEvent['activity'],
     quiet = false,
-    turnStart = false
+    turnStart = false,
+    asks = false
   ): void {
     const e: AgentActivityEvent = { sessionId: l.session.id, activity, at: Date.now() }
     if (turnStart) e.turnStart = true
     if (quiet) e.quiet = true
+    if (asks) e.asks = true
+    // Every idle answers for the question, flagged or not: the one at a turn's
+    // end has just read it, and every other one (an exit, an open, an
+    // interrupt) ends the stretch of work it was asked in.
+    if (activity === 'idle') l.asking = false
     this.emitActivity(e)
   }
 }

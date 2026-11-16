@@ -15,7 +15,7 @@ import type {
 } from '@shared/types'
 import { DEFAULT_EFFORT, EFFORT_LEVELS, modelName, modelOptionLabel } from '@shared/models'
 import { isHostProject } from '@shared/projects'
-import { AGENT_PANEL_MIN, useStore } from '../../state/store'
+import { AGENT_PANEL_MIN, useStore, type OpenQuestion } from '../../state/store'
 import { outputFileFrom } from '../../outputPaths'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
@@ -726,6 +726,40 @@ export function ChatView({
   )
   const bandsFolded = useStore((s) => s.bandsFolded)
   const toggleBandFolded = useStore((s) => s.toggleBandFolded)
+  const dismissQuestion = useStore((s) => s.dismissQuestion)
+  const selectSession = useStore((s) => s.select)
+
+  /**
+   * The question row a jump from the band just landed on, lit for a moment so
+   * the eye finds it among the rows around it. A plain timeout and a static
+   * ring rather than an animation: the log holds thousands of rows, and this
+   * is one of them for a second and a half.
+   */
+  const [flashRow, setFlashRow] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (!flashRow) return
+    const t = setTimeout(() => setFlashRow(null), 1600)
+    return () => clearTimeout(t)
+  }, [flashRow])
+
+  /**
+   * Go to a question from the band: the row, lit, with the composer focused so
+   * the answer is typed straight after reading the context around it. A card
+   * is the last row of the log and brings its own fields, so that one only
+   * scrolls to the bottom and leaves the focus to the card.
+   */
+  const jumpToQuestion = React.useCallback(
+    (q: OpenQuestion): void => {
+      if (!q.rowId) {
+        stickToBottom()
+        return
+      }
+      jumpToRow(q.rowId)
+      setFlashRow(q.rowId)
+      inputRef.current?.focus({ preventScroll: true })
+    },
+    [jumpToRow, stickToBottom]
+  )
 
   /**
    * Agents launched together, as `{ index, size }` by row id.
@@ -1352,6 +1386,22 @@ export function ChatView({
         />
       )}
 
+      {/* Pinned above the log, not in it: an open question is something you
+          owe, and it has to be on screen however far the run has scrolled on
+          since it was asked. Gone when nothing is open. Zoomed and on EDGE like
+          the two columns, so it lines up with the log under it. */}
+      {chat && chat.questions.length > 0 && (
+        <div style={{ flex: 'none', zoom, padding: `10px ${EDGE}px 0` }}>
+          <OpenQuestionsBand
+            questions={chat.questions}
+            folded={bandsFolded.questions}
+            onFold={() => toggleBandFolded('questions')}
+            onJump={jumpToQuestion}
+            onDismiss={(id) => dismissQuestion(session.id, id)}
+          />
+        </div>
+      )}
+
       {/* The log and the outline rail sit in a row inside the column, so the
           rail takes width from the log rather than floating over the messages it
           is an index of. `minHeight: 0` because a flex child's default
@@ -1517,7 +1567,15 @@ export function ChatView({
                 style={
                   e.id === activeHit
                     ? { borderLeft: `2px solid ${CHAT.you}`, marginLeft: -2, scrollMarginBlock: 24 }
-                    : undefined
+                    : e.id === flashRow
+                      ? // Inset: a row clips its own paint (see measureRows), so
+                        // a ring drawn outside it would not show.
+                        {
+                          boxShadow: `inset 0 0 0 2px ${CHAT.hold}`,
+                          borderRadius: CHAT.radiusCard,
+                          scrollMarginBlock: 24
+                        }
+                      : undefined
                 }
               >
                 <LogRow
@@ -1672,6 +1730,9 @@ export function ChatView({
               folded={bandsFolded.shells}
               onFold={() => toggleBandFolded('shells')}
             />
+          )}
+          {chat && chat.awaiting.length > 0 && (
+            <WaitingStrip chats={chat.awaiting} onOpen={selectSession} />
           )}
           {/* A question is the one blocking card that is *not* a bar and not
               here at all — it is a row at the end of the log (see QuestionCard).
@@ -2598,6 +2659,120 @@ function ShellStrip({
 }
 
 /**
+ * The questions put to you in this chat that you have not answered yet, one
+ * line each, oldest first: a click goes to the question, the ✕ waves one off
+ * that the run has moved past. Answering is typing a message here, so the band
+ * says that in its header rather than offering a button that would only focus
+ * the composer.
+ */
+function OpenQuestionsBand({
+  questions,
+  folded,
+  onFold,
+  onJump,
+  onDismiss
+}: {
+  questions: OpenQuestion[]
+  folded: boolean
+  onFold: () => void
+  onJump: (q: OpenQuestion) => void
+  onDismiss: (id: string) => void
+}): React.ReactElement {
+  const n = questions.length
+  return (
+    <BandFrame
+      hue={CHAT.hold}
+      label={n === 1 ? 'open question' : 'open questions'}
+      summary={`${n} waiting for your answer · answered when you reply here`}
+      folded={folded}
+      onFold={onFold}
+    >
+      {questions.map((q) => (
+        <div key={q.id} onClick={() => onJump(q)} data-click="" title={q.text} style={bandLine}>
+          <span aria-hidden style={{ color: CHAT.hold, flex: 'none', fontWeight: 700 }}>
+            ?
+          </span>
+          <span style={{ ...bandText, color: CHAT.text }}>{q.text}</span>
+          {!q.rowId && <span style={{ flex: 'none', color: CHAT.dim3 }}>question card</span>}
+          <span style={{ flex: 'none', color: CHAT.dim4 }}>{clockOf(q.at)}</span>
+          {/* Only for an `ask_user` question: a card is blocking the turn, and
+              waving it off the band would leave it blocking with nothing saying so. */}
+          {q.rowId && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onDismiss(q.id)
+              }}
+              title="Dismiss without answering"
+              style={{
+                flex: 'none',
+                border: 0,
+                background: 'transparent',
+                color: CHAT.dim3,
+                padding: '0 2px',
+                cursor: 'pointer',
+                fontFamily: MONO,
+                fontSize: 11.5
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      ))}
+    </BandFrame>
+  )
+}
+
+/**
+ * The chats still working on something this one sent them, from main's
+ * `awaiting` list: why an orchestrator that has gone quiet is not finished. One
+ * line each, a click going to that chat. Not foldable: it is at most a few
+ * lines and it is the answer to "is anything still happening".
+ */
+function WaitingStrip({
+  chats,
+  onOpen
+}: {
+  chats: string[]
+  onOpen: (sessionId: string) => void
+}): React.ReactElement {
+  // The two whole maps rather than a derived array: a selector building a new
+  // array would re-render this on every store change.
+  const config = useStore((s) => s.config)
+  const activity = useStore((s) => s.activity)
+  const nameOf = (id: string): string => {
+    for (const p of config.projects) {
+      const found = p.sessions.find((x) => x.id === id)
+      if (found) return found.name
+    }
+    return 'a closed chat'
+  }
+  return (
+    <BandFrame
+      hue={CHAT.agent}
+      label="waiting on"
+      summary={`${chats.length} ${chats.length === 1 ? 'chat' : 'chats'} working for this one`}
+    >
+      {chats.map((id) => {
+        const state = activity[id]
+        return (
+          <div key={id} onClick={() => onOpen(id)} data-click="" title="Go to this chat" style={bandLine}>
+            <span aria-hidden style={{ color: CHAT.agent, flex: 'none' }}>
+              →
+            </span>
+            <span style={{ ...bandText, color: CHAT.text }}>{nameOf(id)}</span>
+            <span style={{ flex: 'none', color: state === 'waiting' ? CHAT.hold : CHAT.dim3 }}>
+              {state === 'working' ? 'working' : state === 'waiting' ? 'asking you' : 'queued'}
+            </span>
+          </div>
+        )
+      })}
+    </BandFrame>
+  )
+}
+
+/**
  * One band section: the card, a header line in its role hue that folds it,
  * and its lines under that.
  *
@@ -2609,18 +2784,22 @@ function ShellStrip({
 function BandFrame({
   hue,
   label,
-  running,
-  total,
-  folded,
+  running = 0,
+  total = 0,
+  summary,
+  folded = false,
   onFold,
   children
 }: {
   hue: string
   label: string
-  running: number
-  total: number
-  folded: boolean
-  onFold: () => void
+  running?: number
+  total?: number
+  /** the header's reading, for a band that is not counting running and done */
+  summary?: string
+  folded?: boolean
+  /** absent for a band that does not fold: its header is then only a label */
+  onFold?: () => void
   children: React.ReactNode
 }): React.ReactElement {
   const done = total - running
@@ -2642,18 +2821,21 @@ function BandFrame({
     >
       <div
         onClick={onFold}
-        data-click=""
-        title={folded ? `Show the ${label}` : `Fold the ${label} to this line`}
-        style={{ ...bandLine, color: CHAT.dim3 }}
+        data-click={onFold ? '' : undefined}
+        title={onFold ? (folded ? `Show the ${label}` : `Fold the ${label} to this line`) : undefined}
+        style={{ ...bandLine, color: CHAT.dim3, cursor: onFold ? 'pointer' : 'default' }}
       >
-        <Chevron size={10} style={{ flex: 'none', transform: folded ? undefined : 'rotate(90deg)' }} />
+        {onFold && (
+          <Chevron size={10} style={{ flex: 'none', transform: folded ? undefined : 'rotate(90deg)' }} />
+        )}
         <span style={{ color: hue, letterSpacing: '.04em', textTransform: 'uppercase', flex: 'none' }}>
           {label}
         </span>
         <span style={bandText}>
-          {[running > 0 ? `${running} running` : null, done > 0 ? `${done} done` : null]
-            .filter(Boolean)
-            .join(' · ')}
+          {summary ??
+            [running > 0 ? `${running} running` : null, done > 0 ? `${done} done` : null]
+              .filter(Boolean)
+              .join(' · ')}
         </span>
       </div>
       {!folded && children}

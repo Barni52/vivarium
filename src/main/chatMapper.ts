@@ -12,7 +12,7 @@ import type {
   ChatToolStatus
 } from '@shared/types'
 import { modelName, sameModel } from '@shared/models'
-import { readRelayed } from './relay'
+import { ASK_USER_TOOL, CREATE_CHAT_TOOL, SEND_TO_CHAT_TOOL, readRelayed } from './relay'
 
 // The chat log's one mapper: Claude Code's own JSON → the rows the window draws.
 //
@@ -317,6 +317,9 @@ function toolTitle(name: string, input: Json): string {
     }
   }
 }
+
+/** A chat id, as `randomUUID()` spells one. */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 
 /**
  * The path and the counts out of `write_branch_diff`'s answer. Anchored on the
@@ -1233,6 +1236,41 @@ export class ChatMapper {
       return
     }
 
+    // Orchestration, read as what it is rather than as tool calls: a question
+    // to you, and a message to another chat. Both stay ordinary calls in the
+    // transcript, so a reopen maps them the same way.
+    if (name === ASK_USER_TOOL) {
+      const entry = this.push({
+        id,
+        role: 'ask',
+        at,
+        turn: this.turn,
+        kind: 'question',
+        md: str(input.question)
+      })
+      this.tools.set(toolUseId, { entry, name, input })
+      return
+    }
+
+    if (name === SEND_TO_CHAT_TOOL || name === CREATE_CHAT_TOOL) {
+      const created = name === CREATE_CHAT_TOOL
+      const entry = this.push({
+        id,
+        role: 'run',
+        at,
+        turn: this.turn,
+        kind: 'sent',
+        toolUseId,
+        chat: created ? null : str(input.chat) || null,
+        name: created ? str(input.name) : '',
+        md: str(created ? input.prompt : input.message),
+        created,
+        status: 'running'
+      })
+      this.tools.set(toolUseId, { entry, name, input })
+      return
+    }
+
     if (name === 'AskUserQuestion') {
       const entry = this.push({
         id,
@@ -1477,6 +1515,20 @@ export class ChatMapper {
       return entry
     }
 
+    if (entry.kind === 'question') return entry
+
+    if (entry.kind === 'sent') {
+      entry.status = isError ? 'error' : 'ok'
+      entry.error = isError ? firstLine(text) || 'not sent' : undefined
+      // create_chat names the chat it made only in its answer — and still does
+      // when the first message then failed ("Created chat <id>, but: …"), so the
+      // row can point at the chat either way. The first uuid in the sentence
+      // OrchestrationServer.createChat writes, which is a contract like
+      // write_branch_diff's.
+      if (entry.created) entry.chat = UUID_RE.exec(text)?.[0] ?? entry.chat
+      return entry
+    }
+
     if (entry.kind === 'ask') {
       entry.pending = false
       // Keyed against the questions off the tool_use we already mapped — the
@@ -1654,7 +1706,20 @@ export class ChatMapper {
           if (prev.state === 'denied') prev.state = 'cancelled'
           continue
         }
-        if (prev.kind === 'ask' || prev.kind === 'todo' || prev.kind === 'task') continue
+        if (prev.kind === 'sent') {
+          if (prev.status !== 'error') break
+          prev.status = 'cancelled'
+          prev.error = undefined
+          continue
+        }
+        if (
+          prev.kind === 'ask' ||
+          prev.kind === 'question' ||
+          prev.kind === 'todo' ||
+          prev.kind === 'task'
+        ) {
+          continue
+        }
         break
       }
       return

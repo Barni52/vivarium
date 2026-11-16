@@ -24,6 +24,13 @@ export function findAttention(s: AppState, sessions: Session[]): AttentionKind |
   return worst
 }
 
+/** How many questions the group's chats are waiting on you to answer. */
+export function countOpenQuestions(s: AppState, sessions: Session[]): number {
+  let n = 0
+  for (const x of sessions) n += s.chats[x.id]?.questions.length ?? 0
+  return n
+}
+
 /** Any of the group's agents actually running (a waiting one reads as "?" above, not as busy). */
 export function isAnyWorking(s: AppState, sessions: Session[]): boolean {
   return sessions.some(

@@ -50,7 +50,8 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
   no shell, and its conversations in `~/.claude/projects` — found, read, searched, deleted.
 - `orchestration.ts` — `OrchestrationServer`: an MCP server over plain `node:http` that every chat
   gets through `--mcp-config`, so chats can list, create, message, read, stop and delete each
-  other, and file the chats they create in sidebar folders (`create_folder`). Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0, on 47821 plus the
+  other, file the chats they create in sidebar folders (`create_folder`), and put a question to
+  you (`ask_user`). Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0, on 47821 plus the
   instance's slot; a per-spawn token is the caller's identity, which is why instances cannot share
   a port. What it changes in config goes through the same functions as the UI's
   handlers (`createSession`, `removeSession` in `ipc.ts`).
@@ -581,6 +582,21 @@ the reasoning.
   agent-started turn never flags you**: its idle is sent `quiet` (no "finished" mark, badge count
   or taskbar flash), because the answer goes to the sender, whose own turn is what tells you. A
   question card in it still flags, since only you can answer it.
+- **"Waiting on agents" and "asks you" are facts, never read off the prose.** A chat with an
+  origin naming it anywhere (directly or up a relay chain) is *owed*; `refreshAwaiting` sends that
+  list as the `awaiting` chat event whenever an origin comes or goes, and an idle while owed is
+  `quiet` (the row shows a violet `→N`, the chat a "waiting on" band). `ask_user` is a non-blocking
+  tool that only marks the turn (`Live.asking`); the next idle carries `asks` and flags "?" even
+  when owed, because a question beats waiting. A question in plain prose gets no flag of its own.
+- **An open question is answered by typing, not by looking.** The store derives `questions` per
+  chat (`findOpenQuestions`): `ask_user` rows with no message *you* typed after them, plus a pending
+  AskUserQuestion card. Nothing is persisted; the transcript holds the answer. Recomputed only on
+  events that can change it, never in a sidebar selector. Shown as the band pinned above the log
+  (click jumps to the row and focuses the composer) and a hollow `--accent2` count on the row,
+  summed on folded folders and projects. The attention flag still clears on viewing.
+- **The mapper draws three orchestration calls as what they are**: `ask_user` as a `question`
+  row, `send_to_chat` / `create_chat` as `sent` rows (`to <name>`, the name looked up from config
+  by id). `create_chat`'s chat id is read back out of its answer, so that sentence is a contract.
 - **A reply turn inherits the relay.** B, working for A, asks C; C's answer opens a turn in B
   owed to A, so a chain answers all the way back. Every path that gives up on turns (`dropQueue`,
   `close`) fails their origins out loud rather than leaving a sender waiting; replies are never

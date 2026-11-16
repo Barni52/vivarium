@@ -11,6 +11,15 @@
 // never typed, the same lie the interrupt marker, a command's stdout, a task
 // notification and a compaction summary were each caught telling.
 
+/**
+ * The orchestration tools the mapper draws as something other than a tool
+ * card, as the CLI names them: `mcp__<server>__<tool>`, and the server is
+ * `vivarium` because that is its key in the `--mcp-config` every chat gets.
+ */
+export const ASK_USER_TOOL = 'mcp__vivarium__ask_user'
+export const SEND_TO_CHAT_TOOL = 'mcp__vivarium__send_to_chat'
+export const CREATE_CHAT_TOOL = 'mcp__vivarium__create_chat'
+
 /** How a turn another chat started ended, as its reply reports it. */
 export type ReplyStatus = 'done' | 'failed' | 'stopped'
 
