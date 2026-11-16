@@ -128,6 +128,39 @@ export interface Session {
    * the user chose having the agent pass them.
    */
   mcpServers?: McpServerEntry[]
+  /**
+   * The folder of `Project.folders` this session sits in. Absent means loose in
+   * the project — and so does an id no folder has any more (a hand-edited
+   * config, a sibling instance deleting the folder), so a session can never
+   * vanish from the sidebar by pointing at nothing.
+   */
+  folderId?: string
+  /**
+   * The chat whose agent created this session through `create_chat`. Drawn as
+   * the spark on the row's glyph, and how "Go to creator" finds its way back.
+   *
+   * Another deliberate exception to "queried live, never persisted", on the
+   * `autoName` argument: once a session exists, nothing can be asked who made
+   * it. An id rather than a flag so the tooltip names the creator as it is
+   * called *now*. Kept when that chat is deleted — this records where the
+   * session came from, which a delete does not change.
+   */
+  createdBy?: string
+}
+
+/**
+ * A group of sessions inside one project, one level deep.
+ *
+ * Membership is `Session.folderId`, not a list of sessions in here: every lookup
+ * in both processes walks `project.sessions`, and keeping that the one flat list
+ * is what lets folders touch only the sidebar and the handlers that place a
+ * session. Order within a folder is the sessions' order in `project.sessions`.
+ */
+export interface SessionFolder {
+  id: string
+  name: string
+  /** the chat whose agent created it with `create_folder` — see Session.createdBy */
+  createdBy?: string
 }
 
 /** One server `connect_mcp` attached to a chat (see Session.mcpServers). */
@@ -217,6 +250,8 @@ export interface Project {
   /** Only meaningful for `full` projects; slim projects never publish a port. */
   publishedPort?: number
   sessions: Session[]
+  /** In the order the sidebar draws them, above the loose sessions. */
+  folders?: SessionFolder[]
   /**
    * Last known `/`-command names for this project's container, cached so a chat
    * opened cold has a menu before its first turn (nothing is emitted on the wire

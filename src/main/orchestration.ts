@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { join } from 'node:path'
 import { EFFORT_LEVELS, isEffort } from '@shared/models'
 import { isDiffBase, isHostProject } from '@shared/projects'
-import type { ChatEffort, ChatOpenResult, Config, Project, Session } from '@shared/types'
+import type { ChatEffort, ChatOpenResult, Config, Project, Session, SessionFolder } from '@shared/types'
 import { bridgeDir } from './bridge'
 import { instanceSlot } from './instance'
 import {
@@ -24,6 +24,11 @@ import type { McpAttachments } from './mcpServers'
 // delete the others — a coding agent driving a testing agent in another
 // project is the case it exists for — and attach further MCP servers to itself
 // or to another chat (main/mcpServers.ts).
+//
+// What an agent creates — a chat, a sidebar folder — is stamped with the
+// calling chat's id (`createdBy`), which the sidebar draws as a spark on the
+// row. The caller comes from the token, so the stamp cannot be forged by a
+// tool argument any more than the caller can.
 //
 // **Full access, by the user's decision.** Any chat reaches any chat in any
 // project, host projects included, at any depth, with no opt-in and no hop
@@ -86,16 +91,22 @@ export interface OrchestrationDeps {
   /** through the same gate a renderer open queues at */
   openChat(project: Project, session: Session): Promise<ChatOpenResult>
   /** add a chat session and push the new config to the renderer */
-  createChat(
-    projectId: string,
-    name: string,
-    model?: string,
-    effort?: ChatEffort
-  ): Promise<Session | null>
+  createChat(projectId: string, name: string, options: NewChatOptions): Promise<Session | null>
+  /** add a session folder and push the new config to the renderer */
+  createFolder(projectId: string, name: string, createdBy: string): Promise<SessionFolder | null>
   /** the UI's delete, cascade and all, and push the new config to the renderer */
   removeChat(projectId: string, sessionId: string): Promise<void>
   /** MCP servers agents attach to chats (main/mcpServers.ts) */
   mcp: McpAttachments
+}
+
+/** What an agent may say about a chat it creates, beyond its name. */
+export interface NewChatOptions {
+  model?: string
+  effort?: ChatEffort
+  folderId?: string
+  /** the calling chat — every session an agent makes is tagged with its maker */
+  createdBy?: string
 }
 
 interface RpcRequest {
@@ -131,8 +142,23 @@ const TOOLS = [
       'a name, its model and a status: idle, working, waiting (blocked on a question to the user), ' +
       'offline (no process running; sending to it starts one if its project is available), or ' +
       'elsewhere (running in another Vivarium window, so it cannot be messaged or stopped from here). ' +
-      'Your own chat is marked self.',
+      'Your own chat is marked self. Each project also lists its folders; a chat in one names it as ' +
+      'folder. createdBy, on a chat or a folder, is the id of the chat whose agent created it.',
     inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'create_folder',
+    description:
+      'Create a folder in a project to group chats in the sidebar, for example one per task you hand out. ' +
+      'Returns its id, which create_chat takes as folder. Folders are one level deep.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'The project id, as list_chats reports it.' },
+        name: { type: 'string', description: 'A short name saying what the chats in it are for.' }
+      },
+      required: ['project', 'name']
+    }
   },
   {
     name: 'create_chat',
@@ -147,7 +173,12 @@ const TOOLS = [
         name: { type: 'string', description: 'A short name saying what the chat is for.' },
         prompt: { type: 'string', description: 'The first message.' },
         model: { type: 'string', description: 'Optional model alias or id, for example opus or sonnet.' },
-        effort: { type: 'string', enum: [...EFFORT_LEVELS], description: 'Optional thinking effort.' }
+        effort: { type: 'string', enum: [...EFFORT_LEVELS], description: 'Optional thinking effort.' },
+        folder: {
+          type: 'string',
+          description:
+            'Optional folder id in the same project, from create_folder or list_chats. Without it the chat is not in a folder.'
+        }
       },
       required: ['project', 'name', 'prompt']
     }
@@ -454,6 +485,8 @@ export class OrchestrationServer {
         return { text: JSON.stringify(this.listChats(caller), null, 2) }
       case 'create_chat':
         return this.createChat(args, caller)
+      case 'create_folder':
+        return this.createFolder(args, caller)
       case 'send_to_chat':
         return this.sendToChat(args, caller)
       case 'read_chat':
@@ -501,6 +534,11 @@ export class OrchestrationServer {
       id: p.id,
       name: p.name,
       kind: isHostProject(p) ? 'host' : 'container',
+      folders: (p.folders ?? []).map((f) => ({
+        id: f.id,
+        name: f.name,
+        ...(f.createdBy ? { createdBy: f.createdBy } : {})
+      })),
       chats: p.sessions
         .filter((s) => s.type === 'chat')
         .map((s) => ({
@@ -508,6 +546,10 @@ export class OrchestrationServer {
           name: s.name,
           model: s.model,
           status: chat.findActivity(s.id) ?? 'offline',
+          // Only a folder that exists: a dangling id is drawn loose, so it is
+          // reported loose too.
+          ...(s.folderId && p.folders?.some((f) => f.id === s.folderId) ? { folder: s.folderId } : {}),
+          ...(s.createdBy ? { createdBy: s.createdBy } : {}),
           ...(s.id === caller ? { self: true } : {})
         }))
     }))
@@ -519,18 +561,29 @@ export class OrchestrationServer {
     const prompt = readString(args.prompt)
     const model = readString(args.model).trim() || undefined
     const effort = readString(args.effort)
+    const folderId = readString(args.folder).trim() || undefined
     if (!name || !prompt.trim()) return failure('name and prompt are required.')
     if (effort && !isEffort(effort)) {
       return failure(`effort must be one of ${EFFORT_LEVELS.join(', ')}.`)
     }
     const project = this.deps.readConfig().projects.find((p) => p.id === projectId)
     if (!project) return failure(`No project with id ${projectId}. list_chats lists them.`)
+    // Refused rather than dropped: createSession would quietly file a chat with
+    // an unknown folder as loose, and the agent would believe it was filed.
+    if (folderId && !project.folders?.some((f) => f.id === folderId)) {
+      return failure(`No folder with id ${folderId} in project ${project.name}. list_chats lists them.`)
+    }
     // Before the chat exists, not after: a chat created into a stopped
     // container would sit in the sidebar unopened, and its first message with it.
     const stopped = await this.checkStopped(project)
     if (stopped) return stopped
     const picked = isEffort(effort) ? effort : undefined
-    const session = await this.deps.createChat(project.id, name, model, picked)
+    const session = await this.deps.createChat(project.id, name, {
+      model,
+      effort: picked,
+      folderId,
+      createdBy: caller
+    })
     if (!session) return failure(`Could not create a chat in project ${project.name}.`)
     const sent = await this.deliver(project, session, prompt, caller)
     if (sent.isError) {
@@ -541,6 +594,17 @@ export class OrchestrationServer {
         `Created chat "${session.name}" (${session.id}) in project ${project.name} and sent it the prompt. ` +
         'Its answer will arrive as a <chat-notification> message.'
     }
+  }
+
+  private async createFolder(args: ToolArgs, caller: string): Promise<ToolResult> {
+    const projectId = readString(args.project)
+    const name = readString(args.name).trim()
+    if (!name) return failure('name is required.')
+    const project = this.deps.readConfig().projects.find((p) => p.id === projectId)
+    if (!project) return failure(`No project with id ${projectId}. list_chats lists them.`)
+    const folder = await this.deps.createFolder(project.id, name, caller)
+    if (!folder) return failure(`Could not create a folder in project ${project.name}.`)
+    return { text: `Created folder "${folder.name}" (${folder.id}) in project ${project.name}.` }
   }
 
   private async sendToChat(args: ToolArgs, caller: string): Promise<ToolResult> {

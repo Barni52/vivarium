@@ -30,6 +30,7 @@ import type {
   OutputNode,
   Project,
   Session,
+  SessionFolder,
   SessionType,
   SpawnResult,
   TranscriptHit,
@@ -45,7 +46,7 @@ import { DockerService, SNIPPET_AFTER, SNIPPET_BEFORE, snippetOf } from './docke
 import { BridgeWatcher, bridgeDir, ensureHostBridgeFiles, removeBridge } from './bridge'
 import { ChatService } from './chat'
 import { McpAttachments } from './mcpServers'
-import { OrchestrationServer } from './orchestration'
+import { OrchestrationServer, type NewChatOptions } from './orchestration'
 import { diffRefs, gitBranch, resolveDiffBase, writeBranchDiff } from './git'
 import { PtyManager } from './pty'
 import { pasteImage, pruneClips, removeClips } from './clipboard'
@@ -219,10 +220,15 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       isHostProject(project)
         ? chat.open(project, session)
         : openGate(() => chat.open(project, session)),
-    createChat: async (projectId, name, model, effort) => {
-      const { config, session } = await createSession(projectId, 'chat', name, model, effort)
+    createChat: async (projectId, name, options) => {
+      const { config, session } = await createSession(projectId, 'chat', name, options)
       emit(CH.configPushed, config)
       return session
+    },
+    createFolder: async (projectId, name, createdBy) => {
+      const { config, folder } = await createFolder(projectId, name, createdBy)
+      emit(CH.configPushed, config)
+      return folder
     },
     removeChat: async (projectId, sessionId) => {
       emit(CH.configPushed, await removeSession(projectId, sessionId))
@@ -582,15 +588,15 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
 
   /**
    * Add a session to a project. The UI's add, and an agent's `create_chat`,
-   * which may also pick the model and effort a new chat starts on. Returns the
-   * session as written, or null when the project is gone or cannot hold the type.
+   * which may also pick the model and effort a new chat starts on, and is
+   * recorded as the chat's creator. Returns the session as written, or null when
+   * the project is gone or cannot hold the type.
    */
   async function createSession(
     projectId: string,
     type: SessionType,
     name: string,
-    model?: string,
-    effort?: ChatEffort
+    { model, effort, folderId, createdBy }: NewChatOptions = {}
   ): Promise<{ config: Config; session: Session | null }> {
     const id = randomUUID()
     // Both agent kinds get a second UUID pinned as Claude Code's conversation id
@@ -619,7 +625,11 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
           // the model above: this seeds, and the picker overwrites it. A chat
           // that predates the setting has nothing here and is launched at the
           // same level anyway (see DEFAULT_EFFORT), so the two agree.
-          effort: type === 'chat' ? (effort ?? DEFAULT_EFFORT) : undefined
+          effort: type === 'chat' ? (effort ?? DEFAULT_EFFORT) : undefined,
+          // Checked against the file, not the caller's copy: a folder a
+          // sibling instance deleted a moment ago would leave a dangling id.
+          folderId: folderId && p.folders?.some((f) => f.id === folderId) ? folderId : undefined,
+          createdBy
         })
       }
       return cfg
@@ -632,8 +642,97 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
 
   ipcMain.handle(
     CH.addSession,
-    async (_e, projectId: string, type: SessionType, name: string): Promise<Config> =>
-      (await createSession(projectId, type, name)).config
+    async (
+      _e,
+      projectId: string,
+      type: SessionType,
+      name: string,
+      folderId?: string
+    ): Promise<Config> => (await createSession(projectId, type, name, { folderId })).config
+  )
+
+  /** The sidebar's "New folder", and an agent's `create_folder`. */
+  async function createFolder(
+    projectId: string,
+    name: string,
+    createdBy?: string
+  ): Promise<{ config: Config; folder: SessionFolder | null }> {
+    const folder: SessionFolder = { id: randomUUID(), name, createdBy }
+    const config = await store.mutate((cfg) => {
+      const p = cfg.projects.find((x) => x.id === projectId)
+      if (p) p.folders = [...(p.folders ?? []), folder]
+      return cfg
+    })
+    const written = config.projects
+      .find((p) => p.id === projectId)
+      ?.folders?.find((f) => f.id === folder.id)
+    return { config, folder: written ?? null }
+  }
+
+  ipcMain.handle(
+    CH.addFolder,
+    async (_e, projectId: string, name: string): Promise<Config> =>
+      (await createFolder(projectId, name.trim() || 'New folder')).config
+  )
+
+  ipcMain.handle(
+    CH.renameFolder,
+    async (_e, projectId: string, folderId: string, name: string): Promise<Config> => {
+      const next = name.trim()
+      return store.mutate((cfg) => {
+        const f = cfg.projects.find((x) => x.id === projectId)?.folders?.find((x) => x.id === folderId)
+        if (f && next) f.name = next
+        return cfg
+      })
+    }
+  )
+
+  /**
+   * Delete a folder and every session in it — the user's decision: a folder is
+   * how a finished orchestration run gets cleared in one go. The same cascade as
+   * one session's delete, conversations included, done in one mutate so the
+   * sessions and their transcript debt leave config.json together.
+   */
+  ipcMain.handle(
+    CH.removeFolder,
+    async (_e, projectId: string, folderId: string): Promise<Config> => {
+      const project = store.getProject(projectId)
+      const inside = (project?.sessions ?? []).filter((s) => s.folderId === folderId)
+      for (const s of inside) {
+        pty.kill(s.id)
+        chat.close(s.id)
+      }
+      const owed = inside.flatMap((s) => conversationIds(project, s.id))
+      const ids = new Set(inside.map((s) => s.id))
+      const cfg = await store.mutate((cfg) => {
+        const p = cfg.projects.find((x) => x.id === projectId)
+        if (p) {
+          p.sessions = p.sessions.filter((s) => !ids.has(s.id))
+          p.folders = p.folders?.filter((f) => f.id !== folderId)
+        }
+        owe(cfg, project, owed)
+        return cfg
+      })
+      drainAllTranscriptDeletes()
+      return cfg
+    }
+  )
+
+  ipcMain.handle(
+    CH.reorderFolders,
+    async (_e, projectId: string, orderedFolderIds: string[]): Promise<Config> => {
+      return store.mutate((cfg) => {
+        const p = cfg.projects.find((x) => x.id === projectId)
+        if (!p?.folders) return cfg
+        const byId = new Map(p.folders.map((f) => [f.id, f]))
+        const reordered = orderedFolderIds
+          .map((id) => byId.get(id))
+          .filter((f): f is NonNullable<typeof f> => !!f)
+        for (const f of p.folders) if (!orderedFolderIds.includes(f.id)) reordered.push(f)
+        p.folders = reordered
+        return cfg
+      })
+    }
   )
 
   ipcMain.handle(
@@ -705,11 +804,22 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
   })
 
   ipcMain.handle(
-    CH.reorderSessions,
-    async (_e, projectId: string, orderedSessionIds: string[]): Promise<Config> => {
+    CH.placeSession,
+    async (
+      _e,
+      projectId: string,
+      sessionId: string,
+      folderId: string | null,
+      orderedSessionIds: string[]
+    ): Promise<Config> => {
       return store.mutate((cfg) => {
         const p = cfg.projects.find((x) => x.id === projectId)
         if (!p) return cfg
+        const placed = p.sessions.find((s) => s.id === sessionId)
+        if (placed) {
+          if (folderId && p.folders?.some((f) => f.id === folderId)) placed.folderId = folderId
+          else delete placed.folderId
+        }
         const byId = new Map(p.sessions.map((s) => [s.id, s]))
         const reordered = orderedSessionIds
           .map((id) => byId.get(id))
@@ -747,7 +857,8 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
       fromProjectId: string,
       toProjectId: string,
       sessionId: string,
-      index: number
+      index: number,
+      folderId?: string
     ): Promise<Config> => {
       // Validate before killing anything — a call that can't move the session
       // must not end its pty either.
@@ -782,6 +893,10 @@ export function registerIpc(win: BrowserWindow, store: ConfigStore): void {
         const i = from.sessions.findIndex((s) => s.id === sessionId)
         if (i < 0) return cfg
         const [session] = from.sessions.splice(i, 1)
+        // A folder id is only good inside its own project, so the session lands
+        // loose unless it was dropped into one of the target's folders.
+        if (folderId && to.folders?.some((f) => f.id === folderId)) session.folderId = folderId
+        else delete session.folderId
         const at = index < 0 || index > to.sessions.length ? to.sessions.length : index
         to.sessions.splice(at, 0, session)
         return cfg

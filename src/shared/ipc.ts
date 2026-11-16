@@ -29,9 +29,17 @@ export const CH = {
   // config.json and read back at launch.
   setChatZoom: 'config:set-chat-zoom',
   reorderProjects: 'project:reorder',
-  reorderSessions: 'session:reorder',
+  // A drag inside one project: the new order, and which folder (if any) the
+  // dragged session now sits in. One channel for both, because dropping a
+  // session next to a row in another folder changes the two together.
+  placeSession: 'session:place',
+  addFolder: 'folder:add',
+  renameFolder: 'folder:rename',
+  // Deletes the folder and every session in it, through the session cascade.
+  removeFolder: 'folder:remove',
+  reorderFolders: 'folder:reorder',
   // Cross-project move (drag a session onto another project). Separate from
-  // reorderSessions because it spans two projects and has to end the session's
+  // placeSession because it spans two projects and has to end the session's
   // pty — the old container's exec client can't follow it.
   moveSession: 'session:move',
 

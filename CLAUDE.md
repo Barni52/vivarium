@@ -50,7 +50,7 @@ electron-vite, three build targets, aliases `@shared` / `@renderer`.
   no shell, and its conversations in `~/.claude/projects` — found, read, searched, deleted.
 - `orchestration.ts` — `OrchestrationServer`: an MCP server over plain `node:http` that every chat
   gets through `--mcp-config`, so chats can list, create, message, read, stop and delete each
-  other. Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0, on 47821 plus the
+  other, and file the chats they create in sidebar folders (`create_folder`). Listens on 127.0.0.1 and the WSL gateway address, never 0.0.0.0, on 47821 plus the
   instance's slot; a per-spawn token is the caller's identity, which is why instances cannot share
   a port. What it changes in config goes through the same functions as the UI's
   handlers (`createSession`, `removeSession` in `ipc.ts`).
@@ -180,13 +180,14 @@ longer holds, because an agent's delete gets no `confirmKill` to do it.
   kinds write the same container-side transcript — so only the in-flight turn is lost.
 - Runtime state (container running, live ptys) is **queried live, never persisted**. `config.json`
   holds projects/mounts/sessions/settings and is written through `ConfigStore.mutate` (atomic
-  temp-file + rename). Seven deliberate exceptions, all user preferences or facts that *cannot* be
+  temp-file + rename). Eight deliberate exceptions, all user preferences or facts that *cannot* be
   queried: `Session.model`, `Session.effort`, `Config.chatZoom`, `Session.mcpServers` (attached
   over a control channel that ends with the process, logins included),
   `Session.previousClaudeSessionIds` + `Config.pendingTranscriptDeletes` (and its host twin
   `pendingHostTranscriptDeletes`), `Session.rewound`, and
   `Session.autoName` (*who* last named a chat — nothing can be asked once both answers are just a
-  string in `name`). `Session.effort` is the strongest case of the lot: the CLI reports the effort
+  string in `name`), and `Session.createdBy` / `SessionFolder.createdBy` (*which chat's agent* made
+  it — nothing can be asked once it exists). `Session.effort` is the strongest case of the lot: the CLI reports the effort
   level **nowhere** — not in `init`, and there is no control request that asks — so the pick is the
   only record that a pick was made.
   Not persisted, for contrast: the `list_models` result, the composer draft, `terminalFontSize`.
@@ -242,6 +243,22 @@ longer holds, because an agent's delete gets no `confirmKill` to do it.
   `claudeUpdate`, and the `containerStates` / `claudeStatus` sweeps — and a host chat's
   `ChatRuntime` never reaches docker, nor waits at the open gate. Their sessions render at launch
   like host shells and never get the "Container stopped" placeholder.
+
+### Session folders
+
+- **A folder is `Session.folderId`, never sessions nested inside a folder.** `project.sessions`
+  stays the one flat list that ~60 lookups in both processes walk; its order is also each folder's
+  order. One level deep, drawn above the loose sessions. A `folderId` naming no folder is drawn
+  **loose**, never hidden, and `list_chats` reports it loose too.
+- **Deleting a folder deletes every session in it** (the user's decision: it is how a finished
+  orchestration run is cleared), through the same cascade as one session, conversations included,
+  in one mutate. An empty folder goes without a dialog.
+- A session moved to another project lands loose unless it was dropped into one of that project's
+  folders; a folder id is only good inside its own project. Fold state is session-only and
+  inverted (`foldedFolders`), so every folder an agent creates arrives open.
+- **The AI tag is the `--role-agent` spark on a row's glyph** (`AiTag`), for anything with
+  `createdBy`. Permanent: renames, moves and the creator's delete leave it. Only `create_chat` and
+  `create_folder` set it, from the caller's token, so a user-made session never has one.
 
 ### Several instances
 
@@ -586,6 +603,10 @@ the reasoning.
   client when there is one** (`clientId`, `callbackPort`, as in `.mcp.json`'s `oauth` block):
   without it the CLI registers a client on the fly, and the dev Keycloak's "Trusted Hosts"
   registration policy refuses that with a 403 before any password is checked.
+- **What an agent creates is stamped with the calling chat** (`createdBy`), and `list_chats`
+  reports it with each chat's folder, so an orchestrator can find its own children after a
+  restart. `create_chat` refuses a `folder` that is not in that project rather than filing the
+  chat loose behind the agent's back. There is no `delete_folder`: clearing up is the user's.
 - **A chat can now be opened by main as well as the renderer**, so `ChatService.open` joins an
   open already in progress (`opening`) instead of racing it to a second process.
 

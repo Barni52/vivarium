@@ -7,6 +7,7 @@ import {
   Chevron,
   Disks,
   Folder,
+  FolderPlus,
   Gear,
   GitBranch,
   Monitor,
@@ -19,6 +20,8 @@ import {
   Trash
 } from './Icons'
 import { SessionRow } from './SessionRow'
+import { FolderRow } from './FolderRow'
+import { findAttention, isAnyWorking } from './sessionGroup'
 
 function HeaderBtn({
   title,
@@ -73,36 +76,15 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   const openClaudeUpdate = useStore((s) => s.openClaudeUpdate)
   const openVolumes = useStore((s) => s.openVolumes)
   const openTranscriptSearch = useStore((s) => s.openTranscriptSearch)
-  // aggregate: worst outstanding attention among child agents (shown when the
-  // project is collapsed, so a notification isn't hidden with its session
-  // rows); a question beats finished — an agent blocked on an answer is the
-  // more urgent state
-  const attention = useStore((s): AttentionKind | null => {
-    let worst: AttentionKind | null = null
-    for (const x of project.sessions) {
-      if (x.type !== 'agent' && x.type !== 'chat') continue
-      // A live agent blocked on the user counts even when it carries no
-      // notification (one you are watching clears its flag but is still
-      // waiting) — collapsing the project must not hide that nothing is moving.
-      if (s.activity[x.id] === 'waiting' && s.live[x.id]) return 'question'
-      const k = s.notifications[x.id]
-      if (k === 'question') return 'question'
-      if (k) worst = k
-    }
-    return worst
-  })
+  // aggregate: worst outstanding attention among child agents, folders
+  // included (shown when the project is collapsed, so a notification isn't
+  // hidden with its session rows)
+  const attention = useStore((s): AttentionKind | null => findAttention(s, project.sessions))
   const op = useStore((s) => s.containerOps[project.id])
   const opError = useStore((s) => s.containerErrors[project.id])
   // aggregate: any child agent actually running (same collapsed-only rule as
-  // attention; a waiting one is mid-turn but reads as "?" above, not as busy)
-  const hasWorking = useStore((s) =>
-    project.sessions.some(
-      (x) =>
-        (x.type === 'agent' || x.type === 'chat') &&
-        s.activity[x.id] === 'working' &&
-        s.live[x.id]
-    )
-  )
+  // attention)
+  const hasWorking = useStore((s) => isAnyWorking(s, project.sessions))
   const projectIds = useStore((s) => s.config.projects.map((p) => p.id))
   // No kind check: this row is the drop target both for a project being reordered
   // ('before'/'after') and for a session being dropped into it ('into'), and
@@ -114,6 +96,8 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   const setDropTarget = useStore((s) => s.setDropTarget)
   const reorderProjects = useStore((s) => s.reorderProjects)
   const requestMoveSession = useStore((s) => s.requestMoveSession)
+  const placeSession = useStore((s) => s.placeSession)
+  const addFolder = useStore((s) => s.addFolder)
   // Runs on Windows, with no container: the one fact about a project that
   // changes what its row is allowed to say (see @shared/projects).
   const host = isHostProject(project)
@@ -127,6 +111,7 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
         icon: <Plus size={14} />,
         onSelect: () => openAddSession(project.id, new DOMRect(e.clientX, e.clientY, 0, 0))
       },
+      { label: 'New folder', icon: <FolderPlus size={14} />, onSelect: () => void addFolder(project.id) },
       { label: 'Project settings', icon: <Gear size={14} />, onSelect: () => openSettings(project.id) }
     ]
     const tail: ContextMenuItem[] = [
@@ -218,7 +203,8 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   // A project row has no meaningful midpoint for a session (there is no "before
   // this project" place to put one), so the whole row is one target and the drop
   // appends. Dropping onto the session's *own* project is not a move, so it sets
-  // nothing and the cursor stays no-drop. This is also what makes a collapsed —
+  // nothing and the cursor stays no-drop (unless the session is in a folder, see
+  // below). This is also what makes a collapsed —
   // or empty — project reachable: no expansion needed, the drop expands it after
   // the fact.
   //
@@ -226,10 +212,19 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   // no-drop cursor — rather than accepted and then turned down by a dialog: an
   // agent or a chat into, out of or between host projects, whose conversation
   // could not come with it (see canMoveSession).
-  const foreignSessionDrag = (): { id: string; projectId: string } | null => {
+  //
+  // The one same-project drop that means something is a session in a folder:
+  // dropped here, it leaves the folder and goes to the end of the loose ones —
+  // the way out of a folder when there is no loose row to drop beside.
+  const droppableSession = (): { id: string; projectId: string } | null => {
     const st = useStore.getState()
     const d = st.drag
-    if (!d || d.kind !== 'session' || !d.projectId || d.projectId === project.id) return null
+    if (!d || d.kind !== 'session' || !d.projectId) return null
+    if (d.projectId === project.id) {
+      const session = project.sessions.find((x) => x.id === d.id)
+      const filed = project.folders?.some((f) => f.id === session?.folderId)
+      return filed ? { id: d.id, projectId: d.projectId } : null
+    }
     const from = st.config.projects.find((p) => p.id === d.projectId)
     const session = from?.sessions.find((x) => x.id === d.id)
     if (!session || !canMoveSession(from, project, session.type)) return null
@@ -237,13 +232,14 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   }
 
   const onSessionDragOver = (e: React.DragEvent): void => {
-    if (!foreignSessionDrag()) {
-      // A session over the project it already belongs to. Clear the last target as
-      // well as refusing the drop, or some row further up keeps drawing an
-      // indicator for a place the cursor has left. (A *project* drag lands here too
-      // — via a session row that ignored it — and must keep its target.)
+    if (!droppableSession()) {
+      // A loose session over the project it already belongs to, or a folder
+      // dragged off the folder rows. Clear the last target as well as refusing
+      // the drop, or some row further up keeps drawing an indicator for a place
+      // the cursor has left. (A *project* drag lands here too — via a session
+      // row that ignored it — and must keep its target.)
       const st = useStore.getState()
-      if (st.drag?.kind === 'session' && st.dropTarget) setDropTarget(null)
+      if (st.drag && st.drag.kind !== 'project' && st.dropTarget) setDropTarget(null)
       return
     }
     e.preventDefault()
@@ -251,11 +247,22 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   }
 
   const onSessionDrop = (e: React.DragEvent): void => {
-    const d = foreignSessionDrag()
+    const d = droppableSession()
     if (!d) return
     e.preventDefault()
+    if (d.projectId === project.id) {
+      const ids = project.sessions.map((s) => s.id).filter((id) => id !== d.id)
+      void placeSession(project.id, d.id, null, [...ids, d.id])
+      return
+    }
     requestMoveSession(d.projectId, project.id, d.id, -1)
   }
+
+  // Folders first, then the loose sessions. A session whose folder is gone is
+  // loose, never hidden (see Session.folderId).
+  const folders = project.folders ?? []
+  const folderIds = new Set(folders.map((f) => f.id))
+  const loose = project.sessions.filter((s) => !s.folderId || !folderIds.has(s.folderId))
 
   return (
     <div>
@@ -546,10 +553,18 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
           // project name above it, and the only number that decides it.
           style={{ paddingLeft: 0, marginLeft: 20, borderLeft: '1px solid var(--border)' }}
         >
-          {project.sessions.map((s) => (
+          {folders.map((f) => (
+            <FolderRow
+              key={f.id}
+              project={project}
+              folder={f}
+              sessions={project.sessions.filter((s) => s.folderId === f.id)}
+            />
+          ))}
+          {loose.map((s) => (
             <SessionRow key={s.id} project={project} session={s} />
           ))}
-          {project.sessions.length === 0 && (
+          {project.sessions.length === 0 && folders.length === 0 && (
             <div
               style={{
                 display: 'flex',

@@ -54,8 +54,12 @@ const api = {
   updateProject: (input: UpdateProjectInput): Promise<Config> =>
     ipcRenderer.invoke(CH.updateProject, input),
   deleteProject: (id: string): Promise<Config> => ipcRenderer.invoke(CH.deleteProject, id),
-  addSession: (projectId: string, type: SessionType, name: string): Promise<Config> =>
-    ipcRenderer.invoke(CH.addSession, projectId, type, name),
+  addSession: (
+    projectId: string,
+    type: SessionType,
+    name: string,
+    folderId?: string
+  ): Promise<Config> => ipcRenderer.invoke(CH.addSession, projectId, type, name, folderId),
   renameSession: (projectId: string, sessionId: string, name: string): Promise<Config> =>
     ipcRenderer.invoke(CH.renameSession, projectId, sessionId, name),
   removeSession: (projectId: string, sessionId: string): Promise<Config> =>
@@ -64,16 +68,32 @@ const api = {
   setChatZoom: (value: number): Promise<void> => ipcRenderer.invoke(CH.setChatZoom, value),
   reorderProjects: (orderedIds: string[]): Promise<Config> =>
     ipcRenderer.invoke(CH.reorderProjects, orderedIds),
-  reorderSessions: (projectId: string, orderedSessionIds: string[]): Promise<Config> =>
-    ipcRenderer.invoke(CH.reorderSessions, projectId, orderedSessionIds),
+  // folderId null = loose in the project
+  placeSession: (
+    projectId: string,
+    sessionId: string,
+    folderId: string | null,
+    orderedSessionIds: string[]
+  ): Promise<Config> =>
+    ipcRenderer.invoke(CH.placeSession, projectId, sessionId, folderId, orderedSessionIds),
+  addFolder: (projectId: string, name: string): Promise<Config> =>
+    ipcRenderer.invoke(CH.addFolder, projectId, name),
+  renameFolder: (projectId: string, folderId: string, name: string): Promise<Config> =>
+    ipcRenderer.invoke(CH.renameFolder, projectId, folderId, name),
+  removeFolder: (projectId: string, folderId: string): Promise<Config> =>
+    ipcRenderer.invoke(CH.removeFolder, projectId, folderId),
+  reorderFolders: (projectId: string, orderedFolderIds: string[]): Promise<Config> =>
+    ipcRenderer.invoke(CH.reorderFolders, projectId, orderedFolderIds),
   // index = insertion point in the target project's session list; -1 appends.
+  // folderId = a folder of the target project to land in; absent lands loose.
   moveSession: (
     fromProjectId: string,
     toProjectId: string,
     sessionId: string,
-    index: number
+    index: number,
+    folderId?: string
   ): Promise<Config> =>
-    ipcRenderer.invoke(CH.moveSession, fromProjectId, toProjectId, sessionId, index),
+    ipcRenderer.invoke(CH.moveSession, fromProjectId, toProjectId, sessionId, index, folderId),
 
   // git
   projectBranches: (): Promise<Record<string, string | null>> =>

@@ -63,6 +63,7 @@ export type DialogKind =
   | 'confirmKill'
   | 'confirmMove'
   | 'confirmDeleteProject'
+  | 'confirmDeleteFolder'
   | 'confirmQuit'
   | 'claudeUpdate'
   | 'volumes'
@@ -103,7 +104,7 @@ export interface ContextMenuState {
 }
 
 export interface DragState {
-  kind: 'project' | 'session'
+  kind: 'project' | 'session' | 'folder'
   id: string
   projectId?: string
 }
@@ -112,10 +113,10 @@ export interface DropTarget {
   id: string
   /**
    * 'before'/'after' insert next to the row `id` names; 'into' means "append to
-   * this project", which is what a session dragged over a project row gets — a
-   * project has no midpoint worth reading there. No kind field is needed: `id` is
-   * a project id only when a project row is the target, so `pos` is enough to tell
-   * a project reorder from a session landing in one.
+   * this project or folder", which is what a session dragged over a project or
+   * folder row gets — neither has a midpoint worth reading there. No kind field
+   * is needed: the ids are all UUIDs, so a row only ever finds its own id here,
+   * and `pos` is enough to tell a reorder from a session landing in one.
    */
   pos: 'before' | 'after' | 'into'
 }
@@ -138,6 +139,8 @@ export interface SettingsDraft extends ProjectDraft {
 
 export interface AddSessionDraft {
   projectId: string
+  /** the folder the session goes into — set when the picker was opened from one */
+  folderId?: string
   top: number
   left: number
   type: SessionType
@@ -156,6 +159,8 @@ interface MoveTarget {
   sessionId: string
   /** Insertion index in the target project's session list; -1 appends. */
   index: number
+  /** a folder of the target project to land in; absent lands loose */
+  folderId?: string
   sessionName: string
   toProjectName: string
   /** A host shell reopens in a folder, everything else in a container — the wording turns on it. */
@@ -167,6 +172,16 @@ interface MoveTarget {
 interface DeleteProjectTarget {
   id: string
   name: string
+}
+
+interface DeleteFolderTarget {
+  projectId: string
+  folderId: string
+  name: string
+  /** how many sessions go with it — the dialog says the number */
+  count: number
+  /** how many of those are chats, whose conversations are deleted too */
+  chats: number
 }
 
 /**
@@ -294,7 +309,7 @@ function mergeEntriesById(list: ChatEntry[], incoming: ChatEntry[]): ChatEntry[]
   return next
 }
 
-interface AppState {
+export interface AppState {
   config: Config
   states: Record<string, ContainerState>
   branches: Record<string, string | null>
@@ -322,6 +337,12 @@ interface AppState {
   diffBaseTarget: { projectId: string; top: number; left: number } | null
   selectedSessionId: string | null
   expanded: Record<string, boolean>
+  /**
+   * Folders you folded, by folder id. Inverted from `expanded` so a folder
+   * nobody has touched — every one at launch, and every one an agent creates —
+   * is open without anything having to seed it. Session-only, like `expanded`.
+   */
+  foldedFolders: Record<string, true>
   sidebarWidth: number
   sidebarCollapsed: boolean
   /**
@@ -457,7 +478,10 @@ interface AppState {
   killTarget: KillTarget | null
   moveTarget: MoveTarget | null
   deleteTarget: DeleteProjectTarget | null
+  folderTarget: DeleteFolderTarget | null
   editingSessionId: string | null
+  /** the folder whose name is in edit; shares `editDraft` with the session rename */
+  editingFolderId: string | null
   editDraft: string
   contextMenu: ContextMenuState | null
   drag: DragState | null
@@ -517,6 +541,7 @@ interface AppState {
 
   select: (sessionId: string) => void
   toggle: (projectId: string) => void
+  toggleFolder: (folderId: string) => void
   setSidebarWidth: (n: number) => void
   setAgentPanelWidth: (n: number) => void
   toggleBandFolded: (band: 'agents' | 'shells') => void
@@ -564,7 +589,7 @@ interface AppState {
   // dialogs
   openAddProject: () => void
   openSettings: (projectId: string) => void
-  openAddSession: (projectId: string, anchor: DOMRect) => void
+  openAddSession: (projectId: string, anchor: DOMRect, folderId?: string) => void
   closeDialog: () => void
   requestQuit: () => void
   confirmQuit: () => void
@@ -579,6 +604,16 @@ interface AppState {
   requestDeleteProject: (projectId: string, name: string) => void
   confirmDeleteProject: () => Promise<void>
 
+  // session folders
+  /** creates "New folder" and opens its name for editing */
+  addFolder: (projectId: string) => Promise<void>
+  startFolderRename: (folderId: string, name: string) => void
+  commitFolderRename: (projectId: string) => Promise<void>
+  reorderFolders: (projectId: string, orderedFolderIds: string[]) => Promise<void>
+  /** deletes an empty folder at once; one with sessions asks first */
+  requestDeleteFolder: (projectId: string, folderId: string) => void
+  confirmDeleteFolder: () => Promise<void>
+
   // context menu
   openContextMenu: (x: number, y: number, items: ContextMenuItem[], onClose?: () => void) => void
   closeContextMenu: () => void
@@ -587,12 +622,19 @@ interface AppState {
   setDrag: (drag: DragState | null) => void
   setDropTarget: (t: DropTarget | null) => void
   reorderProjects: (orderedIds: string[]) => Promise<void>
-  reorderSessions: (projectId: string, orderedSessionIds: string[]) => Promise<void>
+  /** a drag inside one project: the new order, and the folder the session now sits in */
+  placeSession: (
+    projectId: string,
+    sessionId: string,
+    folderId: string | null,
+    orderedSessionIds: string[]
+  ) => Promise<void>
   requestMoveSession: (
     fromProjectId: string,
     toProjectId: string,
     sessionId: string,
-    index: number
+    index: number,
+    folderId?: string
   ) => void
   confirmMoveSession: () => Promise<void>
   confirmAddSession: () => Promise<void>
@@ -730,6 +772,7 @@ export const useStore = create<AppState>((set, get) => ({
   diffBaseTarget: null,
   selectedSessionId: null,
   expanded: {},
+  foldedFolders: {},
   sidebarWidth: 288,
   sidebarCollapsed: false,
   agentPanelWidth: null,
@@ -770,7 +813,9 @@ export const useStore = create<AppState>((set, get) => ({
   killTarget: null,
   moveTarget: null,
   deleteTarget: null,
+  folderTarget: null,
   editingSessionId: null,
+  editingFolderId: null,
   editDraft: '',
   contextMenu: null,
   drag: null,
@@ -1107,8 +1152,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   select: (sessionId) => {
     set((s) => {
-      // ensure the owning project is expanded
+      // ensure the owning project, and the folder it sits in, are open
       const proj = s.config.projects.find((p) => p.sessions.some((x) => x.id === sessionId))
+      const folderId = proj?.sessions.find((x) => x.id === sessionId)?.folderId
+      const foldedFolders = { ...s.foldedFolders }
+      if (folderId) delete foldedFolders[folderId]
       // opening a session acknowledges its finished-agent notification (the other
       // half of that rule is acknowledgeSelected, for the one already open)
       const notifications = { ...s.notifications }
@@ -1116,7 +1164,8 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         selectedSessionId: sessionId,
         notifications,
-        expanded: proj ? { ...s.expanded, [proj.id]: true } : s.expanded
+        expanded: proj ? { ...s.expanded, [proj.id]: true } : s.expanded,
+        foldedFolders
       }
     })
     pushBadge(get().notifications, false)
@@ -1124,6 +1173,14 @@ export const useStore = create<AppState>((set, get) => ({
 
   toggle: (projectId) =>
     set((s) => ({ expanded: { ...s.expanded, [projectId]: !s.expanded[projectId] } })),
+
+  toggleFolder: (folderId) =>
+    set((s) => {
+      const foldedFolders = { ...s.foldedFolders }
+      if (foldedFolders[folderId]) delete foldedFolders[folderId]
+      else foldedFolders[folderId] = true
+      return { foldedFolders }
+    }),
 
   setSidebarWidth: (n) => set({ sidebarWidth: Math.max(232, Math.min(460, n)) }),
   // Only the floor is clamped here. The ceiling depends on how wide the chat
@@ -1634,7 +1691,7 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
 
-  openAddSession: (projectId, anchor) => {
+  openAddSession: (projectId, anchor, folderId) => {
     const p = get().config.projects.find((x) => x.id === projectId)
     // Keep the whole panel on screen: below the title bar, and clear of the
     // right/bottom edges by its own size (ADD_SESSION_POPOVER, so the two can't
@@ -1651,6 +1708,7 @@ export const useStore = create<AppState>((set, get) => ({
       dialog: 'addSession',
       addSession: {
         projectId,
+        folderId,
         top,
         left,
         type,
@@ -1667,6 +1725,7 @@ export const useStore = create<AppState>((set, get) => ({
       killTarget: null,
       moveTarget: null,
       deleteTarget: null,
+      folderTarget: null,
       st: null,
       claudeResults: {}
     }),
@@ -1769,6 +1828,70 @@ export const useStore = create<AppState>((set, get) => ({
     set({ dialog: null, deleteTarget: null, st: null })
   },
 
+  addFolder: async (projectId) => {
+    const name = 'New folder'
+    const config = await window.vivarium.addFolder(projectId, name)
+    const folders = config.projects.find((p) => p.id === projectId)?.folders ?? []
+    const created = folders[folders.length - 1]
+    set((s) => ({
+      config,
+      expanded: { ...s.expanded, [projectId]: true },
+      editingFolderId: created ? created.id : null,
+      editingSessionId: null,
+      editDraft: created ? name : s.editDraft
+    }))
+  },
+
+  startFolderRename: (folderId, name) =>
+    set({ editingFolderId: folderId, editingSessionId: null, editDraft: name }),
+
+  commitFolderRename: async (projectId) => {
+    const { editingFolderId, editDraft } = get()
+    if (!editingFolderId) return
+    const config = await window.vivarium.renameFolder(projectId, editingFolderId, editDraft)
+    set({ config, editingFolderId: null })
+  },
+
+  reorderFolders: async (projectId, orderedFolderIds) => {
+    const config = await window.vivarium.reorderFolders(projectId, orderedFolderIds)
+    set({ config, drag: null, dropTarget: null })
+  },
+
+  requestDeleteFolder: (projectId, folderId) => {
+    const p = get().config.projects.find((x) => x.id === projectId)
+    const folder = p?.folders?.find((f) => f.id === folderId)
+    if (!p || !folder) return
+    const inside = p.sessions.filter((s) => s.folderId === folderId)
+    const target = {
+      projectId,
+      folderId,
+      name: folder.name,
+      count: inside.length,
+      chats: inside.filter((s) => s.type === 'chat').length
+    }
+    // Nothing in it, nothing to lose: no dialog for an empty folder.
+    if (target.count === 0) {
+      set({ folderTarget: target })
+      void get().confirmDeleteFolder()
+      return
+    }
+    set({ dialog: 'confirmDeleteFolder', folderTarget: target })
+  },
+
+  confirmDeleteFolder: async () => {
+    const t = get().folderTarget
+    if (!t) return
+    const config = await window.vivarium.removeFolder(t.projectId, t.folderId)
+    // adoptConfig is what drops the per-session state of every session that
+    // left config — here, the folder's whole contents at once.
+    get().adoptConfig(config)
+    set((s) => {
+      const foldedFolders = { ...s.foldedFolders }
+      delete foldedFolders[t.folderId]
+      return { dialog: null, folderTarget: null, foldedFolders }
+    })
+  },
+
   openContextMenu: (x, y, items, onClose) => set({ contextMenu: { x, y, items, onClose } }),
   closeContextMenu: () => set({ contextMenu: null }),
 
@@ -1780,12 +1903,18 @@ export const useStore = create<AppState>((set, get) => ({
     set({ config, drag: null, dropTarget: null })
   },
 
-  reorderSessions: async (projectId, orderedSessionIds) => {
-    const config = await window.vivarium.reorderSessions(projectId, orderedSessionIds)
-    set({ config, drag: null, dropTarget: null })
+  placeSession: async (projectId, sessionId, folderId, orderedSessionIds) => {
+    const config = await window.vivarium.placeSession(projectId, sessionId, folderId, orderedSessionIds)
+    set((s) => {
+      // Dropped into a folded folder: open it, so the row you just let go of
+      // does not vanish under the cursor.
+      const foldedFolders = { ...s.foldedFolders }
+      if (folderId) delete foldedFolders[folderId]
+      return { config, drag: null, dropTarget: null, foldedFolders }
+    })
   },
 
-  requestMoveSession: (fromProjectId, toProjectId, sessionId, index) => {
+  requestMoveSession: (fromProjectId, toProjectId, sessionId, index, folderId) => {
     const s = get()
     const from = s.config.projects.find((p) => p.id === fromProjectId)
     const to = s.config.projects.find((p) => p.id === toProjectId)
@@ -1806,6 +1935,7 @@ export const useStore = create<AppState>((set, get) => ({
         toProjectId,
         sessionId,
         index,
+        folderId,
         sessionName: session.name,
         toProjectName: to.name,
         type: session.type,
@@ -1821,7 +1951,8 @@ export const useStore = create<AppState>((set, get) => ({
       moveTarget.fromProjectId,
       moveTarget.toProjectId,
       moveTarget.sessionId,
-      moveTarget.index
+      moveTarget.index,
+      moveTarget.folderId
     )
     // Nothing here is re-keyed: live/activity/agentSince/notifications are all
     // keyed by session id, which the move doesn't change. Main killed the pty
@@ -1841,22 +1972,33 @@ export const useStore = create<AppState>((set, get) => ({
     if (!addSession) return
     const p = config.projects.find((x) => x.id === addSession.projectId)
     const name = addSession.name.trim() || defaultSessionName(p, addSession.type)
-    const next = await window.vivarium.addSession(addSession.projectId, addSession.type, name)
+    const next = await window.vivarium.addSession(
+      addSession.projectId,
+      addSession.type,
+      name,
+      addSession.folderId
+    )
     const proj = next.projects.find((x) => x.id === addSession.projectId)
     const created = proj?.sessions[proj.sessions.length - 1]
-    set((s) => ({
-      config: next,
-      dialog: null,
-      addSession: null,
-      lastSessionType: addSession.type,
-      selectedSessionId: created ? created.id : s.selectedSessionId,
-      expanded: { ...s.expanded, [addSession.projectId]: true }
-    }))
+    set((s) => {
+      const foldedFolders = { ...s.foldedFolders }
+      if (addSession.folderId) delete foldedFolders[addSession.folderId]
+      return {
+        config: next,
+        dialog: null,
+        addSession: null,
+        lastSessionType: addSession.type,
+        selectedSessionId: created ? created.id : s.selectedSessionId,
+        expanded: { ...s.expanded, [addSession.projectId]: true },
+        foldedFolders
+      }
+    })
   },
 
-  startRename: (sessionId, name) => set({ editingSessionId: sessionId, editDraft: name }),
+  startRename: (sessionId, name) =>
+    set({ editingSessionId: sessionId, editingFolderId: null, editDraft: name }),
   setEditDraft: (v) => set({ editDraft: v }),
-  cancelRename: () => set({ editingSessionId: null }),
+  cancelRename: () => set({ editingSessionId: null, editingFolderId: null }),
   commitRename: async (projectId) => {
     const { editingSessionId, editDraft } = get()
     if (!editingSessionId) return

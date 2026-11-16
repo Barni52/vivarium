@@ -3,8 +3,9 @@ import type { Project, Session } from '@shared/types'
 import { canMoveSession } from '@shared/projects'
 import { useStore } from '../state/store'
 import { ACCENT, MONO } from '../theme'
-import { TypeIcon, Pencil, Close, Refresh, ThinkingDots } from './Icons'
+import { TypeIcon, Pencil, Close, Refresh, ThinkingDots, AiSpark } from './Icons'
 import { Elapsed } from './Elapsed'
+import { AiTag, describeCreator, useCreatorName } from './AiTag'
 
 // Turn duration next to an agent's indicator. Deliberately visible text, not a
 // tooltip: both indicators only render while the row is NOT hovered (the hover
@@ -39,8 +40,14 @@ export function SessionRow({ project, session }: { project: Project; session: Se
   )
   const setDrag = useStore((s) => s.setDrag)
   const setDropTarget = useStore((s) => s.setDropTarget)
-  const reorderSessions = useStore((s) => s.reorderSessions)
+  const placeSession = useStore((s) => s.placeSession)
   const requestMoveSession = useStore((s) => s.requestMoveSession)
+  const creatorName = useCreatorName(session.createdBy)
+  // The folder this row is drawn in. A dangling id is drawn loose (see
+  // Session.folderId), so a drop next to this row must read it the same way.
+  const folderId = project.folders?.some((f) => f.id === session.folderId)
+    ? session.folderId
+    : undefined
 
   const showMenu = (e: React.MouseEvent): void => {
     e.preventDefault()
@@ -67,6 +74,17 @@ export function SessionRow({ project, session }: { project: Project; session: Se
             }
           ]
         : []),
+      // Back to the chat whose agent made this one, while that chat exists.
+      ...(session.createdBy && creatorName
+        ? [
+            {
+              label: `Go to creator: ${creatorName}`,
+              // The tag's own star, not Sparkle, which is the agent type's.
+              icon: <AiSpark size={12} color="var(--role-agent)" />,
+              onSelect: () => select(session.createdBy as string)
+            }
+          ]
+        : []),
       { label: '---' },
       {
         // same two glyphs as this row's hover controls, so the menu and the
@@ -85,6 +103,10 @@ export function SessionRow({ project, session }: { project: Project; session: Se
     const t = st.dropTarget
     if (!d || d.kind !== 'session' || !t || t.id !== session.id) return
 
+    // Either way the dragged session lands in this row's folder, or loose
+    // beside it. The arithmetic is on the project's one flat list, which is
+    // also each folder's order (see SessionFolder).
+    //
     // A session from another project: same insertion arithmetic, but the dragged
     // id isn't in this list to filter out, and it goes through the move path
     // (which confirms first, because it ends the session's pty).
@@ -92,7 +114,7 @@ export function SessionRow({ project, session }: { project: Project; session: Se
       let idx = project.sessions.findIndex((s) => s.id === t.id)
       if (idx < 0) return
       if (t.pos === 'after') idx += 1
-      requestMoveSession(d.projectId, project.id, d.id, idx)
+      requestMoveSession(d.projectId, project.id, d.id, idx, folderId)
       return
     }
 
@@ -101,7 +123,7 @@ export function SessionRow({ project, session }: { project: Project; session: Se
     if (idx < 0) return
     if (t.pos === 'after') idx += 1
     ids.splice(idx, 0, d.id)
-    void reorderSessions(project.id, ids)
+    void placeSession(project.id, d.id, folderId ?? null, ids)
   }
 
   const selected = session.id === selectedId
@@ -241,9 +263,19 @@ export function SessionRow({ project, session }: { project: Project; session: Se
       }}
     >
       <span
-        style={{ width: 16, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent }}
+        title={describeCreator(creatorName)}
+        style={{
+          position: 'relative',
+          width: 16,
+          flex: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: accent
+        }}
       >
         <TypeIcon type={session.type} />
+        {session.createdBy && <AiTag ground={bg === 'transparent' ? 'var(--panel)' : bg} />}
       </span>
 
       {editing ? (
@@ -367,7 +399,7 @@ export function SessionRow({ project, session }: { project: Project; session: Se
   )
 }
 
-function RowBtn({
+export function RowBtn({
   title,
   danger,
   onClick,

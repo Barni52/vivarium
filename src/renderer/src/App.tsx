@@ -11,6 +11,7 @@ import { DiffBasePopover } from './components/dialogs/DiffBasePopover'
 import { ConfirmKill } from './components/dialogs/ConfirmKill'
 import { ConfirmMove } from './components/dialogs/ConfirmMove'
 import { ConfirmDeleteProject } from './components/dialogs/ConfirmDeleteProject'
+import { ConfirmDeleteFolder } from './components/dialogs/ConfirmDeleteFolder'
 import { ConfirmQuit } from './components/dialogs/ConfirmQuit'
 import { ClaudeUpdate } from './components/dialogs/ClaudeUpdate'
 import { Volumes } from './components/dialogs/Volumes'
@@ -186,6 +187,7 @@ export function App(): React.ReactElement {
       {dialog === 'confirmKill' && <ConfirmKill />}
       {dialog === 'confirmMove' && <ConfirmMove />}
       {dialog === 'confirmDeleteProject' && <ConfirmDeleteProject />}
+      {dialog === 'confirmDeleteFolder' && <ConfirmDeleteFolder />}
       {dialog === 'confirmQuit' && <ConfirmQuit />}
       {dialog === 'claudeUpdate' && <ClaudeUpdate />}
       {dialog === 'volumes' && <Volumes />}

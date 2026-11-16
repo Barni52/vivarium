@@ -60,6 +60,21 @@ export const Folder = ({ size = 15, color = 'currentColor', style }: P): React.R
     style
   )
 
+// "New folder": the Folder outline with a plus inside it.
+export const FolderPlus = ({ size = 15, color = 'currentColor', style }: P): React.ReactElement =>
+  svg(
+    size,
+    <>
+      <path
+        d="M1.6 4.4A1 1 0 012.6 3.4h3l1.2 1.4h6.6a1 1 0 011 1v6.2a1 1 0 01-1 1H2.6a1 1 0 01-1-1z"
+        stroke={color}
+        strokeWidth="1.1"
+      />
+      <path d="M8 6.8v4M6 8.8h4" stroke={color} strokeWidth="1.2" strokeLinecap="round" />
+    </>,
+    style
+  )
+
 // A host project: a desktop monitor on its stand — "this runs on the PC", where
 // a container project is a folder that gets mounted into the box. Chosen to
 // share nothing with its two neighbours: the Folder it replaces in the sidebar,
@@ -330,6 +345,16 @@ export const Check = ({ size = 12, color = 'currentColor', style }: P): React.Re
 
 export const Close = ({ size = 13, color = 'currentColor', style }: P): React.ReactElement =>
   svg(size, <path d="M4 4l8 8M12 4l-8 8" stroke={color} strokeWidth="1.4" strokeLinecap="round" />, style)
+
+// The "an agent made this" tag on a sidebar row: one filled four-point star,
+// drawn at ~9px on the corner of the row's glyph like an OS overlay badge.
+// The agent type's star without its second spark, which would be mush at 9px.
+export const AiSpark = ({ size = 9, color = 'currentColor', style }: P): React.ReactElement =>
+  svg(
+    size,
+    <path d="M8 1.2C8.5 5.4 10.6 7.5 14.8 8 10.6 8.5 8.5 10.6 8 14.8 7.5 10.6 5.4 8.5 1.2 8 5.4 7.5 7.5 5.4 8 1.2Z" fill={color} />,
+    style
+  )
 
 export const Trash = ({ size = 15, color = 'currentColor', style }: P): React.ReactElement =>
   svg(
