@@ -268,11 +268,12 @@ function ClaudeChip(): React.ReactElement | null {
   const status = useStore((s) => s.claude)
   const checking = useStore((s) => s.claudeChecking)
   const openClaudeUpdate = useStore((s) => s.openClaudeUpdate)
-  const names = useStore((s) => {
-    const out: Record<string, string> = {}
-    for (const p of s.config.projects) out[p.id] = p.name
-    return out
-  })
+  // The list itself, and the names built from it here: a selector building the
+  // map would return a new object on every store change and re-render the chip
+  // for each streamed frame of any chat.
+  const projects = useStore((s) => s.config.projects)
+  const names: Record<string, string> = {}
+  for (const p of projects) names[p.id] = p.name
   const [hover, setHover] = React.useState(false)
 
   const chip = chipSummary(status, names)

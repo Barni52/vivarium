@@ -87,7 +87,6 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
   // aggregate: any child agent actually running (same collapsed-only rule as
   // attention)
   const hasWorking = useStore((s) => isAnyWorking(s, project.sessions))
-  const projectIds = useStore((s) => s.config.projects.map((p) => p.id))
   // No kind check: this row is the drop target both for a project being reordered
   // ('before'/'after') and for a session being dropped into it ('into'), and
   // dropTarget.id only ever holds a project id in those two cases.
@@ -193,7 +192,10 @@ export function ProjectRow({ project }: { project: Project }): React.ReactElemen
     const d = st.drag
     const t = st.dropTarget
     if (!d || d.kind !== 'project' || !t) return
-    const ids = projectIds.filter((id) => id !== d.id)
+    // Read at the drop, never through a selector: a selector returning this
+    // array is a new value on every store change, and it re-rendered every
+    // project and session row for each streamed frame of any chat.
+    const ids = st.config.projects.map((p) => p.id).filter((id) => id !== d.id)
     let idx = ids.indexOf(t.id)
     if (idx < 0) return
     if (t.pos === 'after') idx += 1

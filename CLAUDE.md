@@ -732,14 +732,18 @@ the reasoning.
   **Corollary, binding the pinned bands and everything in the
   log: a hover may not change a height.** The question card's preview pane reserves the tallest
   option's space with `visibility`; do not compute it against font metrics.
-- **A chat costs only what is on screen, in three layers.** A hidden chat is
+- **A chat costs only what is on screen, in four layers.** A hidden chat is
   `content-visibility: hidden`: `visibility` alone kept every hidden log laid out, so each paid for
   every resize step. A chat never yet shown draws no rows (`seen`/`drawn` in `ChatView`), because
-  rendering 300 rows per hidden chat was the freeze after launch. And an off-screen row is
-  `content-visibility: auto` (`.vchat-row`), which is **not** virtualisation: rows stay in the DOM, so
-  expanded cards, find, selection and copy all still work. Terminals get none of this, since they
-  have to keep measuring to fit. Measured on six large transcripts: 22 000 nodes to 1 900, a resize
-  step from ~280ms to ~10ms.
+  rendering 300 rows per hidden chat was the freeze after launch. A hidden chat does not follow its
+  own stream either (`useChatState`): its view holds the state it last read until it is shown, or
+  every frame of every chat working for an orchestrator re-rendered a view nobody was looking at.
+  Only `open`, `opening`, `reason` and `readOnly` reach a hidden view, so **an effect in `ChatView`
+  that must run while hidden may depend on nothing else in the chat's state**. And an off-screen
+  row is `content-visibility: auto` (`.vchat-row`), which is **not** virtualisation: rows stay in
+  the DOM, so expanded cards, find, selection and copy all still work. Terminals get none of this,
+  since they have to keep measuring to fit. Measured on six large transcripts: 22 000 nodes to
+  1 900, a resize step from ~280ms to ~10ms.
 - **Off-screen heights are estimates, so anything that aims at a position calls `measureRows`
   first** (the outline, find, the scroll rail). It holds rows drawn until `scrollend`, with
   `contain: layout style paint` kept on: `auto` implies layout containment, and plain `visible`
@@ -753,6 +757,11 @@ the reasoning.
   the log, markdown parse included. So nothing that changes while a turn runs may ride in
   `handlers`: the subagent buffer did, and every frame of six parallel agents re-rendered the
   whole log. A task row gets its sub-log as its own `sub` prop.
+- **A store selector returns a primitive or something the store already holds, never an array or
+  object built in the selector.** A built one is a new value on every store change, and a working
+  chat changes the store on every streamed frame: `ProjectRow` had one and the whole sidebar
+  re-rendered per frame of any chat. Build it in render, or read `useStore.getState()` in the
+  handler that needs it.
 - **The turn clock draws at the bottom of the log while running** and stays in its place in time
   once frozen — which takes agreement in three places (`settleTurn`, `freezeTurnClock`, the
   store's `applyEntries`).

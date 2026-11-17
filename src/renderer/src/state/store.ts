@@ -926,7 +926,17 @@ export const useStore = create<AppState>((set, get) => ({
     const states = await window.vivarium.containerStates()
     const map: Record<string, ContainerState> = {}
     for (const s of states) map[s.projectId] = s
-    set({ states: map })
+    // Polled every 3s and almost always the same answer. TerminalHost reads the
+    // whole map, so a fresh object each time re-rendered every mounted chat and
+    // terminal view on every poll.
+    const cur = get().states
+    const same =
+      states.length === Object.keys(cur).length &&
+      states.every((s) => {
+        const was = cur[s.projectId]
+        return !!was && was.running === s.running && was.exists === s.exists
+      })
+    if (!same) set({ states: map })
   },
 
   refreshBranches: async () => {

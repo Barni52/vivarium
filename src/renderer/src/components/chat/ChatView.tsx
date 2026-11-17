@@ -15,7 +15,12 @@ import type {
 } from '@shared/types'
 import { DEFAULT_EFFORT, EFFORT_LEVELS, modelName, modelOptionLabel } from '@shared/models'
 import { isHostProject } from '@shared/projects'
-import { AGENT_PANEL_MIN, useStore, type OpenQuestion } from '../../state/store'
+import {
+  AGENT_PANEL_MIN,
+  useStore,
+  type ChatSessionState,
+  type OpenQuestion
+} from '../../state/store'
 import { outputFileFrom } from '../../outputPaths'
 import { CHAT, CHAT_EDGE as EDGE, CHAT_TEXT as TYPE, MONO, ctxColor } from '../../theme'
 import { formatElapsed } from '../Elapsed'
@@ -109,6 +114,46 @@ const COMPOSER_MIN_H = 24
 const NO_ROWS: ChatEntry[] = []
 
 /**
+ * A chat's state, held still while its view is hidden.
+ *
+ * Every chat stays mounted, and one that is working replaces its state on every
+ * streamed frame. Read live, each of those frames re-rendered a view nobody was
+ * looking at, row list and markdown included, and a few chats working at once
+ * for an orchestrator took the main thread from the one on screen. So a hidden
+ * view keeps the state it last read and is handed the live one the moment it is
+ * shown.
+ *
+ * `open`, `opening`, `reason` and `readOnly` still come through while hidden:
+ * the open retry and the held-elsewhere reopen in `ChatView` run for hidden
+ * chats too and are driven by those four. The store is not held, only this
+ * view's reading of it, so the sidebar's counts and flags stay live.
+ *
+ * The ref is written inside the selector rather than during render: two store
+ * changes can land before React renders once, and the second has to be compared
+ * with what the first returned, not with what is on screen.
+ */
+function useChatState(sessionId: string, visible: boolean): ChatSessionState | undefined {
+  const held = React.useRef<ChatSessionState | undefined>(undefined)
+  return useStore((s) => {
+    const now = s.chats[sessionId]
+    const was = held.current
+    if (
+      !visible &&
+      was &&
+      now &&
+      was.open === now.open &&
+      was.opening === now.opening &&
+      was.reason === now.reason &&
+      was.readOnly === now.readOnly
+    ) {
+      return was
+    }
+    held.current = now
+    return now
+  })
+}
+
+/**
  * Whether a wheel up over `target` is taken by a scroller inside the log rather
  * than by the log: something between the two that scrolls vertically and is not
  * already at its top.
@@ -161,7 +206,7 @@ export function ChatView({
   session: Session
   visible: boolean
 }): React.ReactElement {
-  const chat = useStore((s) => s.chats[session.id])
+  const chat = useChatState(session.id, visible)
   // A host project's chat runs on Windows with no container, so it can always be
   // opened — it comes up at launch, as a host agent or shell does (TerminalHost).
   const host = isHostProject(project)
@@ -605,6 +650,19 @@ export function ChatView({
   const seen = React.useRef(visible)
   if (visible) seen.current = true
   const drawn = seen.current ? rows : NO_ROWS
+
+  /**
+   * The render that brings this chat back on screen. Everything written while
+   * it was hidden arrives in that one render (see `useChatState`), and the row
+   * still being written would otherwise type all of it out at the reveal's
+   * rate. Drawn once as not streaming, the row paints whole and its reveal
+   * carries on from there (see `ClaudeText`).
+   */
+  const wasVisible = React.useRef(visible)
+  const returning = visible && !wasVisible.current
+  React.useEffect(() => {
+    wasVisible.current = visible
+  }, [visible])
   React.useLayoutEffect(() => {
     const el = logRef.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
@@ -1581,7 +1639,7 @@ export function ChatView({
                 <LogRow
                   entry={e}
                   handlers={handlers}
-                  streaming={e.id === streamingId}
+                  streaming={!returning && e.id === streamingId}
                   groupIndex={agentGroups.get(e.id)?.index}
                   groupSize={agentGroups.get(e.id)?.size}
                   sub={e.kind === 'task' ? chat?.subagents[e.toolUseId] : undefined}
