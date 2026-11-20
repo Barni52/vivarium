@@ -20,9 +20,11 @@ const durationStyle: React.CSSProperties = {
 
 export function SessionRow({ project, session }: { project: Project; session: Session }): React.ReactElement {
   const [hover, setHover] = React.useState(false)
-  const selectedId = useStore((s) => s.selectedSessionId)
-  const editingId = useStore((s) => s.editingSessionId)
-  const editDraft = useStore((s) => s.editDraft)
+  // About this row only, never the ids themselves: read as ids, every row in
+  // the sidebar re-rendered on each switch of session and each key of a rename.
+  const selected = useStore((s) => s.selectedSessionId === session.id)
+  const editing = useStore((s) => s.editingSessionId === session.id)
+  const editDraft = useStore((s) => (s.editingSessionId === session.id ? s.editDraft : ''))
   const live = useStore((s) => !!s.live[session.id])
   const activity = useStore((s) => s.activity[session.id])
   const attention = useStore((s) => s.notifications[session.id])
@@ -131,8 +133,6 @@ export function SessionRow({ project, session }: { project: Project; session: Se
     void placeSession(project.id, d.id, folderId ?? null, ids)
   }
 
-  const selected = session.id === selectedId
-  const editing = session.id === editingId
   // Both agent kinds: a chat is an agent session, spoken to rather than typed at,
   // and it reports the same working/waiting/idle triple from the same channel.
   const isAgent = session.type === 'agent' || session.type === 'chat'

@@ -113,30 +113,42 @@ const COMPOSER_MIN_H = 24
 /** One stable empty list, so an undrawn log gives React nothing new to compare. */
 const NO_ROWS: ChatEntry[] = []
 
+/** How often a hidden chat's view takes in what its chat has done since. */
+const HIDDEN_REFRESH_MS = 1000
+
 /**
- * A chat's state, held still while its view is hidden.
+ * A chat's state, read at most once a second while its view is hidden.
  *
  * Every chat stays mounted, and one that is working replaces its state on every
  * streamed frame. Read live, each of those frames re-rendered a view nobody was
  * looking at, row list and markdown included, and a few chats working at once
  * for an orchestrator took the main thread from the one on screen. So a hidden
- * view keeps the state it last read and is handed the live one the moment it is
- * shown.
+ * view keeps the state it last read, and is handed the live one the moment it
+ * is shown.
  *
- * `open`, `opening`, `reason` and `readOnly` still come through while hidden:
+ * Once a second rather than never: held until shown, everything a chat did
+ * while you were elsewhere was rendered in the one frame you came back on, and
+ * switching to a chat that had been busy stalled for as long as that took. No
+ * timer does this. The selector runs on every store change, the chat's own
+ * frames included, so the first one after the second is up goes through, and
+ * a change that never gets a later one to carry it is carried by being shown.
+ *
+ * `open`, `opening`, `reason` and `readOnly` come through at once while hidden:
  * the open retry and the held-elsewhere reopen in `ChatView` run for hidden
  * chats too and are driven by those four. The store is not held, only this
  * view's reading of it, so the sidebar's counts and flags stay live.
  *
- * The ref is written inside the selector rather than during render: two store
+ * The refs are written inside the selector rather than during render: two store
  * changes can land before React renders once, and the second has to be compared
  * with what the first returned, not with what is on screen.
  */
 function useChatState(sessionId: string, visible: boolean): ChatSessionState | undefined {
   const held = React.useRef<ChatSessionState | undefined>(undefined)
+  const heldAt = React.useRef(0)
   return useStore((s) => {
     const now = s.chats[sessionId]
     const was = held.current
+    const at = Date.now()
     if (
       !visible &&
       was &&
@@ -144,11 +156,13 @@ function useChatState(sessionId: string, visible: boolean): ChatSessionState | u
       was.open === now.open &&
       was.opening === now.opening &&
       was.reason === now.reason &&
-      was.readOnly === now.readOnly
+      was.readOnly === now.readOnly &&
+      at - heldAt.current < HIDDEN_REFRESH_MS
     ) {
       return was
     }
     held.current = now
+    heldAt.current = at
     return now
   })
 }
@@ -197,7 +211,14 @@ function measureRows(log: HTMLElement): void {
   measureEnds.set(log, end)
 }
 
-export function ChatView({
+/**
+ * Memoised because `TerminalHost` re-renders on every selection, and every chat
+ * ever opened is mounted under it. Unmemoised, switching sessions re-ran each of
+ * them, row list included, so a switch cost more with every chat that had been
+ * looked at. `project` and `session` are the config's own objects and `visible`
+ * is a boolean, so only the two views a switch is about re-render.
+ */
+export const ChatView = React.memo(function ChatView({
   project,
   session,
   visible
@@ -650,19 +671,6 @@ export function ChatView({
   const seen = React.useRef(visible)
   if (visible) seen.current = true
   const drawn = seen.current ? rows : NO_ROWS
-
-  /**
-   * The render that brings this chat back on screen. Everything written while
-   * it was hidden arrives in that one render (see `useChatState`), and the row
-   * still being written would otherwise type all of it out at the reveal's
-   * rate. Drawn once as not streaming, the row paints whole and its reveal
-   * carries on from there (see `ClaudeText`).
-   */
-  const wasVisible = React.useRef(visible)
-  const returning = visible && !wasVisible.current
-  React.useEffect(() => {
-    wasVisible.current = visible
-  }, [visible])
   React.useLayoutEffect(() => {
     const el = logRef.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
@@ -1639,7 +1647,12 @@ export function ChatView({
                 <LogRow
                   entry={e}
                   handlers={handlers}
-                  streaming={!returning && e.id === streamingId}
+                  // Only on screen. A hidden chat takes its text in a second
+                  // at a time (see `useChatState`), and revealing each of those
+                  // steps would re-parse the row thirty times a second for
+                  // nobody; not streaming, it paints each step whole, and the
+                  // reveal picks up from there when the chat is shown.
+                  streaming={visible && e.id === streamingId}
                   groupIndex={agentGroups.get(e.id)?.index}
                   groupSize={agentGroups.get(e.id)?.size}
                   sub={e.kind === 'task' ? chat?.subagents[e.toolUseId] : undefined}
@@ -2044,7 +2057,7 @@ export function ChatView({
       )}
     </div>
   )
-}
+})
 
 /**
  * `41200` → `41.2k`, `126000` → `126k`. One decimal below 100k, none above: the

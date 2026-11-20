@@ -736,11 +736,14 @@ the reasoning.
   `content-visibility: hidden`: `visibility` alone kept every hidden log laid out, so each paid for
   every resize step. A chat never yet shown draws no rows (`seen`/`drawn` in `ChatView`), because
   rendering 300 rows per hidden chat was the freeze after launch. A hidden chat does not follow its
-  own stream either (`useChatState`): its view holds the state it last read until it is shown, or
-  every frame of every chat working for an orchestrator re-rendered a view nobody was looking at.
-  Only `open`, `opening`, `reason` and `readOnly` reach a hidden view, so **an effect in `ChatView`
-  that must run while hidden may depend on nothing else in the chat's state**. And an off-screen
-  row is `content-visibility: auto` (`.vchat-row`), which is **not** virtualisation: rows stay in
+  own stream either (`useChatState`): its view reads its chat once a second, or every frame of
+  every chat working in the background re-rendered a view nobody was looking at. Once a second and
+  not never, because held until shown, a busy chat's whole backlog rendered in the frame you
+  switched to it on. Only `open`, `opening`, `reason` and `readOnly` reach a hidden view at once,
+  so **an effect in `ChatView` that must run while hidden may depend on nothing else in the chat's
+  state**. `ChatView` is memoised for the same reason: `TerminalHost` re-renders on every
+  selection, and that re-ran every mounted chat. And an off-screen row is
+  `content-visibility: auto` (`.vchat-row`), which is **not** virtualisation: rows stay in
   the DOM, so expanded cards, find, selection and copy all still work. Terminals get none of this,
   since they have to keep measuring to fit. Measured on six large transcripts: 22 000 nodes to
   1 900, a resize step from ~280ms to ~10ms.
